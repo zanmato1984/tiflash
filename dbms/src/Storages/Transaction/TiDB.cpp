@@ -765,6 +765,8 @@ try
         is_invisible = json->getValue<bool>("is_invisible");
     if (json->has("is_global"))
         is_global = json->getValue<bool>("is_global");
+    if (json->has("is_redistributed"))
+        is_redistributed = json->getValue<bool>("is_redistributed");
 }
 catch (const Poco::Exception & e)
 {
@@ -885,7 +887,7 @@ try
         {
             auto index_info_json = index_arr->getObject(i);
             IndexInfo index_info(index_info_json);
-            if (index_info.is_primary)
+            if (index_info.is_primary || index_info.is_redistributed)
                 index_infos.emplace_back(index_info);
         }
     }
@@ -894,8 +896,6 @@ try
     pk_is_handle = obj->getValue<bool>("pk_is_handle");
     if (obj->has("is_common_handle"))
         is_common_handle = obj->getValue<bool>("is_common_handle");
-    if (!is_common_handle)
-        index_infos.clear();
     comment = obj->getValue<String>("comment");
     if (obj->has("update_timestamp"))
         update_timestamp = obj->getValue<Timestamp>("update_timestamp");

@@ -341,6 +341,7 @@ struct IndexInfo
     bool is_primary;
     bool is_invisible;
     bool is_global;
+    bool is_redistributed;
 };
 
 struct TableInfo
@@ -411,9 +412,25 @@ struct TableInfo
     /// due to we will not update IndexInfo except RENAME DDL action,
     /// but DDL like add column / drop column may change the offset of columns
     /// Thus, please be very careful when you must have to use offset information !!!!!
-    const IndexInfo & getPrimaryIndexInfo() const { return index_infos[0]; }
+    const IndexInfo & getPrimaryIndexInfo() const
+    {
+        for (const auto & index_info : index_infos)
+        {
+            if (index_info.is_primary)
+                return index_info;
+        }
+        throw DB::Exception("Should not reach here");
+    }
 
-    IndexInfo & getPrimaryIndexInfo() { return index_infos[0]; }
+    IndexInfo & getPrimaryIndexInfo()
+    {
+        for (auto & index_info : index_infos)
+        {
+            if (index_info.is_primary)
+                return index_info;
+        }
+        throw DB::Exception("Should not reach here");
+    }
 };
 
 using DBInfoPtr = std::shared_ptr<DBInfo>;

@@ -1138,6 +1138,18 @@ void SchemaBuilder<Getter, NameMapper>::applyCreateLogicalTable(const TiDB::DBIn
     // Create logical table at last, only logical table creation will be treated as "complete".
     // Intermediate failure will hide the logical table creation so that schema syncing when restart will re-create all (despite some physical tables may have created).
     applyCreatePhysicalTable(db_info, table_info);
+    for (auto & index_info : table_info->index_infos)
+    {
+        if (index_info.is_redistributed)
+        {
+            auto new_table = std::make_shared<TableInfo>();
+            *new_table = *table_info;
+            new_table->id = table_info->id << 32 | index_info.id;
+            new_table->index_infos.clear();
+            new_table->name = name_mapper.mapPartitionName(*new_table);
+            applyCreatePhysicalTable(db_info, new_table);
+        }
+    }
 }
 
 template <typename Getter, typename NameMapper>
