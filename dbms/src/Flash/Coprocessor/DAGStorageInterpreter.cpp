@@ -256,6 +256,8 @@ void DAGStorageInterpreter::executeImpl(DAGPipeline & pipeline)
     auto null_stream_if_empty = std::make_shared<NullBlockInputStream>(storage_for_logical_table->getSampleBlockForColumns(required_columns));
 
     auto remote_requests = buildRemoteRequests();
+    if (!table_scan.allowRemoteRead() && !remote_requests.empty())
+        throw Exception("Index scan does not support remote read");
 
     // A failpoint to test pause before alter lock released
     FAIL_POINT_PAUSE(FailPoints::pause_with_alter_locks_acquired);

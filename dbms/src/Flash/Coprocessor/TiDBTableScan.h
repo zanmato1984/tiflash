@@ -66,6 +66,11 @@ public:
         return tables_regions_info;
     }
 
+    bool allowRemoteRead() const
+    {
+        return tables_regions_info.allowRemoteRead();
+    }
+
 private:
     const tipb::Executor * table_scan;
     String executor_id;

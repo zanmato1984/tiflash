@@ -1203,6 +1203,13 @@ void SchemaBuilder<Getter, NameMapper>::applyDropTable(const DBInfoPtr & db_info
     // Drop logical table at last, only logical table drop will be treated as "complete".
     // Intermediate failure will hide the logical table drop so that schema syncing when restart will re-drop all (despite some physical tables may have dropped).
     applyDropPhysicalTable(name_mapper.mapDatabaseName(*db_info), table_info.id);
+    for (auto & index_info : table_info.index_infos)
+    {
+        if (index_info.is_redist_idx)
+        {
+            applyDropPhysicalTable(name_mapper.mapDatabaseName(*db_info), index_info.id << 32 | table_info.id);
+        }
+    }
 }
 
 template <typename Getter, typename NameMapper>

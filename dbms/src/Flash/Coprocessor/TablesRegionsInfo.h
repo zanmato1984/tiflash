@@ -43,7 +43,8 @@ public:
     static TablesRegionsInfo create(
         const google::protobuf::RepeatedPtrField<coprocessor::RegionInfo> & regions,
         const google::protobuf::RepeatedPtrField<coprocessor::TableRegions> & table_regions,
-        const TMTContext & tmt_context);
+        const TMTContext & tmt_context,
+        bool all_remote_read = true);
     TablesRegionsInfo()
         : is_single_table(false)
     {}
@@ -78,14 +79,30 @@ public:
             ret += entry.second.regionCount();
         return ret;
     }
+    UInt64 remoteRegionCount() const
+    {
+        UInt64 ret = 0;
+        for (const auto & entry : table_regions_info_map)
+            ret += entry.second.remote_regions.size();
+        return ret;
+    }
     UInt64 tableCount() const
     {
         return table_regions_info_map.size();
+    }
+    void setAllowRemoteRead(bool allow_remote_read_)
+    {
+        allow_remote_read = allow_remote_read_;
+    }
+    bool allowRemoteRead() const
+    {
+        return allow_remote_read;
     }
 
 private:
     bool is_single_table;
     std::unordered_map<TableID, SingleTableRegions> table_regions_info_map;
+    bool allow_remote_read = true;
 };
 
 extern const String dummy_executor_id;

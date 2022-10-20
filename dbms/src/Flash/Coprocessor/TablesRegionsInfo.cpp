@@ -91,10 +91,12 @@ static void insertRegionInfoToTablesRegionInfo(const google::protobuf::RepeatedP
 TablesRegionsInfo TablesRegionsInfo::create(
     const google::protobuf::RepeatedPtrField<coprocessor::RegionInfo> & regions,
     const google::protobuf::RepeatedPtrField<coprocessor::TableRegions> & table_regions,
-    const TMTContext & tmt_context)
+    const TMTContext & tmt_context,
+    bool allow_remote_read)
 {
     assert(regions.empty() || table_regions.empty());
     TablesRegionsInfo tables_regions_info(!regions.empty());
+    tables_regions_info.setAllowRemoteRead(allow_remote_read);
     std::unordered_set<RegionID> local_region_id_set;
     if (!regions.empty())
         insertRegionInfoToTablesRegionInfo(regions, InvalidTableID, tables_regions_info, local_region_id_set, tmt_context);
@@ -107,6 +109,8 @@ TablesRegionsInfo TablesRegionsInfo::create(
         }
         assert(static_cast<UInt64>(table_regions.size()) == tables_regions_info.tableCount());
     }
+    if (!allow_remote_read && tables_regions_info.remoteRegionCount() > 0)
+        throw Exception("Index scan does not support remote read");
     return tables_regions_info;
 }
 } // namespace DB

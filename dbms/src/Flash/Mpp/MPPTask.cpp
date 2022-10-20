@@ -263,7 +263,8 @@ void MPPTask::prepare(const mpp::DispatchTaskRequest & task_request)
                 throw Exception("Duplicated executor id in mpp request");
             tables_regions_info_map[executor_regions_info.executor_id()] = TablesRegionsInfo::create(executor_regions_info.regions(),
                                                                                                      executor_regions_info.table_regions(),
-                                                                                                     tmt_context);
+                                                                                                     tmt_context,
+                                                                                                     false);
         }
     }
     else

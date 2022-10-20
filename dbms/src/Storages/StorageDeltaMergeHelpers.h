@@ -41,19 +41,22 @@ inline DM::RowKeyRanges getQueryRanges(
 {
     // todo check table id in DecodedTiKVKey???
     DM::RowKeyRanges ranges;
-    for (const auto & region_info : regions)
+    if ((table_id >> 32) == 0)
     {
-        if (!region_info.required_handle_ranges.empty())
+        for (const auto & region_info : regions)
         {
-            for (const auto & handle_range : region_info.required_handle_ranges)
+            if (!region_info.required_handle_ranges.empty())
+            {
+                for (const auto & handle_range : region_info.required_handle_ranges)
+                    ranges.push_back(
+                        DM::RowKeyRange::fromRegionRange(handle_range, table_id, table_id, is_common_handle, rowkey_column_size));
+            }
+            else
+            {
+                /// only used for test cases
                 ranges.push_back(
-                    DM::RowKeyRange::fromRegionRange(handle_range, table_id, table_id, is_common_handle, rowkey_column_size));
-        }
-        else
-        {
-            /// only used for test cases
-            ranges.push_back(
-                DM::RowKeyRange::fromRegionRange(region_info.range_in_table, table_id, table_id, is_common_handle, rowkey_column_size));
+                    DM::RowKeyRange::fromRegionRange(region_info.range_in_table, table_id, table_id, is_common_handle, rowkey_column_size));
+            }
         }
     }
     if (ranges.empty())
