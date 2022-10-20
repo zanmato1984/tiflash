@@ -1144,7 +1144,7 @@ void SchemaBuilder<Getter, NameMapper>::applyCreateLogicalTable(const TiDB::DBIn
         {
             auto new_table = std::make_shared<TableInfo>();
             *new_table = *table_info;
-            new_table->id = table_info->id << 32 | index_info.id;
+            new_table->id = index_info.id << 32 | table_info->id;
             new_table->index_infos.clear();
             new_table->name = name_mapper.mapPartitionName(*new_table);
             applyCreatePhysicalTable(db_info, new_table);
