@@ -119,8 +119,8 @@ void KVStore::checkAndApplySnapshot(const RegionPtrWrap & new_region, TMTContext
     }
 
     {
-        auto table_id = new_region->getMappedTableID();
-        if (auto storage = tmt.getStorages().get(table_id); storage)
+        auto mapped_table_id = new_region->getMappedTableID();
+        if (auto storage = tmt.getStorages().get(mapped_table_id.getCanonicalTableID()); storage)
         {
             switch (storage->engineType())
             {
@@ -146,7 +146,7 @@ void KVStore::onSnapshot(const RegionPtrWrap & new_region_wrap, RegionPtr old_re
 
     {
         auto table_id = new_region_wrap->getMappedTableID();
-        if (auto storage = tmt.getStorages().get(table_id); storage && storage->engineType() == TiDB::StorageEngine::DT)
+        if (auto storage = tmt.getStorages().get(table_id.getCanonicalTableID()); storage && storage->engineType() == TiDB::StorageEngine::DT)
         {
             try
             {
@@ -156,14 +156,14 @@ void KVStore::onSnapshot(const RegionPtrWrap & new_region_wrap, RegionPtr old_re
                 auto dm_storage = std::dynamic_pointer_cast<StorageDeltaMerge>(storage);
                 auto new_key_range = DM::RowKeyRange::fromRegionRange(
                     new_region_wrap->getRange(),
-                    table_id,
+                    table_id.getCanonicalTableID(),
                     storage->isCommonHandle(),
                     storage->getRowKeyColumnSize());
                 if (old_region)
                 {
                     auto old_key_range = DM::RowKeyRange::fromRegionRange(
                         old_region->getRange(),
-                        table_id,
+                        table_id.getCanonicalTableID(),
                         storage->isCommonHandle(),
                         storage->getRowKeyColumnSize());
                     if (old_key_range != new_key_range)
@@ -568,8 +568,8 @@ RegionPtr KVStore::handleIngestSSTByDTFile(const RegionPtr & region, const SSTVi
     // ignore the step of calling `ingestFiles`
     if (!external_files.empty())
     {
-        auto table_id = region->getMappedTableID();
-        if (auto storage = tmt.getStorages().get(table_id); storage)
+        auto mapped_table_id = region->getMappedTableID();
+        if (auto storage = tmt.getStorages().get(mapped_table_id.getCanonicalTableID()); storage)
         {
             // Ingest DTFiles into DeltaMerge storage
             auto & context = tmt.getContext();
@@ -579,7 +579,7 @@ RegionPtr KVStore::handleIngestSSTByDTFile(const RegionPtr & region, const SSTVi
                 auto table_lock = storage->lockForShare(getThreadName());
                 auto key_range = DM::RowKeyRange::fromRegionRange(
                     region->getRange(),
-                    table_id,
+                    mapped_table_id.getCanonicalTableID(),
                     storage->isCommonHandle(),
                     storage->getRowKeyColumnSize());
                 // Call `ingestFiles` to ingest external DTFiles.

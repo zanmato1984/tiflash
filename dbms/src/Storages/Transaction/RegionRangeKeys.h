@@ -16,6 +16,7 @@
 
 #include <Storages/Transaction/TiKVHandle.h>
 #include <Storages/Transaction/TiKVKeyValue.h>
+#include <Storages/Transaction/TiDB.h>
 
 namespace DB
 {
@@ -55,12 +56,12 @@ public:
     static RegionRange makeComparableKeys(TiKVKey && start_key, TiKVKey && end_key);
     const std::pair<DecodedTiKVKeyPtr, DecodedTiKVKeyPtr> & rawKeys() const;
     explicit RegionRangeKeys(TiKVKey && start_key, TiKVKey && end_key);
-    TableID getMappedTableID() const;
+    TiDB::MappedTableID getMappedTableID() const;
 
 private:
     RegionRange ori;
     std::pair<DecodedTiKVKeyPtr, DecodedTiKVKeyPtr> raw;
-    TableID mapped_table_id;
+    TiDB::MappedTableID mapped_table_id;
 };
 
 } // namespace DB

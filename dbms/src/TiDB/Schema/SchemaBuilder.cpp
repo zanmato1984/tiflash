@@ -1140,7 +1140,7 @@ void SchemaBuilder<Getter, NameMapper>::applyCreateLogicalTable(const TiDB::DBIn
     applyCreatePhysicalTable(db_info, table_info);
     for (auto & index_info : table_info->index_infos)
     {
-        if (index_info.is_redistributed)
+        if (index_info.is_redist_idx)
         {
             auto new_table = std::make_shared<TableInfo>();
             *new_table = *table_info;

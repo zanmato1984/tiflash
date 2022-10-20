@@ -189,7 +189,7 @@ public:
     metapb::Region getMetaRegion() const;
     raft_serverpb::MergeState getMergeState() const;
 
-    TableID getMappedTableID() const;
+    TiDB::MappedTableID getMappedTableID() const;
     EngineStoreApplyRes handleWriteRaftCmd(const WriteCmdsView & cmds, UInt64 index, UInt64 term, TMTContext & tmt);
     void finishIngestSSTByDTFile(RegionPtr && rhs, UInt64 index, UInt64 term);
 
@@ -227,7 +227,7 @@ private:
 
     Poco::Logger * log;
 
-    const TableID mapped_table_id;
+    const TiDB::MappedTableID mapped_table_id;
 
     std::atomic<UInt64> snapshot_event_flag{1};
     const TiFlashRaftProxyHelper * proxy_helper{nullptr};

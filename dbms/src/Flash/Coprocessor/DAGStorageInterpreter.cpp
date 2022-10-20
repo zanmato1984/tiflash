@@ -120,14 +120,14 @@ MakeRegionQueryInfos(
                 info.range_in_table = region_range->rawKeys();
                 for (const auto & p : r.key_ranges)
                 {
-                    TableID table_id_in_range = -1;
-                    if (!computeMappedTableID(*p.first, table_id_in_range) || table_id_in_range != physical_table_id)
+                    auto [ok, mapped_table_id] = computeMappedTableID(*p.first);
+                    if (!ok || mapped_table_id.getCanonicalTableID() != physical_table_id)
                     {
                         throw TiFlashException(
                             fmt::format(
                                 "Income key ranges is illegal for region: {}, table id in key range is {}, table id in region is {}",
                                 r.region_id,
-                                table_id_in_range,
+                                mapped_table_id.getCanonicalTableID(),
                                 physical_table_id),
                             Errors::Coprocessor::BadRequest);
                     }

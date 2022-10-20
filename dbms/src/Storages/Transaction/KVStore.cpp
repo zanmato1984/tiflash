@@ -131,14 +131,14 @@ void KVStore::traverseRegions(std::function<void(RegionID, const RegionPtr &)> &
 
 bool KVStore::tryFlushRegionCacheInStorage(TMTContext & tmt, const Region & region, Poco::Logger * log, bool try_until_succeed)
 {
-    auto table_id = region.getMappedTableID();
-    auto storage = tmt.getStorages().get(table_id);
+    auto mapped_table_id = region.getMappedTableID();
+    auto storage = tmt.getStorages().get(mapped_table_id.getCanonicalTableID());
     if (unlikely(storage == nullptr))
     {
         LOG_FMT_WARNING(log,
                         "tryFlushRegionCacheInStorage can not get table for region {} with table id {}, ignored",
                         region.toString(),
-                        table_id);
+                        mapped_table_id.getCanonicalTableID());
         return true;
     }
 
@@ -148,7 +148,7 @@ bool KVStore::tryFlushRegionCacheInStorage(TMTContext & tmt, const Region & regi
         auto storage_lock = storage->lockForShare(getThreadName());
         auto rowkey_range = DM::RowKeyRange::fromRegionRange(
             region.getRange(),
-            region.getRange()->getMappedTableID(),
+            region.getRange()->getMappedTableID().getCanonicalTableID(),
             storage->isCommonHandle(),
             storage->getRowKeyColumnSize());
         return storage->flushCache(tmt.getContext(), rowkey_range, try_until_succeed);

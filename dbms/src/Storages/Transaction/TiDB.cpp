@@ -24,6 +24,7 @@
 #include <Storages/MutableSupport.h>
 #include <Storages/Transaction/Collator.h>
 #include <Storages/Transaction/TiDB.h>
+#include <Storages/Transaction/TiKVRecordFormat.h>
 #include <TiDB/Schema/SchemaNameMapper.h>
 #include <common/logger_useful.h>
 
@@ -766,7 +767,7 @@ try
     if (json->has("is_global"))
         is_global = json->getValue<bool>("is_global");
     if (json->has("is_redistributed"))
-        is_redistributed = json->getValue<bool>("is_redistributed");
+        is_redist_idx = json->getValue<bool>("is_redistributed");
 }
 catch (const Poco::Exception & e)
 {
@@ -887,7 +888,7 @@ try
         {
             auto index_info_json = index_arr->getObject(i);
             IndexInfo index_info(index_info_json);
-            if (index_info.is_primary || index_info.is_redistributed)
+            if (index_info.is_primary || index_info.is_redist_idx)
                 index_infos.emplace_back(index_info);
         }
     }
@@ -1140,6 +1141,11 @@ ColumnInfo toTiDBColumnInfo(const tipb::ColumnInfo & tipb_column_info)
     for (int i = 0; i < tipb_column_info.elems_size(); ++i)
         tidb_column_info.elems.emplace_back(tipb_column_info.elems(i), i + 1);
     return tidb_column_info;
+}
+
+TableID MappedTableID::getCanonicalTableID() const
+{
+    return redist_idx_id << DB::RecordKVFormat::REDIST_IDX_ID_SHIFT | table_id;
 }
 
 } // namespace TiDB

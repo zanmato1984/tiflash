@@ -120,17 +120,17 @@ raft_serverpb::MergeState & RegionState::getMutMergeState()
     return *base.mutable_merge_state();
 }
 
-bool computeMappedTableID(const DecodedTiKVKey & key, TableID & table_id)
+std::tuple<bool, TiDB::MappedTableID> computeMappedTableID(const DecodedTiKVKey & key)
 {
     // t table_id _r
     if (key.size() >= (1 + 8 + 2) && key[0] == RecordKVFormat::TABLE_PREFIX
         && memcmp(key.data() + 9, RecordKVFormat::RECORD_PREFIX_SEP, 2) == 0)
     {
-        table_id = RecordKVFormat::getTableId(key);
-        return true;
+        auto mapped_table_id = RecordKVFormat::getTableId(key);
+        return std::make_tuple(true, mapped_table_id);
     }
 
-    return false;
+    return std::make_tuple(false, TiDB::MappedTableID{false, InvalidRedistIdxId, InvalidTableID});
 }
 
 RegionRangeKeys::RegionRangeKeys(TiKVKey && start_key, TiKVKey && end_key)
@@ -138,7 +138,9 @@ RegionRangeKeys::RegionRangeKeys(TiKVKey && start_key, TiKVKey && end_key)
     , raw(std::make_shared<DecodedTiKVKey>(ori.first.key.empty() ? DecodedTiKVKey() : RecordKVFormat::decodeTiKVKey(ori.first.key)),
           std::make_shared<DecodedTiKVKey>(ori.second.key.empty() ? DecodedTiKVKey() : RecordKVFormat::decodeTiKVKey(ori.second.key)))
 {
-    if (!computeMappedTableID(*raw.first, mapped_table_id) || ori.first.compare(ori.second) >= 0)
+    bool ok = false;
+    std::tie(ok, mapped_table_id) = computeMappedTableID(*raw.first);
+    if (!ok || ori.first.compare(ori.second) >= 0)
     {
         throw Exception("Illegal region range, should not happen, start key: " + ori.first.key.toDebugString()
                             + ", end key: " + ori.second.key.toDebugString(),
@@ -146,7 +148,7 @@ RegionRangeKeys::RegionRangeKeys(TiKVKey && start_key, TiKVKey && end_key)
     }
 }
 
-TableID RegionRangeKeys::getMappedTableID() const
+TiDB::MappedTableID RegionRangeKeys::getMappedTableID() const
 {
     return mapped_table_id;
 }

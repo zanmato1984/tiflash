@@ -47,6 +47,7 @@ namespace TiDB
 {
 using DB::ColumnID;
 using DB::DatabaseID;
+using DB::RedistIdxID;
 using DB::String;
 using DB::TableID;
 using DB::Timestamp;
@@ -341,7 +342,7 @@ struct IndexInfo
     bool is_primary;
     bool is_invisible;
     bool is_global;
-    bool is_redistributed;
+    bool is_redist_idx;
 };
 
 struct TableInfo
@@ -440,5 +441,14 @@ String genJsonNull();
 tipb::FieldType columnInfoToFieldType(const ColumnInfo & ci);
 ColumnInfo fieldTypeToColumnInfo(const tipb::FieldType & field_type);
 ColumnInfo toTiDBColumnInfo(const tipb::ColumnInfo & tipb_column_info);
+
+struct MappedTableID {
+    bool is_redist_idx = false;
+    RedistIdxID redist_idx_id = DB::InvalidRedistIdxId;
+    TableID table_id = DB::InvalidTableID;
+
+    TableID getOrigTableID() const { return table_id; }
+    TableID getCanonicalTableID() const;
+};
 
 } // namespace TiDB

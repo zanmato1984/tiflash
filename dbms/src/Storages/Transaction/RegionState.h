@@ -64,6 +64,6 @@ private:
 };
 
 HandleRange<HandleID> getHandleRangeByTable(const std::pair<DecodedTiKVKeyPtr, DecodedTiKVKeyPtr> & rawKeys, TableID table_id);
-bool computeMappedTableID(const DecodedTiKVKey & key, TableID & table_id);
+std::tuple<bool, TiDB::MappedTableID> computeMappedTableID(const DecodedTiKVKey & key);
 
 } // namespace DB

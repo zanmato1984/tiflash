@@ -720,7 +720,7 @@ struct RowKeyRange
                                        bool is_common_handle,
                                        size_t rowkey_column_size)
     {
-        return fromRegionRange(region_range->rawKeys(), region_range->getMappedTableID(), table_id, is_common_handle, rowkey_column_size);
+        return fromRegionRange(region_range->rawKeys(), region_range->getMappedTableID().getCanonicalTableID(), table_id, is_common_handle, rowkey_column_size);
     }
     static RowKeyRange fromRegionRange(const std::pair<DecodedTiKVKeyPtr, DecodedTiKVKeyPtr> & raw_keys,
                                        const TableID table_id_in_raw_key,

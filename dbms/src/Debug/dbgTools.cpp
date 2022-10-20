@@ -324,7 +324,7 @@ void insert( //
 
     // Using the region meta's table ID rather than table_info's, as this could be a partition table so that the table ID should be partition ID.
     const auto range = region->getRange();
-    TableID table_id = RecordKVFormat::getTableId(*range->rawKeys().first);
+    auto mapped_table_id = RecordKVFormat::getTableId(*range->rawKeys().first);
 
     TiKVKey key;
     if (table_info.is_common_handle)
@@ -348,7 +348,7 @@ void insert( //
         key = RecordKVFormat::genKey(table_info, keys);
     }
     else
-        key = RecordKVFormat::genKey(table_id, handle_id);
+        key = RecordKVFormat::genKey(mapped_table_id.getCanonicalTableID(), handle_id);
     WriteBufferFromOwnString ss;
     encodeRow(table_info, fields, ss);
     TiKVValue value(ss.releaseStr());

@@ -56,6 +56,10 @@ enum UselessCFModifyFlag : UInt8
 };
 
 static const char TABLE_PREFIX = 't';
+static const uint64_t REDIST_IDX_FLAG_MASK= 0xFF00000000000000ull;
+static const uint64_t REDIST_IDX_ID_MASK= 0x0000FFFF00000000ull;
+static const uint64_t REDIST_IDX_ID_SHIFT= 32;
+static const uint64_t TABLE_ID_MASK= 0x00000000FFFFFFFFull;
 static const char * RECORD_PREFIX_SEP = "_r";
 static const char SHORT_VALUE_PREFIX = 'v';
 static const char MIN_COMMIT_TS_PREFIX = 'c';
@@ -212,9 +216,10 @@ inline Timestamp getTs(const TiKVKey & key)
     return decodeUInt64Desc(read<UInt64>(key.data() + key.dataSize() - 8));
 }
 
-inline TableID getTableId(const DecodedTiKVKey & key)
+inline TiDB::MappedTableID getTableId(const DecodedTiKVKey & key)
 {
-    return decodeInt64(read<UInt64>(key.data() + 1));
+    auto raw_table_id = decodeUInt64(read<UInt64>(key.data() + 1));
+    return TiDB::MappedTableID{static_cast<bool>(raw_table_id & REDIST_IDX_FLAG_MASK), static_cast<RedistIdxID>((raw_table_id & REDIST_IDX_ID_MASK) >> REDIST_IDX_ID_SHIFT), static_cast<TableID>(raw_table_id & TABLE_ID_MASK)};
 }
 
 inline HandleID getHandle(const DecodedTiKVKey & key)
@@ -229,7 +234,7 @@ inline RawTiDBPK getRawTiDBPK(const DecodedTiKVKey & key)
 
 inline TableID getTableId(const TiKVKey & key)
 {
-    return getTableId(decodeTiKVKey(key));
+    return getTableId(decodeTiKVKey(key)).table_id;
 }
 
 inline HandleID getHandle(const TiKVKey & key)

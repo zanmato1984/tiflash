@@ -21,8 +21,14 @@
 
 namespace DB
 {
+using RedistIdxID = Int64;
 using TableID = Int64;
 using TableIDSet = std::unordered_set<TableID>;
+
+enum : RedistIdxID
+{
+    InvalidRedistIdxId = -1,
+};
 
 enum : TableID
 {

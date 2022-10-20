@@ -61,7 +61,7 @@ static void writeRegionDataToStorage(
 {
     constexpr auto FUNCTION_NAME = __FUNCTION__; // NOLINT(readability-identifier-naming)
     const auto & tmt = context.getTMTContext();
-    TableID table_id = region->getMappedTableID();
+    TableID table_id = region->getMappedTableID().getCanonicalTableID();
     UInt64 region_decode_cost = -1, write_part_cost = -1;
 
     /// Declare lambda of atomic read then write to call multiple times.
@@ -231,9 +231,9 @@ std::variant<RegionDataReadInfoList, RegionException::RegionReadStatus, LockInfo
                 return RegionException::RegionReadStatus::EPOCH_NOT_MATCH;
 
             // todo check table id
-            TableID mapped_table_id;
-            if (!computeMappedTableID(*meta_snap.range->rawKeys().first, mapped_table_id) || mapped_table_id != table_id)
-                throw Exception("Should not happen, region not belong to table: table id in region is " + std::to_string(mapped_table_id)
+            auto [ok, mapped_table_id] = computeMappedTableID(*meta_snap.range->rawKeys().first);
+            if (!ok || mapped_table_id.getCanonicalTableID() != table_id) // TODO: may not need this.
+                throw Exception("Should not happen, region not belong to table: table id in region is " + std::to_string(mapped_table_id.getCanonicalTableID())
                                     + ", expected table id is " + std::to_string(table_id),
                                 ErrorCodes::LOGICAL_ERROR);
         }
@@ -435,13 +435,13 @@ RegionPtrWithBlock::CachePtr GenRegionPreDecodeBlockData(const RegionPtr & regio
             throw;
     }
 
-    TableID table_id = region->getMappedTableID();
+    auto mapped_table_id = region->getMappedTableID();
     Int64 schema_version = DEFAULT_UNSPECIFIED_SCHEMA_VERSION;
     Block res_block;
 
     const auto atomic_decode = [&](bool force_decode) -> bool {
         Stopwatch watch;
-        auto storage = tmt.getStorages().get(table_id);
+        auto storage = tmt.getStorages().get(mapped_table_id.getCanonicalTableID());
         if (storage == nullptr || storage->isTombstone())
         {
             if (!force_decode) // Need to update.
@@ -486,7 +486,7 @@ RegionPtrWithBlock::CachePtr GenRegionPreDecodeBlockData(const RegionPtr & regio
         tmt.getSchemaSyncer()->syncSchemas(context);
 
         if (!atomic_decode(true))
-            throw Exception("Pre-decode " + region->toString() + " cache to table " + std::to_string(table_id) + " block failed",
+            throw Exception("Pre-decode " + region->toString() + " cache to table " + std::to_string(mapped_table_id.getCanonicalTableID()) + " block failed",
                             ErrorCodes::LOGICAL_ERROR);
     }
 
@@ -502,17 +502,23 @@ AtomicGetStorageSchema(const RegionPtr & region, TMTContext & tmt)
     std::shared_ptr<StorageDeltaMerge> dm_storage;
     DecodingStorageSchemaSnapshotConstPtr schema_snapshot;
 
-    auto table_id = region->getMappedTableID();
-    LOG_FMT_DEBUG(&Poco::Logger::get(__PRETTY_FUNCTION__), "Get schema for table {}", table_id);
+    auto mapped_table_id = region->getMappedTableID();
+    LOG_FMT_DEBUG(&Poco::Logger::get(__PRETTY_FUNCTION__), "Get schema for table {}", mapped_table_id.getCanonicalTableID());
     auto context = tmt.getContext();
     const auto atomic_get = [&](bool force_decode) -> bool {
-        auto storage = tmt.getStorages().get(table_id);
+        auto storage = tmt.getStorages().get(mapped_table_id.getCanonicalTableID());
         if (storage == nullptr)
         {
             if (!force_decode)
                 return false;
             if (storage == nullptr) // Table must have just been GC-ed
-                return true;
+            {
+                if (mapped_table_id.is_redist_idx)
+                    return true; // Let redist idx fail. The table may be created later.
+                else
+                    return true;
+
+            }
         }
         // Get a structure read lock. It will throw exception if the table has been dropped,
         // the caller should handle this situation.
@@ -530,7 +536,7 @@ AtomicGetStorageSchema(const RegionPtr & region, TMTContext & tmt)
         tmt.getSchemaSyncer()->syncSchemas(context);
 
         if (!atomic_get(true))
-            throw Exception("Get " + region->toString() + " belonging table " + DB::toString(table_id) + " is_command_handle fail",
+            throw Exception("Get " + region->toString() + " belonging table " + DB::toString(mapped_table_id.getCanonicalTableID()) + " is_command_handle fail",
                             ErrorCodes::LOGICAL_ERROR);
     }
 

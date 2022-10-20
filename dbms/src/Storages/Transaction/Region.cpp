@@ -391,7 +391,7 @@ std::string Region::getDebugString() const
         "[region {}, index {}, table {}, ver {}, conf_ver {}, state {}, peer {}]",
         id(),
         meta.appliedIndex(),
-        mapped_table_id,
+        mapped_table_id.getCanonicalTableID(),
         meta_snap.ver,
         meta_snap.conf_ver,
         raft_serverpb::PeerState_Name(peerState()),
@@ -770,7 +770,7 @@ Region::Region(DB::RegionMeta && meta_, const TiFlashRaftProxyHelper * proxy_hel
     , proxy_helper(proxy_helper_)
 {}
 
-TableID Region::getMappedTableID() const
+TiDB::MappedTableID Region::getMappedTableID() const
 {
     return mapped_table_id;
 }

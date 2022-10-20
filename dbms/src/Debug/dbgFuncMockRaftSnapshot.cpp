@@ -169,7 +169,7 @@ void MockRaftCommand::dbgFuncRegionSnapshotWithData(Context & context, const AST
     // Mock to apply a snapshot with data in `region`
     auto & tmt = context.getTMTContext();
     context.getTMTContext().getKVStore()->checkAndApplySnapshot<RegionPtrWithBlock>(region, tmt);
-    output(fmt::format("put region #{}, range{} to table #{} with {} records", region_id, range_string, table_id, cnt));
+    output(fmt::format("put region #{}, range{} to table #{} with {} records", region_id, range_string, table_id.getCanonicalTableID(), cnt));
 }
 
 // Mock to apply an empty snapshot for region

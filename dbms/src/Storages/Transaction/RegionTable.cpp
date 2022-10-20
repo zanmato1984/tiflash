@@ -78,7 +78,7 @@ RegionTable::InternalRegion & RegionTable::doGetInternalRegion(DB::TableID table
 RegionTable::InternalRegion & RegionTable::getOrInsertRegion(const Region & region)
 {
     auto table_id = region.getMappedTableID();
-    auto & table = getOrCreateTable(table_id);
+    auto & table = getOrCreateTable(table_id.getCanonicalTableID());
     auto & table_regions = table.regions;
     if (auto it = table_regions.find(region.id()); it != table_regions.end())
         return it->second;
@@ -118,7 +118,7 @@ RegionDataReadInfoList RegionTable::flushRegion(const RegionPtrWithBlock & regio
 {
     auto & tmt = context->getTMTContext();
 
-    LOG_FMT_TRACE(log, "table {}, {} original {} bytes", region->getMappedTableID(), region->toString(false), region->dataSize());
+    LOG_FMT_TRACE(log, "table {}, {} original {} bytes", region->getMappedTableID().getCanonicalTableID(), region->toString(false), region->dataSize());
 
     /// Write region data into corresponding storage.
     RegionDataReadInfoList data_list_to_remove;
@@ -138,7 +138,7 @@ RegionDataReadInfoList RegionTable::flushRegion(const RegionPtrWithBlock & regio
             }
         }
 
-        LOG_FMT_TRACE(log, "table {}, {} after flush {} bytes", region->getMappedTableID(), region->toString(false), cache_size);
+        LOG_FMT_TRACE(log, "table {}, {} after flush {} bytes", region->getMappedTableID().getCanonicalTableID(), region->toString(false), cache_size);
     }
 
     return data_list_to_remove;
@@ -438,7 +438,7 @@ void RegionTable::extendRegionRange(const RegionID region_id, const RegionRangeK
 {
     std::lock_guard lock(mutex);
 
-    auto table_id = region_range_keys.getMappedTableID();
+    auto table_id = region_range_keys.getMappedTableID().getCanonicalTableID();
     auto new_handle_range = region_range_keys.rawKeys();
 
     if (auto it = regions.find(region_id); it != regions.end())
