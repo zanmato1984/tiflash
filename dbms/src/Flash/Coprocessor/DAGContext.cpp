@@ -231,17 +231,18 @@ std::vector<CoprocessorReaderPtr> & DAGContext::getCoprocessorReaders()
     return coprocessor_readers;
 }
 
-bool DAGContext::containsRegionsInfoForTable(Int64 table_id) const
-{
-    return tables_regions_info.containsRegionsInfoForTable(table_id);
-}
-
-const SingleTableRegions & DAGContext::getTableRegionsInfoByTableID(Int64 table_id) const
-{
-    return tables_regions_info.getTableRegionInfoByTableID(table_id);
-}
 const MPPReceiverSetPtr & DAGContext::getMppReceiverSet() const
 {
     return mpp_receiver_set;
+}
+const TablesRegionsInfo & DAGContext::getTablesRegionsInfoByExecutorId(const String & executor_id) const
+{
+    if (tables_regions_info_map.find(executor_id) == tables_regions_info_map.end())
+    {
+        RUNTIME_ASSERT(tables_regions_info_map.size() == 1);
+        RUNTIME_ASSERT(tables_regions_info_map.find(dummy_executor_id) != tables_regions_info_map.end());
+        return tables_regions_info_map.find(dummy_executor_id)->second;
+    }
+    return tables_regions_info_map.find(executor_id)->second;
 }
 } // namespace DB

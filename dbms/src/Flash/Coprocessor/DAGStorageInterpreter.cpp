@@ -150,12 +150,12 @@ MakeRegionQueryInfos(
         return std::make_tuple(std::move(region_need_retry), status_res);
 }
 
-bool hasRegionToRead(const DAGContext & dag_context, const TiDBTableScan & table_scan)
+bool hasRegionToRead(const TiDBTableScan & table_scan)
 {
     bool has_region_to_read = false;
     for (const auto physical_table_id : table_scan.getPhysicalTableIDs())
     {
-        const auto & table_regions_info = dag_context.getTableRegionsInfoByTableID(physical_table_id);
+        const auto & table_regions_info = table_scan.getTablesRegionsInfo().getTableRegionsInfoByTableID(physical_table_id);
         if (!table_regions_info.local_regions.empty() || !table_regions_info.remote_regions.empty())
         {
             has_region_to_read = true;
@@ -229,7 +229,7 @@ DAGStorageInterpreter::DAGStorageInterpreter(
     , tmt(context.getTMTContext())
     , mvcc_query_info(new MvccQueryInfo(true, settings.read_tso))
 {
-    if (unlikely(!hasRegionToRead(dagContext(), table_scan)))
+    if (unlikely(!hasRegionToRead(table_scan)))
     {
         throw TiFlashException(
             fmt::format("Dag Request does not have region to read for table: {}", logical_table_id),
@@ -514,7 +514,7 @@ LearnerReadSnapshot DAGStorageInterpreter::doCopLearnerRead()
     TablesRegionInfoMap regions_for_local_read;
     for (const auto physical_table_id : table_scan.getPhysicalTableIDs())
     {
-        regions_for_local_read.emplace(physical_table_id, std::cref(context.getDAGContext()->getTableRegionsInfoByTableID(physical_table_id).local_regions));
+        regions_for_local_read.emplace(physical_table_id, std::cref(table_scan.getTablesRegionsInfo().getTableRegionsInfoByTableID(physical_table_id).local_regions));
     }
     auto [info_retry, status] = MakeRegionQueryInfos(
         regions_for_local_read,
@@ -535,7 +535,7 @@ LearnerReadSnapshot DAGStorageInterpreter::doBatchCopLearnerRead()
     TablesRegionInfoMap regions_for_local_read;
     for (const auto physical_table_id : table_scan.getPhysicalTableIDs())
     {
-        const auto & local_regions = context.getDAGContext()->getTableRegionsInfoByTableID(physical_table_id).local_regions;
+        const auto & local_regions = table_scan.getTablesRegionsInfo().getTableRegionsInfoByTableID(physical_table_id).local_regions;
         regions_for_local_read.emplace(physical_table_id, std::cref(local_regions));
     }
     if (regions_for_local_read.empty())
@@ -692,7 +692,7 @@ void DAGStorageInterpreter::buildLocalStreams(DAGPipeline & pipeline, size_t max
                 {
                     // clean all streams from local because we are not sure the correctness of those streams
                     current_pipeline.streams.clear();
-                    const auto & dag_regions = dag_context.getTableRegionsInfoByTableID(table_id).local_regions;
+                    const auto & dag_regions = table_scan.getTablesRegionsInfo().getTableRegionsInfoByTableID(table_id).local_regions;
                     FmtBuffer buffer;
                     // Normally there is only few regions need to retry when super batch is enabled. Retry to read
                     // from local first. However, too many retry in different places may make the whole process
@@ -1021,7 +1021,7 @@ std::vector<RemoteRequest> DAGStorageInterpreter::buildRemoteRequests()
     std::unordered_map<Int64, RegionRetryList> retry_regions_map;
     for (const auto physical_table_id : table_scan.getPhysicalTableIDs())
     {
-        const auto & table_regions_info = context.getDAGContext()->getTableRegionsInfoByTableID(physical_table_id);
+        const auto & table_regions_info = table_scan.getTablesRegionsInfo().getTableRegionsInfoByTableID(physical_table_id);
         for (const auto & e : table_regions_info.local_regions)
             region_id_to_table_id_map[e.first] = physical_table_id;
         for (const auto & r : table_regions_info.remote_regions)

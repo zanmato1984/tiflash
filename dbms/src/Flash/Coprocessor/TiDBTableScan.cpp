@@ -24,6 +24,7 @@ TiDBTableScan::TiDBTableScan(
     , executor_id(executor_id_)
     , is_partition_table_scan(table_scan->tp() == tipb::TypePartitionTableScan)
     , columns(is_partition_table_scan ? table_scan->partition_table_scan().columns() : table_scan->tbl_scan().columns())
+    , tables_regions_info(dag_context.getTablesRegionsInfoByExecutorId(executor_id))
     // Only No-partition table need keep order when tablescan executor required keep order.
     // If keep_order is not set, keep order for safety.
     , keep_order(!is_partition_table_scan && (table_scan->tbl_scan().keep_order() || !table_scan->tbl_scan().has_keep_order()))
@@ -41,11 +42,11 @@ TiDBTableScan::TiDBTableScan(
             if (all_physical_table_ids.count(partition_table_id) > 0)
                 throw TiFlashException("Partition table scan contains duplicated physical table ids.", Errors::Coprocessor::BadRequest);
             all_physical_table_ids.insert(partition_table_id);
-            if (dag_context.containsRegionsInfoForTable(partition_table_id))
+            if (tables_regions_info.containsRegionsInfoForTable(partition_table_id))
                 physical_table_ids.push_back(partition_table_id);
         }
         std::sort(physical_table_ids.begin(), physical_table_ids.end());
-        if (physical_table_ids.size() != dag_context.tables_regions_info.tableCount())
+        if (physical_table_ids.size() != tables_regions_info.tableCount())
             throw TiFlashException("Partition table scan contains table_region_info that is not belongs to the partition table.", Errors::Coprocessor::BadRequest);
     }
     else

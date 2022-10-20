@@ -247,9 +247,7 @@ public:
 
     std::pair<bool, double> getTableScanThroughput();
 
-    const SingleTableRegions & getTableRegionsInfoByTableID(Int64 table_id) const;
-
-    bool containsRegionsInfoForTable(Int64 table_id) const;
+    const TablesRegionsInfo & getTablesRegionsInfoByExecutorId(const String & executor_id) const;
 
     const BlockIO & getBlockIO() const
     {
@@ -329,7 +327,6 @@ public:
     bool is_batch_cop = false;
     // `tunnel_set` is always set by `MPPTask` and is intended to be used for `DAGQueryBlockInterpreter`.
     MPPTunnelSetPtr tunnel_set;
-    TablesRegionsInfo tables_regions_info;
     // part of regions_for_local_read + regions_for_remote_read, only used for batch-cop
     RegionInfoList retry_regions;
 
@@ -346,6 +343,8 @@ public:
     /// Hold the order of list based executors.
     /// It is used to ensure that the order of Execution summary of list based executors is the same as the order of list based executors.
     std::vector<String> list_based_executors_order;
+
+    std::unordered_map<String, TablesRegionsInfo> tables_regions_info_map;
 
 private:
     void initExecutorIdToJoinIdMap();

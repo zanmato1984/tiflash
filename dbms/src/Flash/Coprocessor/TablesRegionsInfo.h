@@ -59,7 +59,7 @@ public:
         return table_regions_info_map.begin()->second;
     }
     SingleTableRegions & getOrCreateTableRegionInfoByTableID(TableID table_id);
-    const SingleTableRegions & getTableRegionInfoByTableID(TableID table_id) const;
+    const SingleTableRegions & getTableRegionsInfoByTableID(TableID table_id) const;
     const std::unordered_map<TableID, SingleTableRegions> & getTableRegionsInfoMap() const
     {
         return table_regions_info_map;
@@ -87,5 +87,7 @@ private:
     bool is_single_table;
     std::unordered_map<TableID, SingleTableRegions> table_regions_info_map;
 };
+
+extern const String dummy_executor_id;
 
 } // namespace DB

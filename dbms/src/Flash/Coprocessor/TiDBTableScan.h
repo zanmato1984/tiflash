@@ -61,11 +61,17 @@ public:
         return is_fast_scan;
     }
 
+    const TablesRegionsInfo & getTablesRegionsInfo() const
+    {
+        return tables_regions_info;
+    }
+
 private:
     const tipb::Executor * table_scan;
     String executor_id;
     bool is_partition_table_scan;
     const google::protobuf::RepeatedPtrField<tipb::ColumnInfo> & columns;
+    const TablesRegionsInfo & tables_regions_info;
     /// logical_table_id is the table id for a TiDB' table, while if the
     /// TiDB table is partition, each partition is a physical table, and
     /// the partition's table id is the physical table id.

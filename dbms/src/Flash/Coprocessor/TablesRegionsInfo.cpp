@@ -25,6 +25,7 @@ namespace FailPoints
 extern const char force_no_local_region_for_mpp_task[];
 } // namespace FailPoints
 
+const String dummy_executor_id = "dummy_executor_id";
 SingleTableRegions & TablesRegionsInfo::getOrCreateTableRegionInfoByTableID(Int64 table_id)
 {
     if (is_single_table)
@@ -35,7 +36,7 @@ SingleTableRegions & TablesRegionsInfo::getOrCreateTableRegionInfoByTableID(Int6
     }
     return table_regions_info_map.find(table_id)->second;
 }
-const SingleTableRegions & TablesRegionsInfo::getTableRegionInfoByTableID(Int64 table_id) const
+const SingleTableRegions & TablesRegionsInfo::getTableRegionsInfoByTableID(Int64 table_id) const
 {
     if (is_single_table)
         return table_regions_info_map.begin()->second;
@@ -108,5 +109,4 @@ TablesRegionsInfo TablesRegionsInfo::create(
     }
     return tables_regions_info;
 }
-
 } // namespace DB

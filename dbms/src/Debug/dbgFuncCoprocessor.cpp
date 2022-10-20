@@ -503,12 +503,13 @@ bool runAndCompareDagReq(const coprocessor::Request & req, const coprocessor::Re
     static auto log = Logger::get("MockDAG");
     LOG_FMT_INFO(log, "Handling DAG request: {}", dag_request.DebugString());
     tipb::SelectResponse dag_response;
-    TablesRegionsInfo tables_regions_info(true);
-    auto & table_regions_info = tables_regions_info.getSingleTableRegions();
+    std::unordered_map<String, TablesRegionsInfo> tables_regions_info_map;
+    tables_regions_info_map[dummy_executor_id] = TablesRegionsInfo(true);
+    auto & table_regions_info = tables_regions_info_map[dummy_executor_id].getSingleTableRegions();
     table_regions_info.local_regions.emplace(region_id, RegionInfo(region_id, region->version(), region->confVer(), std::move(key_ranges), nullptr));
 
     DAGContext dag_context(dag_request);
-    dag_context.tables_regions_info = std::move(tables_regions_info);
+    dag_context.tables_regions_info_map = std::move(tables_regions_info_map);
     dag_context.log = log;
     context.setDAGContext(&dag_context);
     DAGDriver driver(context, properties.start_ts, DEFAULT_UNSPECIFIED_SCHEMA_VERSION, &dag_response, true);
@@ -1011,13 +1012,14 @@ tipb::SelectResponse executeDAGRequest(Context & context, const tipb::DAGRequest
     static auto log = Logger::get("MockDAG");
     LOG_FMT_DEBUG(log, "Handling DAG request: {}", dag_request.DebugString());
     tipb::SelectResponse dag_response;
-    TablesRegionsInfo tables_regions_info(true);
-    auto & table_regions_info = tables_regions_info.getSingleTableRegions();
+    std::unordered_map<String, TablesRegionsInfo> tables_regions_info_map;
+    tables_regions_info_map[dummy_executor_id] = TablesRegionsInfo(true);
+    auto & table_regions_info = tables_regions_info_map[dummy_executor_id].getSingleTableRegions();
 
     table_regions_info.local_regions.emplace(region_id, RegionInfo(region_id, region_version, region_conf_version, std::move(key_ranges), nullptr));
 
     DAGContext dag_context(dag_request);
-    dag_context.tables_regions_info = std::move(tables_regions_info);
+    dag_context.tables_regions_info_map = std::move(tables_regions_info_map);
     dag_context.log = log;
     context.setDAGContext(&dag_context);
 

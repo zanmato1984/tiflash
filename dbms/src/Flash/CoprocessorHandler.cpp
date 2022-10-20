@@ -88,8 +88,9 @@ grpc::Status CoprocessorHandler::execute()
                     "DAG request with rpn expression is not supported in TiFlash",
                     Errors::Coprocessor::Unimplemented);
             tipb::SelectResponse dag_response;
-            TablesRegionsInfo tables_regions_info(true);
-            auto & table_regions_info = tables_regions_info.getSingleTableRegions();
+            std::unordered_map<String, TablesRegionsInfo> tables_regions_info_map;
+            tables_regions_info_map[dummy_executor_id] = TablesRegionsInfo(true);
+            auto & table_regions_info = tables_regions_info_map[dummy_executor_id].getSingleTableRegions();
 
             const std::unordered_set<UInt64> bypass_lock_ts(
                 cop_context.kv_context.resolved_locks().begin(),
@@ -104,7 +105,7 @@ grpc::Status CoprocessorHandler::execute()
                     &bypass_lock_ts));
 
             DAGContext dag_context(dag_request);
-            dag_context.tables_regions_info = std::move(tables_regions_info);
+            dag_context.tables_regions_info_map = std::move(tables_regions_info_map);
             dag_context.log = Logger::get("CoprocessorHandler");
             dag_context.tidb_host = cop_context.db_context.getClientInfo().current_address.toString();
             cop_context.db_context.setDAGContext(&dag_context);

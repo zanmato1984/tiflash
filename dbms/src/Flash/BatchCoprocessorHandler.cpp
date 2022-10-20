@@ -58,7 +58,9 @@ grpc::Status BatchCoprocessorHandler::execute()
                 { GET_METRIC(tiflash_coprocessor_handling_request_count, type_super_batch_cop_dag).Decrement(); });
 
             auto dag_request = getDAGRequestFromStringWithRetry(cop_request->data());
-            auto tables_regions_info = TablesRegionsInfo::create(cop_request->regions(), cop_request->table_regions(), cop_context.db_context.getTMTContext());
+            std::unordered_map<String, TablesRegionsInfo> tables_regions_info_map;
+            tables_regions_info_map[dummy_executor_id] = TablesRegionsInfo::create(cop_request->regions(), cop_request->table_regions(), cop_context.db_context.getTMTContext());
+            auto & tables_regions_info = tables_regions_info_map[dummy_executor_id];
             LOG_FMT_DEBUG(
                 log,
                 "Handling {} regions from {} physical tables in DAG request: {}",
@@ -68,7 +70,7 @@ grpc::Status BatchCoprocessorHandler::execute()
 
             DAGContext dag_context(dag_request);
             dag_context.is_batch_cop = true;
-            dag_context.tables_regions_info = std::move(tables_regions_info);
+            dag_context.tables_regions_info_map = std::move(tables_regions_info_map);
             dag_context.log = Logger::get("BatchCoprocessorHandler");
             dag_context.tidb_host = cop_context.db_context.getClientInfo().current_address.toString();
             cop_context.db_context.setDAGContext(&dag_context);

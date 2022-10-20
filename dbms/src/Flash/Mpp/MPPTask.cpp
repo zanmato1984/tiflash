@@ -254,12 +254,29 @@ void MPPTask::prepare(const mpp::DispatchTaskRequest & task_request)
     TMTContext & tmt_context = context->getTMTContext();
     /// MPP task will only use key ranges in mpp::DispatchTaskRequest::regions/mpp::DispatchTaskRequest::table_regions.
     /// The ones defined in tipb::TableScan will never be used and can be removed later.
-    TablesRegionsInfo tables_regions_info = TablesRegionsInfo::create(task_request.regions(), task_request.table_regions(), tmt_context);
-    LOG_FMT_DEBUG(
-        log,
-        "Handling {} regions from {} physical tables in MPP task",
-        tables_regions_info.regionCount(),
-        tables_regions_info.tableCount());
+    std::unordered_map<String, TablesRegionsInfo> tables_regions_info_map;
+    if (task_request.executor_regions_size() > 0)
+    {
+        for (auto & executor_regions_info : task_request.executor_regions())
+        {
+            if (tables_regions_info_map.find(executor_regions_info.executor_id()) != tables_regions_info_map.end())
+                throw Exception("Duplicated executor id in mpp request");
+            tables_regions_info_map[executor_regions_info.executor_id()] = TablesRegionsInfo::create(executor_regions_info.regions(),
+                                                                                                     executor_regions_info.table_regions(),
+                                                                                                     tmt_context);
+        }
+    }
+    else
+    {
+        tables_regions_info_map[dummy_executor_id] = TablesRegionsInfo::create(task_request.regions(), task_request.table_regions(), tmt_context);
+    }
+    size_t region_count = 0, table_count = 0;
+    for (auto & entry : tables_regions_info_map)
+    {
+        region_count += entry.second.regionCount();
+        table_count += entry.second.tableCount();
+    }
+    LOG_FMT_DEBUG(log, "Handling {} regions from {} physical tables in MPP task", region_count, table_count);
 
     // set schema ver and start ts.
     auto schema_ver = task_request.schema_ver();
@@ -300,7 +317,7 @@ void MPPTask::prepare(const mpp::DispatchTaskRequest & task_request)
     }
     dag_context = std::make_unique<DAGContext>(dag_req, task_request.meta(), is_root_mpp_task);
     dag_context->log = log;
-    dag_context->tables_regions_info = std::move(tables_regions_info);
+    dag_context->tables_regions_info_map = std::move(tables_regions_info_map);
     dag_context->tidb_host = context->getClientInfo().current_address.toString();
 
     context->setDAGContext(dag_context.get());
