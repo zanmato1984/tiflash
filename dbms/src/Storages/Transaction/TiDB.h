@@ -342,7 +342,7 @@ struct IndexInfo
     bool is_primary;
     bool is_invisible;
     bool is_global;
-    bool is_redist_idx;
+    bool is_redist_idx = false;
 };
 
 struct TableInfo
@@ -442,7 +442,8 @@ tipb::FieldType columnInfoToFieldType(const ColumnInfo & ci);
 ColumnInfo fieldTypeToColumnInfo(const tipb::FieldType & field_type);
 ColumnInfo toTiDBColumnInfo(const tipb::ColumnInfo & tipb_column_info);
 
-struct MappedTableID {
+struct MappedTableID
+{
     bool is_redist_idx = false;
     RedistIdxID redist_idx_id = DB::InvalidRedistIdxId;
     TableID table_id = DB::InvalidTableID;

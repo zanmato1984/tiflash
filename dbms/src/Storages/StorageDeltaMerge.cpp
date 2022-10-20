@@ -1059,6 +1059,10 @@ try
         }
         else if (command.type == AlterCommand::TOMBSTONE)
         {
+            if (table_info->get().id >> 32 > 0)
+            {
+                LOG_INFO(log, "Tombstone index table");
+            }
             tombstone = command.tombstone;
         }
         else if (command.type == AlterCommand::RECOVER)

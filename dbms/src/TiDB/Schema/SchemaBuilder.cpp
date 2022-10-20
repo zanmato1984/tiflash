@@ -70,6 +70,10 @@ bool isReservedDatabase(Context & context, const String & database_name)
     return context.getTMTContext().getIgnoreDatabases().count(database_name) > 0;
 }
 
+TableID generateTableIdForRedistributedIndexTable(TableID table_id, TableID index_id)
+{
+    return index_id << 32 | table_id;
+}
 
 inline void setAlterCommandColumn(Poco::Logger * log, AlterCommand & command, const ColumnInfo & column_info)
 {
@@ -1144,7 +1148,7 @@ void SchemaBuilder<Getter, NameMapper>::applyCreateLogicalTable(const TiDB::DBIn
         {
             auto new_table = std::make_shared<TableInfo>();
             *new_table = *table_info;
-            new_table->id = index_info.id << 32 | table_info->id;
+            new_table->id = generateTableIdForRedistributedIndexTable(table_info->id, index_info.id);
             new_table->index_infos.clear();
             new_table->name = name_mapper.mapPartitionName(*new_table);
             applyCreatePhysicalTable(db_info, new_table);
@@ -1203,11 +1207,11 @@ void SchemaBuilder<Getter, NameMapper>::applyDropTable(const DBInfoPtr & db_info
     // Drop logical table at last, only logical table drop will be treated as "complete".
     // Intermediate failure will hide the logical table drop so that schema syncing when restart will re-drop all (despite some physical tables may have dropped).
     applyDropPhysicalTable(name_mapper.mapDatabaseName(*db_info), table_info.id);
-    for (auto & index_info : table_info.index_infos)
+    for (const auto & index_info : table_info.index_infos)
     {
         if (index_info.is_redist_idx)
         {
-            applyDropPhysicalTable(name_mapper.mapDatabaseName(*db_info), index_info.id << 32 | table_info.id);
+            applyDropPhysicalTable(name_mapper.mapDatabaseName(*db_info), generateTableIdForRedistributedIndexTable(table_info.id, index_info.id));
         }
     }
 }
@@ -1236,11 +1240,10 @@ template <typename Getter, typename NameMapper>
 void SchemaBuilder<Getter, NameMapper>::applySetTiFlashReplicaOnLogicalTable(const TiDB::DBInfoPtr & db_info, const TiDB::TableInfoPtr & table_info, const ManageableStoragePtr & storage)
 {
     applySetTiFlashReplicaOnPhysicalTable(db_info, table_info, storage);
+    auto & tmt_context = context.getTMTContext();
 
     if (table_info->isLogicalPartitionTable())
     {
-        auto & tmt_context = context.getTMTContext();
-
         for (const auto & part_def : table_info->partition.definitions)
         {
             auto new_part_table_info = table_info->producePartitionTableInfo(part_def.id, name_mapper);
@@ -1251,6 +1254,22 @@ void SchemaBuilder<Getter, NameMapper>::applySetTiFlashReplicaOnLogicalTable(con
                                        Errors::DDL::MissingTable);
             }
             applySetTiFlashReplicaOnPhysicalTable(db_info, new_part_table_info, part_storage);
+        }
+    }
+    for (const auto & index : table_info->index_infos)
+    {
+        if (index.is_redist_idx)
+        {
+            auto new_table = std::make_shared<TableInfo>();
+            *new_table = *table_info;
+            new_table->id = generateTableIdForRedistributedIndexTable(table_info->id, index.id);
+            new_table->index_infos.clear();
+            new_table->name = name_mapper.mapPartitionName(*new_table);
+            auto index_storage = tmt_context.getStorages().get(new_table->id);
+            if (index_storage == nullptr)
+                throw TiFlashException(fmt::format("miss table in TiFlash : {}", name_mapper.debugCanonicalName(*db_info, *new_table)),
+                                       Errors::DDL::MissingTable);
+            applySetTiFlashReplicaOnPhysicalTable(db_info, new_table, index_storage);
         }
     }
 }
@@ -1337,6 +1356,14 @@ void SchemaBuilder<Getter, NameMapper>::syncAllSchema()
                                     "Table {} not synced because may have been dropped during sync all schemas",
                                     name_mapper.debugCanonicalName(*db, *table));
                     continue;
+                }
+            }
+            for (const auto & index : table->index_infos)
+            {
+                if (index.is_redist_idx)
+                {
+                    auto index_table_id = generateTableIdForRedistributedIndexTable(table->id, index.id);
+                    table_set.emplace(index_table_id);
                 }
             }
             if (table->isLogicalPartitionTable())
