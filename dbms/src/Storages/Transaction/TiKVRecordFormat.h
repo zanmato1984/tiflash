@@ -218,7 +218,7 @@ inline Timestamp getTs(const TiKVKey & key)
 
 inline TiDB::MappedTableID getTableId(const DecodedTiKVKey & key)
 {
-    auto raw_table_id = decodeUInt64(read<UInt64>(key.data() + 1));
+    auto raw_table_id = decodeInt64(read<UInt64>(key.data() + 1));
     return TiDB::MappedTableID{static_cast<bool>(raw_table_id & REDIST_IDX_FLAG_MASK), static_cast<RedistIdxID>((raw_table_id & REDIST_IDX_ID_MASK) >> REDIST_IDX_ID_SHIFT), static_cast<TableID>(raw_table_id & TABLE_ID_MASK)};
 }
 
