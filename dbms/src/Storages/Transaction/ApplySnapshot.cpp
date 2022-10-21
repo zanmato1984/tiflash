@@ -159,7 +159,7 @@ void KVStore::onSnapshot(const RegionPtrWrap & new_region_wrap, RegionPtr old_re
                     table_id.getCanonicalTableID(),
                     storage->isCommonHandle(),
                     storage->getRowKeyColumnSize());
-                if (old_region)
+                /*if (old_region)
                 {
                     auto old_key_range = DM::RowKeyRange::fromRegionRange(
                         old_region->getRange(),
@@ -171,11 +171,11 @@ void KVStore::onSnapshot(const RegionPtrWrap & new_region_wrap, RegionPtr old_re
                         LOG_FMT_INFO(log, "clear region {} old range {} before apply snapshot of new range {}", region_id, old_key_range.toDebugString(), new_key_range.toDebugString());
                         dm_storage->deleteRange(old_key_range, context.getSettingsRef());
                     }
-                }
+                }*/
                 if constexpr (std::is_same_v<RegionPtrWrap, RegionPtrWithSnapshotFiles>)
                 {
                     // Call `ingestFiles` to delete data for range and ingest external DTFiles.
-                    dm_storage->ingestFiles(new_key_range, new_region_wrap.external_files, /*clear_data_in_range=*/true, context.getSettingsRef());
+                    dm_storage->ingestFiles(new_key_range, new_region_wrap.external_files, /*clear_data_in_range=*/false, context.getSettingsRef());
                 }
                 else
                 {
