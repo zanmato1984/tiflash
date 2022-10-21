@@ -2403,14 +2403,27 @@ bool ExpressionAnalyzer::appendJoin(ExpressionActionsChain & chain, bool only_ty
                 table = table_to_join.subquery;
 
             auto interpreter = interpretSubquery(table, context, subquery_depth, required_joined_columns);
-            subquery_for_set.source = std::make_shared<LazyBlockInputStream>(
-                interpreter->getSampleBlock(),
-                [interpreter]() mutable { return interpreter->execute().in; });
+            interpreter->target_join = join;
+            subquery_for_set.source = interpreter->execute().in;
+            //subquery_for_set.source = std::make_shared<LazyBlockInputStream>(
+            //    interpreter->getSampleBlock(),
+            //    [interpreter]() mutable { return interpreter->execute().in; });
         }
 
         /// TODO You do not need to set this up when JOIN is only needed on remote servers.
         subquery_for_set.join = join;
-        subquery_for_set.join->init(subquery_for_set.source->getHeader());
+        size_t concurrency = 1;
+        if (subquery_for_set.source->getName() == "Union")
+        {
+            concurrency = 0;
+            subquery_for_set.source->forEachChild([&] (IBlockInputStream & )
+                         {
+                             concurrency++;
+                             return false;
+                         });
+        }
+        concurrency = std::max(1, concurrency);
+        subquery_for_set.join->init(subquery_for_set.source->getHeader(), concurrency);
     }
 
     addJoinAction(step.actions, false);

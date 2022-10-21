@@ -22,6 +22,7 @@
 namespace DB
 {
 class InterpreterSelectQuery;
+class Join;
 
 
 /** Interprets one or multiple SELECT queries inside UNION ALL chain.
@@ -50,6 +51,8 @@ public:
         const Context & context_);
 
     void ignoreWithTotals();
+
+    std::shared_ptr<Join> target_join = nullptr;
 
 private:
     ASTPtr query_ptr;

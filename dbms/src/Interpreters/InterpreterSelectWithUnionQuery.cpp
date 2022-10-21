@@ -23,6 +23,8 @@
 #include <Parsers/ASTSelectQuery.h>
 #include <Parsers/ASTSelectWithUnionQuery.h>
 
+#include "DataStreams/HashJoinBuildBlockInputStream.h"
+
 
 namespace DB
 {
@@ -211,6 +213,14 @@ BlockIO InterpreterSelectWithUnionQuery::execute()
     const Settings & settings = context.getSettingsRef();
 
     BlockInputStreams nested_streams = executeWithMultipleStreams();
+    if (target_join != nullptr)
+    {
+        size_t i = 0;
+        for (auto & nested_stream : nested_streams)
+        {
+            nested_stream = std::make_shared<HashJoinBuildBlockInputStream>(nested_stream, target_join, i++, "");
+        }
+    }
     BlockInputStreamPtr result_stream;
 
     if (nested_streams.empty())
