@@ -20,9 +20,11 @@ namespace DB
 HashJoinProbeBlockInputStream::HashJoinProbeBlockInputStream(
     const BlockInputStreamPtr & input,
     const ExpressionActionsPtr & join_probe_actions_,
-    const String & req_id)
+    const String & req_id,
+    std::shared_ptr<MPMCQueue<Block>> queue)
     : log(Logger::get(name, req_id))
     , join_probe_actions(join_probe_actions_)
+    , queue(queue)
 {
     children.push_back(input);
 
@@ -31,6 +33,9 @@ HashJoinProbeBlockInputStream::HashJoinProbeBlockInputStream(
     {
         throw Exception("isn't valid join probe actions", ErrorCodes::LOGICAL_ERROR);
     }
+
+    thread_manager = newThreadManager();
+    thread_manager->schedule(true, "HashJoinProbeRead", [this] { this->readThread(); });
 }
 
 Block HashJoinProbeBlockInputStream::getTotals()
@@ -53,7 +58,8 @@ Block HashJoinProbeBlockInputStream::getHeader() const
 
 Block HashJoinProbeBlockInputStream::readImpl()
 {
-    Block res = children.back()->read();
+    Block res;
+    queue->pop(res);
     if (!res)
         return res;
 
@@ -63,6 +69,21 @@ Block HashJoinProbeBlockInputStream::readImpl()
     // https://github.com/pingcap/tiflash/issues/3436
 
     return res;
+}
+
+void HashJoinProbeBlockInputStream::readThread()
+{
+    while(true)
+    {
+        Block res = children.back()->read();
+        bool is_end = !res;
+        queue->push(std::move(res));
+        if (is_end)
+        {
+            queue->finish();
+            break;
+        }
+    }
 }
 
 } // namespace DB

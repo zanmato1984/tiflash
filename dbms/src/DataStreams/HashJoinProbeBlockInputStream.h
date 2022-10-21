@@ -15,6 +15,8 @@
 #pragma once
 
 #include <DataStreams/IProfilingBlockInputStream.h>
+#include <Common/MPMCQueue.h>
+#include <Common/ThreadManager.h>
 
 namespace DB
 {
@@ -38,18 +40,33 @@ public:
     HashJoinProbeBlockInputStream(
         const BlockInputStreamPtr & input,
         const ExpressionActionsPtr & join_probe_actions_,
-        const String & req_id);
+        const String & req_id,
+        std::shared_ptr<MPMCQueue<Block>> queue);
+
+    ~HashJoinProbeBlockInputStream() override
+    {
+        thread_manager->wait();
+    }
 
     String getName() const override { return name; }
     Block getTotals() override;
     Block getHeader() const override;
 
+    static std::shared_ptr<MPMCQueue<Block>> newQueue()
+    {
+        return std::make_shared<MPMCQueue<Block>>(40);
+    }
+
 protected:
     Block readImpl() override;
+
+    void readThread();
 
 private:
     const LoggerPtr log;
     ExpressionActionsPtr join_probe_actions;
+    std::shared_ptr<ThreadManager> thread_manager;
+    std::shared_ptr<MPMCQueue<Block>> queue;
 };
 
 } // namespace DB
