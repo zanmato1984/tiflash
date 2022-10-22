@@ -41,7 +41,7 @@ public:
         const BlockInputStreamPtr & input,
         const ExpressionActionsPtr & join_probe_actions_,
         const String & req_id,
-        std::shared_ptr<MPMCQueue<Block>> queue);
+        size_t concurrency);
 
     ~HashJoinProbeBlockInputStream() override
     {
@@ -52,11 +52,6 @@ public:
     Block getTotals() override;
     Block getHeader() const override;
 
-    static std::shared_ptr<MPMCQueue<Block>> newQueue()
-    {
-        return std::make_shared<MPMCQueue<Block>>(40);
-    }
-
 protected:
     Block readImpl() override;
 
@@ -66,7 +61,7 @@ private:
     const LoggerPtr log;
     ExpressionActionsPtr join_probe_actions;
     std::shared_ptr<ThreadManager> thread_manager;
-    std::shared_ptr<MPMCQueue<Block>> queue;
+    MPMCQueue<Block> queue;
 };
 
 } // namespace DB

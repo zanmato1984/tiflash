@@ -21,10 +21,10 @@ HashJoinProbeBlockInputStream::HashJoinProbeBlockInputStream(
     const BlockInputStreamPtr & input,
     const ExpressionActionsPtr & join_probe_actions_,
     const String & req_id,
-    std::shared_ptr<MPMCQueue<Block>> queue)
+    size_t concurrency)
     : log(Logger::get(name, req_id))
     , join_probe_actions(join_probe_actions_)
-    , queue(queue)
+    , queue((40 + concurrency - 1) / concurrency)
 {
     children.push_back(input);
 
@@ -59,7 +59,7 @@ Block HashJoinProbeBlockInputStream::getHeader() const
 Block HashJoinProbeBlockInputStream::readImpl()
 {
     Block res;
-    queue->pop(res);
+    queue.pop(res);
     if (!res)
         return res;
 
@@ -77,10 +77,10 @@ void HashJoinProbeBlockInputStream::readThread()
     {
         Block res = children.back()->read();
         bool is_end = !res;
-        queue->push(std::move(res));
+        queue.push(std::move(res));
         if (is_end)
         {
-            queue->finish();
+            queue.finish();
             break;
         }
     }

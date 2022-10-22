@@ -204,10 +204,9 @@ void PhysicalJoin::probeSideTransform(DAGPipeline & probe_pipeline, Context & co
         }
     }
     String join_probe_extra_info = fmt::format("join probe, join_executor_id = {}", execId());
-    auto probe_queue = HashJoinProbeBlockInputStream::newQueue();
     for (auto & stream : probe_pipeline.streams)
     {
-        stream = std::make_shared<HashJoinProbeBlockInputStream>(stream, join_probe_actions, log->identifier(), probe_queue);
+        stream = std::make_shared<HashJoinProbeBlockInputStream>(stream, join_probe_actions, log->identifier(), probe_pipeline.streams.size());
         stream->setExtraInfo(join_probe_extra_info);
     }
 }
