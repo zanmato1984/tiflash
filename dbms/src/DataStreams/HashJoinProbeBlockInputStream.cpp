@@ -24,7 +24,7 @@ HashJoinProbeBlockInputStream::HashJoinProbeBlockInputStream(
     size_t concurrency)
     : log(Logger::get(name, req_id))
     , join_probe_actions(join_probe_actions_)
-    , queue((40 + concurrency - 1) / concurrency)
+    , queue((60 + concurrency - 1) / concurrency)
 {
     children.push_back(input);
 
@@ -35,7 +35,6 @@ HashJoinProbeBlockInputStream::HashJoinProbeBlockInputStream(
     }
 
     thread_manager = newThreadManager();
-    thread_manager->schedule(true, "HashJoinProbeRead", [this] { this->readThread(); });
 }
 
 Block HashJoinProbeBlockInputStream::getTotals()
@@ -58,6 +57,11 @@ Block HashJoinProbeBlockInputStream::getHeader() const
 
 Block HashJoinProbeBlockInputStream::readImpl()
 {
+    if (!created)
+    {
+        thread_manager->schedule(true, "HashJoinProbeRead", [this] { this->readThread(); });
+        created = true;
+    }
     Block res;
     queue.pop(res);
     if (!res)

@@ -63,6 +63,7 @@ private:
     std::shared_ptr<ThreadManager> thread_manager;
     MPMCQueue<Block> queue;
     std::exception_ptr exception;
+    bool created = false;
 };
 
 } // namespace DB

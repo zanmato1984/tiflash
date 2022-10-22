@@ -78,6 +78,8 @@ void CreatingSetsBlockInputStream::init(const BlockInputStreamPtr & input)
     }
 
     children.push_back(input);
+
+    thread_manager = newThreadManager();
 }
 
 
@@ -124,7 +126,6 @@ void CreatingSetsBlockInputStream::createAll()
             }
         }
         Stopwatch watch;
-        auto thread_manager = newThreadManager();
         try
         {
             for (auto & subqueries_for_sets : subqueries_for_sets_list)
@@ -150,7 +151,7 @@ void CreatingSetsBlockInputStream::createAll()
             throw;
         }
 
-        thread_manager->wait();
+        //thread_manager->wait();
 
         if (!exception_from_workers.empty())
         {

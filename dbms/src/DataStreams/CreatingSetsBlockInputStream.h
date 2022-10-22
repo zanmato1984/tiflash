@@ -15,6 +15,7 @@
 #pragma once
 
 #include <Common/MemoryTracker.h>
+#include <Common/ThreadManager.h>
 #include <DataStreams/IProfilingBlockInputStream.h>
 #include <Flash/Mpp/MPPTaskId.h>
 #include <Interpreters/SubqueryForSet.h>
@@ -41,7 +42,10 @@ public:
         const SizeLimits & network_transfer_limits,
         const String & req_id);
 
-    ~CreatingSetsBlockInputStream() = default;
+    ~CreatingSetsBlockInputStream() override
+    {
+        thread_manager->wait();
+    }
 
     static constexpr auto name = "CreatingSets";
 
@@ -86,6 +90,7 @@ protected:
 private:
     void init(const BlockInputStreamPtr & input);
 
+    std::shared_ptr<ThreadManager> thread_manager;
     std::vector<SubqueriesForSets> subqueries_for_sets_list;
     bool created = false;
 
