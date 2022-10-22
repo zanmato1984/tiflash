@@ -61,7 +61,13 @@ Block HashJoinProbeBlockInputStream::readImpl()
     Block res;
     queue.pop(res);
     if (!res)
+    {
+        if (exception)
+        {
+            std::rethrow_exception(exception);
+        }
         return res;
+    }
 
     join_probe_actions->execute(res);
 
@@ -73,16 +79,24 @@ Block HashJoinProbeBlockInputStream::readImpl()
 
 void HashJoinProbeBlockInputStream::readThread()
 {
-    while(true)
+    try
     {
-        Block res = children.back()->read();
-        bool is_end = !res;
-        queue.push(std::move(res));
-        if (is_end)
+        while (true)
         {
-            queue.finish();
-            break;
+            Block res = children.back()->read();
+            bool is_end = !res;
+            queue.push(std::move(res));
+            if (is_end)
+            {
+                queue.finish();
+                break;
+            }
         }
+    }
+    catch (...)
+    {
+        exception = std::current_exception();
+        queue.finish();
     }
 }
 
