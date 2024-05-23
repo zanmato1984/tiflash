@@ -16,6 +16,7 @@ cmake_minimum_required (VERSION 3.21)
 
 project (TiFlash LANGUAGES C CXX ASM)
 
+
 cmake_policy(SET CMP0048 NEW)
 
 set(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY true)
