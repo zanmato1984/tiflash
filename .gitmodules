@@ -155,3 +155,6 @@
 [submodule "contrib/tiflash-proxy-next-gen"]
 	path = contrib/tiflash-proxy-next-gen
 	url = git@github.com:tidbcloud/cloud-storage-engine.git
+[submodule "contrib/arrow"]
+	path = contrib/arrow
+	url = https://github.com/apache/arrow.git

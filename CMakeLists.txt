@@ -322,6 +322,11 @@ if (ENABLE_CLARA)
 endif ()
 include (cmake/find_xxhash.cmake)
 
+option (ENABLE_ARROW "Enable Apache Arrow (libarrow)" OFF)
+if (ENABLE_ARROW)
+    include (cmake/find_arrow.cmake)
+endif ()
+
 if (OS_LINUX AND ARCH_AMD64 AND TIFLASH_ENABLE_AVX512_SUPPORT)
     option (ENABLE_QPL "Enable Intel Query Processing Library" OFF)
 endif()
