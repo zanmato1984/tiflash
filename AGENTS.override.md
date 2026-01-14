@@ -31,7 +31,7 @@ You must continuously track and update `.codex/progress/daemon.md` until all lis
 
    Then remove the task(s) from **To Do** or **Work in Progress**.
 
-   You must run `make playground`, `make lint && make check-static` and ensure all checks pass.
+   You must run necessary cmake/ctest and make/ninja commands and ensure all checks pass.
 
    After completion, commit your changes with a concise commit message describing the task.
 
