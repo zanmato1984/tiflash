@@ -1,0 +1,65 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja"
+    },
+    {
+      "name": "base-debug",
+      "inherits": "base",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "DEBUG"
+      }
+    },
+    {
+      "name": "internal-arrow-on",
+      "hidden": true,
+      "cacheVariables": {
+        "TIFORTH_USE_INTERNAL_ARROW": "ON"
+      }
+    },
+    {
+      "name": "tests-on",
+      "hidden": true,
+      "cacheVariables": {
+        "TIFORTH_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": [
+        "base-debug",
+        "internal-arrow-on",
+        "tests-on"
+      ],
+      "displayName": "TiForth: DEBUG build with internal Arrow and tests enabled",
+      "binaryDir": "${sourceDir}/../../cmake-build-tiforth-debug"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "displayName": "Build TiForth debug (and tests)",
+      "configurePreset": "debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "displayName": "Run TiForth tests (debug)",
+      "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
+
