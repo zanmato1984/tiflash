@@ -1,5 +1,6 @@
 #include <arrow/result.h>
 #include <arrow/status.h>
+#include <arrow/testing/gtest_util.h>
 
 #include <gtest/gtest.h>
 
@@ -29,7 +30,7 @@ arrow::Status RunSmoke() {
 
 TEST(TiForthSmokeTest, Lifecycle) {
   auto status = RunSmoke();
-  ASSERT_TRUE(status.ok()) << status.ToString();
+  ASSERT_OK(status);
 }
 
 }  // namespace tiforth
