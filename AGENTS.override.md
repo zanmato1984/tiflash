@@ -50,4 +50,3 @@ You must continuously track and update `.codex/progress/daemon.md` until all lis
 ## Requirements
 
 - Do **not** ask questions. Continue working until all tasks in `.codex/progress/daemon.md` are completed.
-- While working, follow the programming guidelines defined in `/Users/breezewish/Work/tiup/components/playground-ng/AGENTS.md`.
