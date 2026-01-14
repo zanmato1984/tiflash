@@ -242,6 +242,10 @@ target_link_libraries (dbms
     kvstore
 )
 
+if (ENABLE_ARROW)
+    target_link_libraries(dbms ${ARROW_LIBRARY})
+endif ()
+
 if (ENABLE_CLARA)
     target_link_libraries(dbms clara_shared)
 endif ()
