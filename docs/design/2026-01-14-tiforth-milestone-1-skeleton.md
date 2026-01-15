@@ -1,9 +1,9 @@
-# tiforth Milestone 1: C++ Library Skeleton (Detailed Steps)
+# TiForth Milestone 1: C++ Library Skeleton (Detailed Steps)
 
 - Author(s): TBD
 - Last Updated: 2026-01-14
 - Status: Draft
-- Related design: `docs/design/2026-01-14-apache-arrow-internal-column-representation.md`
+- Related design: `docs/design/2026-01-14-tiforth.md`
 - Discussion PR: TBD
 - Tracking Issue: TBD
 
@@ -14,23 +14,22 @@ This document describes the detailed implementation steps for **Milestone 1** fr
 - Milestone 1 is **C++-only** (TiFlash integrates via a C++ interface).
 - The stable C ABI / cross-language FFI is deferred to a later milestone.
 
-It also covers the build/link strategy for avoiding duplicated Arrow dependencies between TiFlash and `tiforth`.
+It also sets the build/link strategy for Arrow and tests.
 
 ## Goals (Milestone 1)
 
-- `tiforth` builds as a standalone C++ library inside the TiFlash repo, with no dependency on `dbms/` headers.
+- TiForth (`tiforth`) is a **standalone / intact CMake project** that can be built independently of TiFlash.
+- TiForth has **no dependency** on `dbms/` headers or libraries.
+- TiForth builds as a **shared library by default** (`libtiforth.so` / `libtiforth.dylib`) and optionally supports static builds via `TIFORTH_LIBRARY_LINKAGE`.
+- TiForth links **shared Arrow** (dynamic `libarrow`) and exports Arrow as a **public transitive dependency**.
+- The host (TiFlash) links **only** TiForth (no direct Arrow dependency) and relies on TiForth's transitive Arrow to keep a single Arrow DSO in-process.
 - Provide a minimal C++ API for `Engine` / `Pipeline` / `Task` with **no-op** execution (ABI shape only).
-- Build `tiforth` as both:
-  - a **static** library (`tiforth_static`) that TiFlash links,
-  - a **shared** library (`tiforth_shared`) for future embedding/testing (C++ ABI not guaranteed stable).
-- `tiforth` links Apache Arrow (C++) itself.
-- Avoid duplicated Arrow builds/symbols by making TiFlash and `tiforth` depend on the same Arrow target.
-- Optionally (for non-TiFlash embedding), allow `tiforth_shared` to link Arrow **dynamically** (shared `libarrow`) so Arrow can be shared across DSOs in the same process.
+- Provide TiForth-only smoke tests for TiForth development (not wired into TiFlash tests).
 
 ## Non-goals (Milestone 1)
 
 - No compute operators/functions are implemented.
-- No Arrow C Stream import/export yet (planned in a later milestone).
+- No Arrow `RecordBatch` / `RecordBatchReader` input/output surface yet (planned in a later milestone).
 - No TiFlash planner/executor integration (only build + API scaffolding).
 - No C ABI / cross-language FFI.
 - No performance work.
@@ -39,25 +38,27 @@ It also covers the build/link strategy for avoiding duplicated Arrow dependencie
 
 1. Repository layout under `libs/tiforth/`.
 2. CMake targets:
-   - `tiforth_static` (static library; linked by TiFlash),
-   - `tiforth_shared` (shared library; optional).
+   - `tiforth` (library; linkage via `TIFORTH_LIBRARY_LINKAGE`).
 3. Public headers under `libs/tiforth/include/`.
 4. Minimal no-op implementation:
    - `Engine` create/destroy,
    - `PipelineBuilder` finalize,
    - `Pipeline` task creation,
    - `Task::Step()` reaches a deterministic terminal state.
-5. A smoke test binary validating basic lifecycle.
+5. Standalone TiForth build works via `cmake -S libs/tiforth -B <build_dir>`.
+6. A smoke test binary validating basic lifecycle (enabled only for TiForth development).
+7. Smoke tests validating Arrow core + compute are linkable and usable (enabled only for TiForth development).
 
 ## Step-by-step
 
 ### 0) Preconditions
 
-- Arrow is configured through TiFlash’s existing mechanism:
-  - `-DENABLE_ARROW=ON`
-  - internal Arrow (`contrib/arrow`) or a system `Arrow::arrow_static` (see `cmake/find_arrow.cmake`).
-- `tiforth` must reuse the same Arrow selection used by TiFlash (`${ARROW_LIBRARY}`).
-- If building `tiforth_shared` with dynamic Arrow, Arrow must also be available as a **shared** library target (see “3.4) Optional: dynamic Arrow for `tiforth_shared`”).
+- TiForth is built and tested standalone (`cmake -S libs/tiforth ...`).
+- Arrow is required:
+  - Default: build bundled Arrow **22.0.0** via FetchContent (`TIFORTH_ARROW_PROVIDER=bundled`).
+  - System option: use system Arrow via `find_package(Arrow)` / `find_package(ArrowCompute)` (`TIFORTH_ARROW_PROVIDER=system`, must be Arrow 22.x).
+  - Linkage: `TIFORTH_ARROW_LINKAGE=(shared|static)` selects shared/static Arrow linking.
+- Tests are optional and controlled by `TIFORTH_BUILD_TESTS` (default `OFF`, top-level only).
 
 ### 1) Create directory skeleton
 
@@ -66,6 +67,12 @@ Create `libs/tiforth/` with a minimal library layout:
 ```
 libs/tiforth/
   CMakeLists.txt
+  cmake/
+    find/
+      arrow.cmake
+      gtest.cmake
+    testing/
+      testing.cmake
   include/
     tiforth/
       tiforth.h
@@ -73,9 +80,11 @@ libs/tiforth/
       pipeline.h
       task.h
   src/
-    engine.cc
-    pipeline.cc
-    task.cc
+    tiforth/
+      CMakeLists.txt
+      engine.cc
+      pipeline.cc
+      task.cc
   tests/
     CMakeLists.txt
     gtest_tiforth_smoke.cpp
@@ -87,124 +96,21 @@ Notes:
 - Keep all exported headers under `include/tiforth/…`.
 - Follow Apache Arrow C++ style for naming, errors, and formatting (see related design doc).
 
-### 2) Add CMake integration
+### 2) Create a standalone CMake project (ara-style dependency wiring)
 
-#### 2.1) Add an option
+In `libs/tiforth/CMakeLists.txt`, define `tiforth` as a normal standalone CMake project and wire dependencies similarly to the `ara` project:
 
-Add a compile-time option (root `CMakeLists.txt`, near `ENABLE_ARROW`):
+- define project options (`TIFORTH_ARROW_PROVIDER`, `TIFORTH_ARROW_LINKAGE`, `TIFORTH_BUILD_TESTS`)
+- include dependency find modules under `cmake/find/`
+- build the shared library under `src/tiforth/`
+- enable tests only when `TIFORTH_BUILD_TESTS=ON`
 
-- `option(ENABLE_TIFORTH "Build tiforth compute library" OFF)`
-- If `ENABLE_TIFORTH=ON` and `ENABLE_ARROW=OFF`, fail fast (or force-enable `ENABLE_ARROW`).
+### 3) Arrow linkage rule (simplified)
 
-#### 2.2) Hook into `libs/`
-
-In `libs/CMakeLists.txt`:
-
-- `if (ENABLE_TIFORTH) add_subdirectory(tiforth) endif()`
-
-This keeps `tiforth` in the “libs” layer and avoids pulling in `dbms/`.
-
-#### 2.3) Define both `tiforth_static` and `tiforth_shared`
-
-In `libs/tiforth/CMakeLists.txt`, build both library types from the same sources.
-
-Recommended pattern (object library):
-
-- `add_library(tiforth_obj OBJECT ...)`
-- `set_property(TARGET tiforth_obj PROPERTY POSITION_INDEPENDENT_CODE ON)` (required for shared)
-- `add_library(tiforth_static STATIC $<TARGET_OBJECTS:tiforth_obj>)`
-- `add_library(tiforth_shared SHARED $<TARGET_OBJECTS:tiforth_obj>)`
-- `set_target_properties(tiforth_static PROPERTIES OUTPUT_NAME tiforth)`
-- `set_target_properties(tiforth_shared PROPERTIES OUTPUT_NAME tiforth)`
-
-Usage requirements (apply to both `tiforth_static` and `tiforth_shared`):
-
-- `target_include_directories(<each> PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)`
-- `target_link_libraries(tiforth_static PUBLIC ${ARROW_LIBRARY})`
-- `target_link_libraries(tiforth_shared PUBLIC ${ARROW_LIBRARY})` (default; static Arrow)
-- Optional: link `tiforth_shared` against a shared Arrow target instead (see “3.4) Optional: dynamic Arrow for `tiforth_shared`”).
-
-This satisfies “the library itself links Arrow too” and ensures consumers pick up Arrow transitively.
-
-#### 2.4) Make TiFlash link `tiforth_static`
-
-In `dbms/CMakeLists.txt`:
-
-- `target_link_libraries(dbms PRIVATE tiforth_static)` when `ENABLE_TIFORTH=ON`.
-
-Do not link `tiforth_shared` into TiFlash.
-
-### 3) Solve duplicated Arrow dependency (TiFlash + tiforth)
-
-This is the key requirement for Milestone 1: `tiforth` must not introduce a second Arrow build or a second copy of Arrow symbols in the TiFlash process.
-
-#### 3.1) Build-time: single Arrow selection
-
-Rules:
-
-- `tiforth` must not fetch/build Arrow on its own.
-- `tiforth` must link Arrow only via the CMake targets resolved by `cmake/find_arrow.cmake`:
-  - `${ARROW_LIBRARY}`: the Arrow target used by TiFlash (static, today),
-  - `${ARROW_SHARED_LIBRARY}`: optional shared-Arrow target (only when dynamic Arrow is enabled for `tiforth_shared`).
-- `${ARROW_LIBRARY}` is resolved by `cmake/find_arrow.cmake` to either:
-  - `tiflash_arrow` (bundled Arrow build), or
-  - `Arrow::arrow_static` (system Arrow).
-
-Outcome: Arrow selection stays centralized and explicit, and `tiforth` does not accidentally introduce an extra Arrow build.
-
-#### 3.2) Link-time: keep Arrow on the TiFlash link line exactly once
-
-Recommended policy for Milestone 1:
-
-- `tiforth_static` links `${ARROW_LIBRARY}` as `PUBLIC`.
-- TiFlash (`dbms`) does **not** link `${ARROW_LIBRARY}` directly when `ENABLE_TIFORTH=ON`; it gets Arrow transitively via `tiforth_static`.
-
-If later some non-`tiforth` TiFlash code needs Arrow directly, it must still link `${ARROW_LIBRARY}` (same target). CMake can de-duplicate target-based dependencies.
-
-#### 3.3) Runtime: shared `tiforth` + static Arrow caveat
-
-Today, the bundled Arrow build is forced to static (`contrib/arrow-cmake` sets `ARROW_BUILD_SHARED=OFF`). If `tiforth_shared` links a static Arrow:
-
-- Arrow symbols are embedded inside `libtiforth.so`/`libtiforth.dylib`.
-- Any process that loads `tiforth_shared` must not also link another copy of Arrow C++ (static or shared), or you risk ODR/RTTI/global-singleton issues.
-
-This is why TiFlash must link `tiforth_static` (single final binary ⇒ single Arrow instance).
-
-If we later need “shared tiforth in a process that also links Arrow”, we must add a shared-Arrow build mode and make both depend on the same Arrow shared library.
-
-#### 3.4) Optional: dynamic Arrow for `tiforth_shared`
-
-This is for non-TiFlash embedding scenarios where the host process may also use Arrow and we want **one** Arrow instance shared via a DSO.
-
-Add a build option:
-
-- `option(TIFORTH_LINK_ARROW_SHARED "Link tiforth_shared against shared Arrow" OFF)`
-
-Behavior:
-
-- `tiforth_static` always links `${ARROW_LIBRARY}` (static Arrow target chosen by TiFlash).
-- If `TIFORTH_LINK_ARROW_SHARED=ON`, `tiforth_shared` links `${ARROW_SHARED_LIBRARY}` (a shared Arrow target).
-
-How to provide `${ARROW_SHARED_LIBRARY}`:
-
-- **Internal Arrow** (default build): extend `contrib/arrow-cmake` to optionally build `arrow_shared`:
-  - set `ARROW_BUILD_SHARED=ON` (and keep `ARROW_BUILD_STATIC=ON` so TiFlash still links static)
-  - add an interface target `tiflash_arrow_shared` linking to `arrow_shared` / `Arrow::arrow_shared`
-  - in `cmake/find_arrow.cmake`, set `ARROW_SHARED_LIBRARY=tiflash_arrow_shared`
-- **System Arrow**: if `find_package(Arrow CONFIG)` provides `Arrow::arrow_shared` (or `Arrow::arrow` as shared), set `ARROW_SHARED_LIBRARY` to that target.
-  - To avoid version/config mismatches, require `${ARROW_LIBRARY}` and `${ARROW_SHARED_LIBRARY}` to come from the same Arrow installation (i.e. system Arrow must provide both static + shared targets).
-
-Constraints:
-
-- When `TIFORTH_LINK_ARROW_SHARED=ON`, reject configurations where `${ARROW_SHARED_LIBRARY}` is not available.
-- Do not mix `tiforth_shared` (shared Arrow) and `tiforth_static` (static Arrow) in the same process.
-
-#### 3.5) Overall Arrow linkage matrix (what is valid)
-
-- **TiFlash binary**: `dbms` + `tiforth_static` + `${ARROW_LIBRARY}` (static) ⇒ one Arrow instance (static) in the final executable.
-- **Embedding via shared lib** (dynamic Arrow): `tiforth_shared` + `${ARROW_SHARED_LIBRARY}` (shared) ⇒ one Arrow instance (shared `libarrow`) in the process; host may also link the same shared Arrow.
-- **Embedding via shared lib** (static Arrow): `tiforth_shared` + `${ARROW_LIBRARY}` (static) ⇒ Arrow is embedded in `libtiforth`; host must not link another Arrow.
-
+- TiForth is a shared library and links to **shared Arrow**.
+- The host process must not load multiple different Arrow DSOs:
+  - TiFlash must not link Arrow directly.
+  - TiForth exports Arrow as a public transitive dependency, so the final process uses exactly one Arrow DSO.
 
 ### 4) Define minimal C++ API surface (Milestone 1)
 
@@ -242,7 +148,7 @@ Milestone 1 behavior:
 
 ### 5) Implement the no-op engine/pipeline/task
 
-Implement minimal logic in `libs/tiforth/src/`:
+Implement minimal logic in `libs/tiforth/src/tiforth/`:
 
 - `Engine` owns configuration and will later own registries/memory pool.
 - `PipelineBuilder::Finalize()` returns an empty pipeline.
@@ -258,17 +164,26 @@ Add a minimal gtest binary under `libs/tiforth/tests/` that:
 - creates a `PipelineBuilder`, finalizes it, creates a `Task`, and calls `Step()`
 - asserts the no-op task reaches the documented terminal state
 
+Add two additional smoke tests that validate Arrow dependencies are usable through TiForth's CMake wiring:
+
+- Arrow struct smoke: build an `arrow::Array` via `arrow::Int32Builder`, validate values and `ToString()`.
+- Arrow compute smoke: call an Arrow compute kernel (e.g. `arrow::compute::Add`) and validate results.
+
+Keep TiForth tests independent from TiFlash tests:
+
+- Gate TiForth tests behind `TIFORTH_BUILD_TESTS`.
+- Do not wire TiForth tests into TiFlash’s test targets.
+
 ### 7) Definition of done (Milestone 1)
 
 - Build:
-  - `cmake -DENABLE_ARROW=ON -DENABLE_TIFORTH=ON ...` configures successfully
-  - `ninja tiforth_static tiforth_shared` builds successfully
+  - `cmake -S libs/tiforth -B <build_dir> ...` configures successfully (standalone TiForth)
+  - `cmake --build <build_dir> --target tiforth` builds successfully
 - Isolation:
   - no `#include <dbms/...>` or `dbms/src/...` dependencies in `libs/tiforth/`
-  - `tiforth_*` targets do not link against `dbms`
+  - `tiforth` does not link against `dbms`
 - Arrow dependency:
-  - `tiforth_*` link `${ARROW_LIBRARY}`
-  - TiFlash links `tiforth_static` (not `tiforth_shared`)
-  - no second Arrow build is introduced by `tiforth`
+  - `tiforth` links shared Arrow (`Arrow::arrow_shared`)
 - Tests:
-  - `ctest -R tiforth` (or equivalent check target) passes
+  - `cmake -DTIFORTH_ARROW_PROVIDER=bundled -DTIFORTH_BUILD_TESTS=ON ...` configures successfully
+  - `ctest --test-dir <build_dir>` passes

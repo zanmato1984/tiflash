@@ -1,14 +1,35 @@
-cmake_minimum_required(VERSION 3.21)
+if(NOT TIFORTH_ARROW_CORE_TARGET)
+  message(FATAL_ERROR "TiForth Arrow core target is not configured")
+endif()
 
-set(CMAKE_CXX_STANDARD 20)
+if(TIFORTH_LIBRARY_LINKAGE STREQUAL "shared")
+  add_library(tiforth SHARED)
+else()
+  add_library(tiforth STATIC)
+  set_target_properties(tiforth PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+add_library(tiforth::tiforth ALIAS tiforth)
 
-set(TIFORTH_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/engine.cc"
-        "${CMAKE_CURRENT_SOURCE_DIR}/pipeline.cc"
-        "${CMAKE_CURRENT_SOURCE_DIR}/task.cc")
+target_sources(tiforth PRIVATE engine.cc pipeline.cc task.cc)
+target_compile_features(tiforth PUBLIC cxx_std_20)
 
-set(TIFORTH_DEPENDENCIES Arrow::arrow_shared ArrowCompute::arrow_compute_shared)
+target_include_directories(
+  tiforth
+  PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>)
 
-add_library(tiforth SHARED ${TIFORTH_SRC})
-target_include_directories(tiforth PUBLIC "${CMAKE_SOURCE_DIR}/include")
-target_link_libraries(tiforth PUBLIC ${TIFORTH_DEPENDENCIES})
+if(TIFORTH_ARROW_INCLUDE_DIRS)
+  foreach(_tiforth_arrow_inc_dir IN LISTS TIFORTH_ARROW_INCLUDE_DIRS)
+    target_include_directories(tiforth SYSTEM PUBLIC "$<BUILD_INTERFACE:${_tiforth_arrow_inc_dir}>")
+  endforeach()
+endif()
+
+target_link_libraries(tiforth PUBLIC ${TIFORTH_ARROW_CORE_TARGET})
+if(TIFORTH_ARROW_COMPUTE_TARGET)
+  target_link_libraries(tiforth PUBLIC ${TIFORTH_ARROW_COMPUTE_TARGET})
+endif()
+
+if(TIFORTH_LIBRARY_LINKAGE STREQUAL "shared")
+  set_target_properties(
+    tiforth
+    PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+endif()

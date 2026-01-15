@@ -199,10 +199,6 @@ add_subdirectory(simdjson)
 
 add_subdirectory(fastpforlib)
 
-if (ENABLE_ARROW AND USE_INTERNAL_ARROW_LIBRARY)
-    add_subdirectory (arrow-cmake)
-endif ()
-
 add_subdirectory(usearch-cmake)
 
 add_subdirectory(simsimd-cmake)

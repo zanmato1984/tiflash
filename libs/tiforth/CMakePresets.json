@@ -16,14 +16,15 @@
       "inherits": "base",
       "hidden": true,
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "DEBUG"
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
-      "name": "internal-arrow-on",
+      "name": "bundled-arrow",
       "hidden": true,
       "cacheVariables": {
-        "TIFORTH_USE_INTERNAL_ARROW": "ON"
+        "TIFORTH_ARROW_PROVIDER": "bundled",
+        "TIFORTH_ARROW_LINKAGE": "shared"
       }
     },
     {
@@ -37,11 +38,11 @@
       "name": "debug",
       "inherits": [
         "base-debug",
-        "internal-arrow-on",
+        "bundled-arrow",
         "tests-on"
       ],
-      "displayName": "TiForth: DEBUG build with internal Arrow and tests enabled",
-      "binaryDir": "${sourceDir}/../../cmake-build-tiforth-debug"
+      "displayName": "TiForth: Debug build with bundled Arrow and tests enabled",
+      "binaryDir": "${sourceDir}/build-debug"
     }
   ],
   "buildPresets": [
@@ -62,4 +63,3 @@
     }
   ]
 }
-

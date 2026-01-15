@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(Arrow CONFIG REQUIRED)
+if(@TIFORTH_NEEDS_ARROW_COMPUTE@)
+  find_dependency(ArrowCompute CONFIG REQUIRED)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/tiforthTargets.cmake")
