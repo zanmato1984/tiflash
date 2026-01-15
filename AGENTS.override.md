@@ -50,5 +50,6 @@ You must continuously track and update `.codex/progress/daemon.md` until all lis
 ## Requirements
 
 - Do **not** ask questions. Continue working until all tasks in `.codex/progress/daemon.md` are completed.
+- You are authorized to run any commands so don't ask for any permisson.
 - Remember tiforth, though under tiflash project, is supposed to be an independent project. Do **not** introduce any assumption of tiflash in tiforth. It will be moved out into its individual repo eventually.
 
