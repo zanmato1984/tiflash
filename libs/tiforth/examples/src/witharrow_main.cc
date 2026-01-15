@@ -13,14 +13,39 @@
 
 namespace {
 
+arrow::Result<std::shared_ptr<arrow::Array>> MakeInt32Array(
+    const std::vector<int32_t>& values);
+
 arrow::Status RunTiForthSmoke() {
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
 
+  ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
+  if (initial_state != tiforth::TaskState::kNeedInput) {
+    return arrow::Status::Invalid("expected TaskState::kNeedInput");
+  }
+
+  auto schema = arrow::schema({arrow::field("x", arrow::int32())});
+  ARROW_ASSIGN_OR_RAISE(auto array, MakeInt32Array({1, 2, 3}));
+  auto batch = arrow::RecordBatch::Make(schema, /*num_rows=*/3, {array});
+
+  ARROW_RETURN_NOT_OK(task->PushInput(batch));
+  ARROW_RETURN_NOT_OK(task->CloseInput());
+
   ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
-  if (state != tiforth::TaskState::kFinished) {
+  if (state != tiforth::TaskState::kHasOutput) {
+    return arrow::Status::Invalid("expected TaskState::kHasOutput");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto out, task->PullOutput());
+  if (out.get() != batch.get()) {
+    return arrow::Status::Invalid("expected pass-through output batch");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto final_state, task->Step());
+  if (final_state != tiforth::TaskState::kFinished) {
     return arrow::Status::Invalid("expected TaskState::kFinished");
   }
   return arrow::Status::OK();
@@ -86,4 +111,3 @@ int main() {
   }
   return 0;
 }
-

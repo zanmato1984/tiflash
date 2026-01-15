@@ -3,6 +3,7 @@
 #include <memory>
 
 #include <arrow/result.h>
+#include <arrow/record_batch.h>
 
 #include "tiforth/engine.h"
 #include "tiforth/task.h"
@@ -34,6 +35,8 @@ class Pipeline {
   Pipeline& operator=(const Pipeline&) = delete;
 
   arrow::Result<std::unique_ptr<Task>> CreateTask() const;
+  arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> MakeReader(
+      std::shared_ptr<arrow::RecordBatchReader> input) const;
 
  private:
   explicit Pipeline(const Engine* engine);

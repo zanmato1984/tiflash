@@ -2,9 +2,13 @@
 - (none)
 
 # To Do
-- (none)
+- MS3: write milestone design doc (`docs/design/2026-01-14-tiforth-milestone-3-projection-scalar-functions.md`) with API/plan representation + minimal scalar function set.
+- MS3: implement Projection operator + small scalar functions (single-input/single-output path); add unit tests and update examples.
+- MS4: write milestone design doc (Filter + expression evaluation + differential tests plan).
+- MS4: implement Filter + expression evaluation; expand tests with equivalence checks.
 
 # Completed
+- MS2 (hello pipeline): Task supports `PushInput`/`CloseInput`/`PullOutput` + optional `SetInputReader`; Pipeline supports `MakeReader` (reader→reader wrapper owning internal Task); pass-through operator (zero-copy batch forwarding); update TiForth tests/examples and TiFlash integration smoke. Validation: `cmake -S libs/tiforth -B libs/tiforth/build-debug -DTIFORTH_BUILD_TESTS=ON` + `ninja -C libs/tiforth/build-debug` + `ctest --test-dir libs/tiforth/build-debug`; `ninja -C cmake-build-tiflash-tiforth tiforth` OK. Files: docs/design/2026-01-14-tiforth-milestone-2-recordbatch-plumbing.md, libs/tiforth/include/tiforth/{task.h,pipeline.h}, libs/tiforth/src/tiforth/{task.cc,pipeline.cc}, libs/tiforth/tests/{CMakeLists.txt,tiforth_smoke_test.cpp,tiforth_pass_through_reader_test.cpp}, libs/tiforth/examples/src/{noarrow_main.cc,witharrow_main.cc}, dbms/src/Flash/tests/gtest_tiforth_integration.cpp, libs/tiforth/.gitignore.
 - TiForth build + Arrow: always require ArrowCompute; parent Arrow target reuse now requires separate compute target and forbids `TIFORTH_BUILD_TESTS`; tests explicitly link ArrowTesting; package config always depends on ArrowCompute; simplify linkage validation. Files: libs/tiforth/CMakeLists.txt, libs/tiforth/cmake/find/arrow.cmake, libs/tiforth/cmake/find/gtest.cmake, libs/tiforth/cmake/testing/testing.cmake, libs/tiforth/cmake/tiforthConfig.cmake.in, libs/tiforth/src/tiforth/CMakeLists.txt
 - TiFlash integration + Arrow removal: replace old `ENABLE_ARROW` plumbing with `ENABLE_TIFORTH`; stop assuming in-tree Arrow; remove Arrow submodule + NOTICE entry. Files: CMakeLists.txt, libs/CMakeLists.txt, dbms/CMakeLists.txt, dbms/src/Server/CMakeLists.txt, dbms/src/Flash/tests/gtest_tiforth_integration.cpp, contrib/CMakeLists.txt, NOTICE, .gitmodules; deleted: cmake/find_arrow.cmake, contrib/arrow, contrib/arrow-cmake/CMakeLists.txt
 - Validation: `ctest --test-dir libs/tiforth/build-debug` OK; TiFlash configure OK; `ninja -C cmake-build-tiflash-tiforth tiforth` OK (used `-DFETCHCONTENT_SOURCE_DIR_ARROW=libs/tiforth/build-debug/_deps/arrow-src` after removing contrib/arrow). Notes: full TiFlash build may still be disk-heavy due to `tiflash-proxy`.
