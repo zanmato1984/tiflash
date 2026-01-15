@@ -8,11 +8,6 @@ Revision: 215105818dfde3174fe799600bb0f3cae233d0bf
 Address: https://github.com/abseil/abseil-cpp
 License: https://github.com/abseil/abseil-cpp/blob/master/LICENSE
 --------------------------------------
-arrow
-Revision: 5aeb5f217f1ba39c428c9b481f393bd37097f69e
-Address: https://github.com/apache/arrow
-License: https://github.com/apache/arrow/blob/apache-arrow-22.0.0/LICENSE.txt
---------------------------------------
 benchmark
 Revision: f91b6b42b1b9854772a90ae9501464a161707d1e
 Address: https://github.com/google/benchmark

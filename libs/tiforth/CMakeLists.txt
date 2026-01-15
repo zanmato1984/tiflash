@@ -20,8 +20,7 @@ set_property(CACHE TIFORTH_ARROW_LINKAGE PROPERTY STRINGS shared static)
 set(TIFORTH_LIBRARY_LINKAGE "shared" CACHE STRING "TiForth library linkage (shared|static)")
 set_property(CACHE TIFORTH_LIBRARY_LINKAGE PROPERTY STRINGS shared static)
 
-set(_tiforth_allowed_library_linkages shared static)
-if(NOT TIFORTH_LIBRARY_LINKAGE IN_LIST _tiforth_allowed_library_linkages)
+if(NOT (TIFORTH_LIBRARY_LINKAGE STREQUAL "shared" OR TIFORTH_LIBRARY_LINKAGE STREQUAL "static"))
   message(
     FATAL_ERROR
     "Invalid TIFORTH_LIBRARY_LINKAGE='${TIFORTH_LIBRARY_LINKAGE}'. Allowed: shared|static")
@@ -52,10 +51,6 @@ install(EXPORT tiforthTargets
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/tiforth)
 
 include(CMakePackageConfigHelpers)
-set(TIFORTH_NEEDS_ARROW_COMPUTE OFF)
-if(TIFORTH_ARROW_COMPUTE_TARGET)
-  set(TIFORTH_NEEDS_ARROW_COMPUTE ON)
-endif()
 configure_package_config_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tiforthConfig.cmake.in"
   "${CMAKE_CURRENT_BINARY_DIR}/tiforthConfig.cmake"

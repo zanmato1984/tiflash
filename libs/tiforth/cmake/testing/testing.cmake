@@ -10,8 +10,9 @@ endif()
 
 function(add_tiforth_test TEST_NAME TEST_SRC)
   add_executable(${TEST_NAME} ${TEST_SRC})
-  target_link_libraries(${TEST_NAME} tiforth GTest::gtest GTest::gtest_main Threads::Threads)
-  target_link_libraries(${TEST_NAME} ${TIFORTH_ARROW_TESTING_TARGET})
+  target_link_libraries(
+    ${TEST_NAME}
+    PRIVATE tiforth GTest::gtest GTest::gtest_main Threads::Threads ${TIFORTH_ARROW_TESTING_TARGET})
   set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gtests")
   add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
 endfunction()

@@ -2,6 +2,10 @@ if(NOT TIFORTH_ARROW_CORE_TARGET)
   message(FATAL_ERROR "TiForth Arrow core target is not configured")
 endif()
 
+if(NOT TIFORTH_ARROW_COMPUTE_TARGET)
+  message(FATAL_ERROR "TiForth Arrow compute target is not configured")
+endif()
+
 if(TIFORTH_LIBRARY_LINKAGE STREQUAL "shared")
   add_library(tiforth SHARED)
 else()
@@ -24,9 +28,7 @@ if(TIFORTH_ARROW_INCLUDE_DIRS)
 endif()
 
 target_link_libraries(tiforth PUBLIC ${TIFORTH_ARROW_CORE_TARGET})
-if(TIFORTH_ARROW_COMPUTE_TARGET)
-  target_link_libraries(tiforth PUBLIC ${TIFORTH_ARROW_COMPUTE_TARGET})
-endif()
+target_link_libraries(tiforth PUBLIC ${TIFORTH_ARROW_COMPUTE_TARGET})
 
 if(TIFORTH_LIBRARY_LINKAGE STREQUAL "shared")
   set_target_properties(

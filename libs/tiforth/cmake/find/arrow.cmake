@@ -45,27 +45,6 @@ function(_tiforth_try_select_target OUT_VAR)
   set(${OUT_VAR} "" PARENT_SCOPE)
 endfunction()
 
-function(_tiforth_target_links_arrow_compute OUT_VAR TARGET_NAME)
-  if(NOT TARGET "${TARGET_NAME}")
-    set(${OUT_VAR} OFF PARENT_SCOPE)
-    return()
-  endif()
-
-  get_target_property(_tiforth_link_libs "${TARGET_NAME}" INTERFACE_LINK_LIBRARIES)
-  if(NOT _tiforth_link_libs)
-    set(_tiforth_link_libs "")
-  endif()
-
-  foreach(_tiforth_link IN LISTS _tiforth_link_libs)
-    if(_tiforth_link MATCHES "arrow_compute")
-      set(${OUT_VAR} ON PARENT_SCOPE)
-      return()
-    endif()
-  endforeach()
-
-  set(${OUT_VAR} OFF PARENT_SCOPE)
-endfunction()
-
 # If the parent project already provides Arrow targets, reuse them and avoid
 # building/finding a second copy.
 #
@@ -73,7 +52,6 @@ endfunction()
 # multiple Arrow builds in one process is fragile.
 set(_tiforth_parent_arrow_core "")
 set(_tiforth_parent_arrow_compute "")
-set(_tiforth_parent_arrow_testing "")
 if(TIFORTH_ARROW_LINKAGE STREQUAL "shared")
   _tiforth_try_select_target(_tiforth_parent_arrow_core arrow Arrow::arrow Arrow::arrow_shared arrow_shared)
   _tiforth_try_select_target(
@@ -82,12 +60,6 @@ if(TIFORTH_ARROW_LINKAGE STREQUAL "shared")
     ArrowCompute::arrow_compute
     ArrowCompute::arrow_compute_shared
     arrow_compute_shared)
-  _tiforth_try_select_target(
-    _tiforth_parent_arrow_testing
-    ArrowTesting::arrow_testing
-    ArrowTesting::arrow_testing_shared
-    arrow_testing
-    arrow_testing_shared)
 else()
   _tiforth_try_select_target(_tiforth_parent_arrow_core arrow Arrow::arrow Arrow::arrow_static arrow_static)
   _tiforth_try_select_target(
@@ -96,36 +68,28 @@ else()
     ArrowCompute::arrow_compute
     ArrowCompute::arrow_compute_static
     arrow_compute_static)
-  _tiforth_try_select_target(
-    _tiforth_parent_arrow_testing
-    ArrowTesting::arrow_testing
-    ArrowTesting::arrow_testing_static
-    arrow_testing
-    arrow_testing_static)
 endif()
 
 if(_tiforth_parent_arrow_core)
-  if(NOT _tiforth_parent_arrow_compute)
-    _tiforth_target_links_arrow_compute(_tiforth_parent_core_has_compute "${_tiforth_parent_arrow_core}")
-    if(NOT _tiforth_parent_core_has_compute)
-      message(
-        FATAL_ERROR
-        "Parent-provided Arrow target '${_tiforth_parent_arrow_core}' is missing Arrow compute; "
-        "provide an arrow_compute target or ensure the Arrow target links compute transitively")
-    endif()
+  if(TIFORTH_BUILD_TESTS)
+    message(
+      FATAL_ERROR
+      "TIFORTH_BUILD_TESTS must be OFF when using parent-provided Arrow targets")
   endif()
 
-  message(STATUS "Using parent-provided Arrow target: '${_tiforth_parent_arrow_core}'")
-  if(_tiforth_parent_arrow_compute)
-    message(STATUS "Using parent-provided Arrow compute target: '${_tiforth_parent_arrow_compute}'")
+  if(NOT _tiforth_parent_arrow_compute)
+    message(
+      FATAL_ERROR
+      "Parent-provided Arrow target '${_tiforth_parent_arrow_core}' is missing Arrow compute; "
+      "provide a compute target (arrow_compute / ArrowCompute::arrow_compute*)")
   endif()
-  if(_tiforth_parent_arrow_testing)
-    message(STATUS "Using parent-provided Arrow testing target: '${_tiforth_parent_arrow_testing}'")
-  endif()
+
+  message(STATUS "Using parent-provided Arrow core target: '${_tiforth_parent_arrow_core}'")
+  message(STATUS "Using parent-provided Arrow compute target: '${_tiforth_parent_arrow_compute}'")
 
   set(TIFORTH_ARROW_CORE_TARGET "${_tiforth_parent_arrow_core}")
   set(TIFORTH_ARROW_COMPUTE_TARGET "${_tiforth_parent_arrow_compute}")
-  set(TIFORTH_ARROW_TESTING_TARGET "${_tiforth_parent_arrow_testing}")
+  set(TIFORTH_ARROW_TESTING_TARGET "")
   set(TIFORTH_ARROW_INCLUDE_DIRS "")
   return()
 endif()
