@@ -48,6 +48,10 @@ It also sets the build/link strategy for Arrow and tests.
 5. Standalone TiForth build works via `cmake -S libs/tiforth -B <build_dir>`.
 6. A smoke test binary validating basic lifecycle (enabled only for TiForth development).
 7. Smoke tests validating Arrow core + compute are linkable and usable (enabled only for TiForth development).
+8. Consumer-facing example projects under `libs/tiforth/examples/` covering:
+   - app uses Arrow or not,
+   - Arrow system vs bundled (and static/shared when relevant),
+   - TiForth system vs bundled (and static/shared).
 
 ## Step-by-step
 
