@@ -1,10 +1,10 @@
 # Work in Progress
-- MS9C: TiFlash (guarded): add a tiny end-to-end runner `RunTiForthPipelineOnBlocks(...)` (Block input -> Arrow -> TiForth task -> Arrow -> Block) used only by tests initially; add one gtest that validates operator output via Block assertions.
-
-# To Do
 - MS9D: TiForth: extend hash agg + hash join to support 2-key composite keys on the common path (int32/uint64/decimal/binary), reuse collation normalization per key; add unit tests.
 
+# To Do
+
 # Completed
+- MS9C: TiFlash (guarded): add `RunTiForthPipelineOnBlocks(...)` helper (Block -> Arrow -> TiForth task -> Arrow -> Block) and a gtest that asserts on `DB::Block` output (collation-aware string filter). Decisions: keep it test-only for now; validate stable Arrow schema across input blocks; treat `TaskState::kBlocked` as NOT_IMPLEMENTED. Files: dbms/src/Flash/TiForth/BlockPipelineRunner.{h,cpp}, dbms/src/Flash/tests/gtest_tiforth_block_runner.cpp, .codex/progress/daemon.md. Tests: `cmake -S . -B cmake-build-tiflash-tiforth-debug && ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms && ./cmake-build-tiflash-tiforth-debug/dbms/gtests_dbms --gtest_filter=TiForth*`.
 - MS9B: TiFlash (guarded): add Arrow `RecordBatch` -> `DB::Block` conversion for common types (int/uint/float, decimal128/256, MyDate/MyDateTime packed uint64, binary string). Decisions: reconstruct TiFlash logical types from Arrow field metadata (`tiforth.*`) and keep collation id in a side-channel `options_by_name` map since `DB::Block` has no collation; only support canonical decimal widths (non-256 uses Arrow decimal128, 256 uses decimal256). Files: dbms/src/Flash/TiForth/ArrowBlockConversion.{h,cpp}, dbms/src/Flash/tests/gtest_tiforth_block_roundtrip.cpp. Tests: `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms && ./cmake-build-tiflash-tiforth-debug/dbms/gtests_dbms --gtest_filter=TiForth*`.
 - MS9A: design milestone 9 host integration plan (TiFlash first). Decisions: keep Arrow metadata as contract, add Block<->Arrow reverse mapping + a Block runner adapter (tests first), defer real pipeline translation until Block bridge is validated. Files: docs/design/2026-01-14-tiforth-milestone-9-host-integration.md, .codex/progress/daemon.md.
 - Review: milestones 1-8 done (common path + type mapping); next gap is host integration beyond Arrow-only gtests (Block in/out + real translation). Derived MS9A-D tasks and prioritized Block<->Arrow bridge + composite keys.
