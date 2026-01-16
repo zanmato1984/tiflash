@@ -1,10 +1,11 @@
 # Work in Progress
-- MS4B: add TiFlash gtest (guarded by `TIFLASH_ENABLE_TIFORTH`) translating a TiFlash DAG with filter into a TiForth pipeline; validate output (start with hardcoded expected, later diff vs TiFlash exec).
+- MS5: write milestone design doc (hash aggregation + minimal aggregate functions + test strategy).
 
 # To Do
-- (none)
+- MS5: implement hash aggregation operator (common path: single input, no partial merge) + minimal aggregate funcs; add unit tests + one TiFlash translation smoke (guarded by `TIFLASH_ENABLE_TIFORTH`).
 
 # Completed
+- MS4B: TiFlash gtest translating a TiFlash DAG with filter into a TiForth pipeline (dummy filter op -> TiForth `FilterTransformOp` with hardcoded predicate `x > 1`); validate filtered Arrow output. Guarded by `TIFLASH_ENABLE_TIFORTH`. Validation: `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms` + `gtests_dbms --gtest_filter=TiForthPipelineTranslateTest.*` OK. Files: dbms/src/Flash/tests/gtest_tiforth_pipeline_translate.cpp, .codex/progress/daemon.md.
 - MS4A: add `FilterTransformOp` (SQL WHERE: keep TRUE; drop FALSE/NULL) using Arrow compute `Filter` + cached output schema; refactor Arrow compute init into `tiforth::detail::EnsureArrowComputeInitialized()` (shared by Expr eval and operators); add `tiforth_filter_test`. Validation: `ninja -C libs/tiforth/build-debug` + `ctest --test-dir libs/tiforth/build-debug`; `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms` + `gtests_dbms --gtest_filter=TiForthPipelineTranslateTest.*` OK. Files: libs/tiforth/include/tiforth/{tiforth.h,detail/arrow_compute.h,operators/filter.h}, libs/tiforth/src/tiforth/{CMakeLists.txt,expr.cc,detail/arrow_compute.cc,operators/filter.cc}, libs/tiforth/tests/{CMakeLists.txt,tiforth_filter_test.cpp}, .codex/progress/daemon.md.
 - MS4 design: Filter + predicate evaluation plan (SQL WHERE semantics via Arrow compute filter; minimal boolean/comparison kernels; initial differential testing plan). Files: docs/design/2026-01-14-tiforth-milestone-4-filter-expression-evaluation.md, .codex/progress/daemon.md.
 - MS2-MS3 foundation: Arrow boundary + build/integration (always require ArrowCompute; simplify gtest discovery; add consumer examples matrix; remove in-tree Arrow; TiFlash option `ENABLE_TIFORTH` + macro guard `TIFLASH_ENABLE_TIFORTH`). Files: libs/tiforth/CMakeLists.txt, libs/tiforth/cmake/find/*, libs/tiforth/examples/*, top-level CMakeLists.txt and dbms CMakeLists/tests.

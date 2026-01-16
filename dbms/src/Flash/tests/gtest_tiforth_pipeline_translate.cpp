@@ -16,6 +16,8 @@
 #include <arrow/status.h>
 
 #include "tiforth/engine.h"
+#include "tiforth/expr.h"
+#include "tiforth/operators/filter.h"
 #include "tiforth/operators/pass_through.h"
 #include "tiforth/pipeline.h"
 #include "tiforth/task.h"
@@ -60,6 +62,23 @@ class DummyTransformOp final : public TransformOp {
   void transformHeaderImpl(Block& header) override { (void)header; }
 };
 
+class DummyFilterTransformOp final : public TransformOp {
+ public:
+  explicit DummyFilterTransformOp(PipelineExecutorContext& exec_context, const String& req_id)
+      : TransformOp(exec_context, req_id) {}
+
+  String getName() const override { return "DummyFilterTransformOp"; }
+
+ protected:
+  OperatorStatus transformImpl(Block& block) override {
+    // This operator is used only for constructing a TiFlash-shaped DAG in this test.
+    // TiForth performs the real filtering after translation.
+    return block ? OperatorStatus::HAS_OUTPUT : OperatorStatus::NEED_INPUT;
+  }
+
+  void transformHeaderImpl(Block& header) override { (void)header; }
+};
+
 class DummySinkOp final : public SinkOp {
  public:
   explicit DummySinkOp(PipelineExecutorContext& exec_context, const String& req_id)
@@ -90,9 +109,21 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag,
   if (builder == nullptr) {
     return arrow::Status::Invalid("builder must not be null");
   }
+
   // Common path: single source -> N transforms -> single sink.
-  // Map each TiFlash transform to a TiForth pass-through transform for now.
-  for (size_t i = 0; i < dag.transform_ops.size(); ++i) {
+  // Only translate the simplest cases needed by tests.
+  for (const auto& transform : dag.transform_ops) {
+    if (dynamic_cast<const DummyFilterTransformOp*>(transform.get()) != nullptr) {
+      auto predicate = tiforth::MakeCall(
+          "greater", {tiforth::MakeFieldRef("x"),
+                      tiforth::MakeLiteral(std::make_shared<arrow::Int32Scalar>(1))});
+      ARROW_RETURN_NOT_OK(builder->AppendTransform(
+          [predicate]() -> arrow::Result<tiforth::TransformOpPtr> {
+            return std::make_unique<tiforth::FilterTransformOp>(predicate);
+          }));
+      continue;
+    }
+
     ARROW_RETURN_NOT_OK(builder->AppendTransform(
         []() -> arrow::Result<tiforth::TransformOpPtr> {
           return std::make_unique<tiforth::PassThroughTransformOp>();
@@ -143,10 +174,68 @@ arrow::Status RunTranslationSmoke() {
   return arrow::Status::OK();
 }
 
+arrow::Status RunFilterTranslationSmoke() {
+  PipelineExecutorContext exec_context;
+  const String req_id = "tiforth_pipeline_translate_filter";
+
+  PipelineExecBuilder dag;
+  dag.setSourceOp(std::make_unique<DummySourceOp>(exec_context, req_id));
+  dag.appendTransformOp(std::make_unique<DummyFilterTransformOp>(exec_context, req_id));
+  dag.setSinkOp(std::make_unique<DummySinkOp>(exec_context, req_id));
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, builder.get()));
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
+
+  ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
+  if (initial_state != tiforth::TaskState::kNeedInput) {
+    return arrow::Status::Invalid("expected TaskState::kNeedInput");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto input, MakeBatch());
+  ARROW_RETURN_NOT_OK(task->PushInput(input));
+  ARROW_RETURN_NOT_OK(task->CloseInput());
+
+  ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
+  if (state != tiforth::TaskState::kHasOutput) {
+    return arrow::Status::Invalid("expected TaskState::kHasOutput");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto output, task->PullOutput());
+  if (output == nullptr) {
+    return arrow::Status::Invalid("expected non-null output");
+  }
+  if (output->num_columns() != 1 || output->num_rows() != 2) {
+    return arrow::Status::Invalid("unexpected filtered output shape");
+  }
+
+  arrow::Int32Builder builder_x;
+  ARROW_RETURN_NOT_OK(builder_x.AppendValues({2, 3}));
+  std::shared_ptr<arrow::Array> expect_x;
+  ARROW_RETURN_NOT_OK(builder_x.Finish(&expect_x));
+  if (!expect_x->Equals(*output->column(0))) {
+    return arrow::Status::Invalid("unexpected filtered output values");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto final_state, task->Step());
+  if (final_state != tiforth::TaskState::kFinished) {
+    return arrow::Status::Invalid("expected TaskState::kFinished");
+  }
+
+  return arrow::Status::OK();
+}
+
 }  // namespace
 
 TEST(TiForthPipelineTranslateTest, TiFlashDagToTiForth) {
   auto status = RunTranslationSmoke();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthPipelineTranslateTest, TiFlashDagWithFilterToTiForth) {
+  auto status = RunFilterTranslationSmoke();
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 
@@ -160,4 +249,3 @@ TEST(TiForthPipelineTranslateTest, Disabled) {
 }
 
 #endif
-
