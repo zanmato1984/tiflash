@@ -294,7 +294,7 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag,
       std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches;
       build_batches.push_back(arrow::RecordBatch::Make(build_schema, /*num_rows=*/4, {k_array, bv_array}));
 
-      tiforth::JoinKey key{.left = "k", .right = "k"};
+      tiforth::JoinKey key{.left = {"k"}, .right = {"k"}};
       ARROW_RETURN_NOT_OK(builder->AppendTransform(
           [build_batches, key]() -> arrow::Result<tiforth::TransformOpPtr> {
             return std::make_unique<tiforth::HashJoinTransformOp>(build_batches, key);

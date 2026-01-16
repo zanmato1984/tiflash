@@ -40,37 +40,61 @@ std::size_t HashBytes(const std::array<uint8_t, N>& bytes) noexcept {
 }  // namespace
 
 std::size_t HashAggTransformOp::KeyHash::operator()(const NormalizedKey& key) const noexcept {
-  if (key.is_null) {
-    return 0x9e3779b97f4a7c15ULL;
+  // FNV-1a style mixing over key parts (supports 1 or 2 keys).
+  uint64_t h = 14695981039346656037ULL;
+  h ^= static_cast<uint64_t>(key.key_count);
+  h *= 1099511628211ULL;
+
+  for (uint8_t i = 0; i < key.key_count && i < key.parts.size(); ++i) {
+    const auto& part = key.parts[i];
+    if (part.is_null) {
+      h ^= 0x9e3779b97f4a7c15ULL;
+      h *= 1099511628211ULL;
+      continue;
+    }
+    const std::size_t part_hash = std::visit(
+        [&](const auto& v) -> std::size_t {
+          using V = std::decay_t<decltype(v)>;
+          if constexpr (std::is_same_v<V, int32_t>) {
+            return std::hash<int32_t>{}(v);
+          } else if constexpr (std::is_same_v<V, uint64_t>) {
+            return std::hash<uint64_t>{}(v);
+          } else if constexpr (std::is_same_v<V, Decimal128Bytes> ||
+                               std::is_same_v<V, Decimal256Bytes>) {
+            return HashBytes(v);
+          } else if constexpr (std::is_same_v<V, std::string>) {
+            return std::hash<std::string>{}(v);
+          } else {
+            return 0;
+          }
+        },
+        part.value);
+    h ^= static_cast<uint64_t>(part_hash);
+    h *= 1099511628211ULL;
   }
-  return std::visit(
-      [&](const auto& v) -> std::size_t {
-        using V = std::decay_t<decltype(v)>;
-        if constexpr (std::is_same_v<V, int32_t>) {
-          return std::hash<int32_t>{}(v);
-        } else if constexpr (std::is_same_v<V, uint64_t>) {
-          return std::hash<uint64_t>{}(v);
-        } else if constexpr (std::is_same_v<V, Decimal128Bytes> ||
-                             std::is_same_v<V, Decimal256Bytes>) {
-          return HashBytes(v);
-        } else if constexpr (std::is_same_v<V, std::string>) {
-          return std::hash<std::string>{}(v);
-        } else {
-          return 0;
-        }
-      },
-      key.value);
+
+  return static_cast<std::size_t>(h);
 }
 
 bool HashAggTransformOp::KeyEq::operator()(const NormalizedKey& lhs,
                                            const NormalizedKey& rhs) const noexcept {
-  if (lhs.is_null != rhs.is_null) {
+  if (lhs.key_count != rhs.key_count) {
     return false;
   }
-  if (lhs.is_null) {
-    return true;
+  for (uint8_t i = 0; i < lhs.key_count && i < lhs.parts.size(); ++i) {
+    const auto& l = lhs.parts[i];
+    const auto& r = rhs.parts[i];
+    if (l.is_null != r.is_null) {
+      return false;
+    }
+    if (l.is_null) {
+      continue;
+    }
+    if (l.value != r.value) {
+      return false;
+    }
   }
-  return lhs.value == rhs.value;
+  return true;
 }
 
 HashAggTransformOp::HashAggTransformOp(std::vector<AggKey> keys, std::vector<AggFunc> aggs,
@@ -124,60 +148,76 @@ uint32_t HashAggTransformOp::GetOrAddGroup(const NormalizedKey& key, OutputKey o
 }
 
 arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) {
-  if (keys_.size() != 1) {
-    return arrow::Status::NotImplemented("MS5 supports exactly one group key");
+  const std::size_t key_count = keys_.size();
+  if (key_count == 0 || key_count > 2) {
+    return arrow::Status::NotImplemented("MS9 supports 1 or 2 group keys");
   }
-  if (keys_[0].expr == nullptr) {
-    return arrow::Status::Invalid("group key expr must not be null");
+  for (std::size_t i = 0; i < key_count; ++i) {
+    if (keys_[i].name.empty()) {
+      return arrow::Status::Invalid("group key name must not be empty");
+    }
+    if (keys_[i].expr == nullptr) {
+      return arrow::Status::Invalid("group key expr must not be null");
+    }
   }
 
   arrow::compute::ExecContext exec_context(memory_pool_);
-  ARROW_ASSIGN_OR_RAISE(auto key_array_any,
-                        EvalExprAsArray(input, *keys_[0].expr, &exec_context));
-  if (key_array_any == nullptr) {
-    return arrow::Status::Invalid("group key must not evaluate to null array");
-  }
-  if (key_array_any->length() != input.num_rows()) {
-    return arrow::Status::Invalid("group key length mismatch");
+
+  std::array<std::shared_ptr<arrow::Array>, 2> key_arrays{};
+  for (std::size_t i = 0; i < key_count; ++i) {
+    ARROW_ASSIGN_OR_RAISE(key_arrays[i], EvalExprAsArray(input, *keys_[i].expr, &exec_context));
+    if (key_arrays[i] == nullptr) {
+      return arrow::Status::Invalid("group key must not evaluate to null array");
+    }
+    if (key_arrays[i]->length() != input.num_rows()) {
+      return arrow::Status::Invalid("group key length mismatch");
+    }
   }
 
-  if (output_key_field_ == nullptr) {
+  if (output_key_fields_.empty()) {
     auto schema = input.schema();
-    const auto* field_ref = std::get_if<FieldRef>(&keys_[0].expr->node);
-    if (schema != nullptr && field_ref != nullptr) {
-      int field_index = field_ref->index;
-      if (field_index < 0 && !field_ref->name.empty()) {
-        field_index = schema->GetFieldIndex(field_ref->name);
-      }
-      if (field_index >= 0 && field_index < schema->num_fields()) {
-        if (const auto& field = schema->field(field_index); field != nullptr) {
-          output_key_field_ = field->WithName(keys_[0].name);
+    output_key_fields_.reserve(key_count);
+
+    for (std::size_t i = 0; i < key_count; ++i) {
+      const auto* field_ref = std::get_if<FieldRef>(&keys_[i].expr->node);
+      if (schema != nullptr && field_ref != nullptr) {
+        int field_index = field_ref->index;
+        if (field_index < 0 && !field_ref->name.empty()) {
+          field_index = schema->GetFieldIndex(field_ref->name);
+        }
+        if (field_index >= 0 && field_index < schema->num_fields()) {
+          if (const auto& field = schema->field(field_index); field != nullptr) {
+            output_key_fields_.push_back(field);
+            continue;
+          }
         }
       }
-    }
-    if (output_key_field_ == nullptr) {
       // Fallback: use evaluated key type (metadata may be missing).
-      output_key_field_ = arrow::field(keys_[0].name, key_array_any->type(), /*nullable=*/true);
+      output_key_fields_.push_back(
+          arrow::field(keys_[i].name, key_arrays[i]->type(), /*nullable=*/true));
     }
   }
+  if (output_key_fields_.size() != key_count) {
+    return arrow::Status::Invalid("group key field count mismatch");
+  }
 
-  int32_t collation_id = -1;
-  Collation collation{.id = -1, .kind = CollationKind::kUnsupported};
-  if (key_array_any->type_id() == arrow::Type::BINARY) {
-    if (output_key_field_ != nullptr) {
-      ARROW_ASSIGN_OR_RAISE(const auto logical_type, GetLogicalType(*output_key_field_));
+  std::array<Collation, 2> collations{CollationFromId(63), CollationFromId(63)};
+  for (std::size_t i = 0; i < key_count; ++i) {
+    if (key_arrays[i]->type_id() != arrow::Type::BINARY) {
+      continue;
+    }
+    int32_t collation_id = 63;
+    if (output_key_fields_[i] != nullptr) {
+      ARROW_ASSIGN_OR_RAISE(const auto logical_type, GetLogicalType(*output_key_fields_[i]));
       if (logical_type.id == LogicalTypeId::kString) {
         collation_id = logical_type.collation_id >= 0 ? logical_type.collation_id : 63;
       }
     }
-    // Default to BINARY semantics even if metadata is missing.
-    if (collation_id < 0) {
-      collation_id = 63;
-    }
-    collation = CollationFromId(collation_id);
+    const auto collation = CollationFromId(collation_id);
     if (collation.kind == CollationKind::kUnsupported) {
       return arrow::Status::NotImplemented("unsupported collation id: ", collation_id);
     }
+    collations[i] = collation;
   }
 
   std::vector<std::shared_ptr<arrow::Int32Array>> sum_args(aggs_.size());
@@ -209,60 +249,81 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
   const int64_t rows = input.num_rows();
   for (int64_t row = 0; row < rows; ++row) {
     NormalizedKey norm_key;
+    norm_key.key_count = static_cast<uint8_t>(key_count);
     OutputKey out_key;
-    if (key_array_any->IsNull(row)) {
-      norm_key.is_null = true;
-      out_key.is_null = true;
-    } else {
-      norm_key.is_null = false;
-      out_key.is_null = false;
+    out_key.key_count = static_cast<uint8_t>(key_count);
 
-      switch (key_array_any->type_id()) {
+    for (std::size_t ki = 0; ki < key_count; ++ki) {
+      auto& norm_part = norm_key.parts[ki];
+      auto& out_part = out_key.parts[ki];
+
+      const auto& arr_any = key_arrays[ki];
+      if (arr_any == nullptr) {
+        return arrow::Status::Invalid("internal error: missing key array");
+      }
+
+      if (arr_any->IsNull(row)) {
+        norm_part.is_null = true;
+        out_part.is_null = true;
+        continue;
+      }
+
+      norm_part.is_null = false;
+      out_part.is_null = false;
+
+      switch (arr_any->type_id()) {
         case arrow::Type::INT32: {
-          const auto& arr = static_cast<const arrow::Int32Array&>(*key_array_any);
+          const auto& arr = static_cast<const arrow::Int32Array&>(*arr_any);
           const int32_t v = arr.Value(row);
-          norm_key.value = v;
-          out_key.value = v;
+          norm_part.value = v;
+          out_part.value = v;
           break;
         }
         case arrow::Type::UINT64: {
-          const auto& arr = static_cast<const arrow::UInt64Array&>(*key_array_any);
+          const auto& arr = static_cast<const arrow::UInt64Array&>(*arr_any);
           const uint64_t v = arr.Value(row);
-          norm_key.value = v;
-          out_key.value = v;
+          norm_part.value = v;
+          out_part.value = v;
           break;
         }
         case arrow::Type::DECIMAL128: {
-          const auto& arr = static_cast<const arrow::FixedSizeBinaryArray&>(*key_array_any);
+          const auto& arr = static_cast<const arrow::FixedSizeBinaryArray&>(*arr_any);
+          if (arr.byte_width() != static_cast<int>(Decimal128Bytes{}.size())) {
+            return arrow::Status::Invalid("unexpected decimal128 byte width");
+          }
           Decimal128Bytes bytes{};
           std::memcpy(bytes.data(), arr.GetValue(row), bytes.size());
-          norm_key.value = bytes;
-          out_key.value = bytes;
+          norm_part.value = bytes;
+          out_part.value = bytes;
           break;
         }
         case arrow::Type::DECIMAL256: {
-          const auto& arr = static_cast<const arrow::FixedSizeBinaryArray&>(*key_array_any);
+          const auto& arr = static_cast<const arrow::FixedSizeBinaryArray&>(*arr_any);
+          if (arr.byte_width() != static_cast<int>(Decimal256Bytes{}.size())) {
+            return arrow::Status::Invalid("unexpected decimal256 byte width");
+          }
           Decimal256Bytes bytes{};
           std::memcpy(bytes.data(), arr.GetValue(row), bytes.size());
-          norm_key.value = bytes;
-          out_key.value = bytes;
+          norm_part.value = bytes;
+          out_part.value = bytes;
           break;
         }
         case arrow::Type::BINARY: {
-          const auto& arr = static_cast<const arrow::BinaryArray&>(*key_array_any);
+          const auto& arr = static_cast<const arrow::BinaryArray&>(*arr_any);
           std::string_view view = arr.GetView(row);
-          out_key.value = std::string(view.data(), view.size());
-          if (collation.kind == CollationKind::kPaddingBinary) {
+          out_part.value = std::string(view.data(), view.size());
+          if (collations[ki].kind == CollationKind::kPaddingBinary) {
             view = RightTrimAsciiSpace(view);
           }
-          norm_key.value = std::string(view.data(), view.size());
+          norm_part.value = std::string(view.data(), view.size());
           break;
         }
         default:
           return arrow::Status::NotImplemented("unsupported group key type: ",
-                                               key_array_any->type()->ToString());
+                                               arr_any->type()->ToString());
       }
     }
+
     const uint32_t group_id = GetOrAddGroup(norm_key, std::move(out_key));
 
     for (std::size_t i = 0; i < aggs_.size(); ++i) {
@@ -292,19 +353,25 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
 }
 
 arrow::Result<std::shared_ptr<arrow::Schema>> HashAggTransformOp::BuildOutputSchema() const {
-  if (keys_.size() != 1) {
-    return arrow::Status::NotImplemented("MS5 supports exactly one group key");
+  const std::size_t key_count = keys_.size();
+  if (key_count == 0 || key_count > 2) {
+    return arrow::Status::NotImplemented("MS9 supports 1 or 2 group keys");
   }
-  if (keys_[0].name.empty()) {
-    return arrow::Status::Invalid("group key name must not be empty");
-  }
-  if (output_key_field_ == nullptr) {
-    return arrow::Status::Invalid("group key field must not be null");
+  if (output_key_fields_.size() != key_count) {
+    return arrow::Status::Invalid("group key field count mismatch");
   }
 
   std::vector<std::shared_ptr<arrow::Field>> fields;
-  fields.reserve(1 + aggs_.size());
-  fields.push_back(output_key_field_->WithName(keys_[0].name));
+  fields.reserve(key_count + aggs_.size());
+  for (std::size_t i = 0; i < key_count; ++i) {
+    if (keys_[i].name.empty()) {
+      return arrow::Status::Invalid("group key name must not be empty");
+    }
+    if (output_key_fields_[i] == nullptr) {
+      return arrow::Status::Invalid("group key field must not be null");
+    }
+    fields.push_back(output_key_fields_[i]->WithName(keys_[i].name));
+  }
 
   for (const auto& agg : aggs_) {
     if (agg.name.empty()) {
@@ -330,87 +397,115 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> HashAggTransformOp::FinalizeO
     ARROW_ASSIGN_OR_RAISE(output_schema_, BuildOutputSchema());
   }
 
-  if (output_key_field_ == nullptr) {
-    return arrow::Status::Invalid("group key field must not be null");
-  }
-
-  std::shared_ptr<arrow::Array> out_key;
-  switch (output_key_field_->type()->id()) {
-    case arrow::Type::INT32: {
-      arrow::Int32Builder builder(memory_pool_);
-      for (const auto& key : group_keys_) {
-        if (key.is_null) {
-          ARROW_RETURN_NOT_OK(builder.AppendNull());
-        } else {
-          ARROW_RETURN_NOT_OK(builder.Append(std::get<int32_t>(key.value)));
-        }
-      }
-      ARROW_RETURN_NOT_OK(builder.Finish(&out_key));
-      break;
-    }
-    case arrow::Type::UINT64: {
-      arrow::UInt64Builder builder(memory_pool_);
-      for (const auto& key : group_keys_) {
-        if (key.is_null) {
-          ARROW_RETURN_NOT_OK(builder.AppendNull());
-        } else {
-          ARROW_RETURN_NOT_OK(builder.Append(std::get<uint64_t>(key.value)));
-        }
-      }
-      ARROW_RETURN_NOT_OK(builder.Finish(&out_key));
-      break;
-    }
-    case arrow::Type::DECIMAL128: {
-      arrow::Decimal128Builder builder(output_key_field_->type(), memory_pool_);
-      for (const auto& key : group_keys_) {
-        if (key.is_null) {
-          ARROW_RETURN_NOT_OK(builder.AppendNull());
-        } else {
-          const auto& bytes = std::get<Decimal128Bytes>(key.value);
-          ARROW_RETURN_NOT_OK(builder.Append(std::string_view(
-              reinterpret_cast<const char*>(bytes.data()), bytes.size())));
-        }
-      }
-      ARROW_RETURN_NOT_OK(builder.Finish(&out_key));
-      break;
-    }
-    case arrow::Type::DECIMAL256: {
-      arrow::Decimal256Builder builder(output_key_field_->type(), memory_pool_);
-      for (const auto& key : group_keys_) {
-        if (key.is_null) {
-          ARROW_RETURN_NOT_OK(builder.AppendNull());
-        } else {
-          const auto& bytes = std::get<Decimal256Bytes>(key.value);
-          ARROW_RETURN_NOT_OK(builder.Append(std::string_view(
-              reinterpret_cast<const char*>(bytes.data()), bytes.size())));
-        }
-      }
-      ARROW_RETURN_NOT_OK(builder.Finish(&out_key));
-      break;
-    }
-    case arrow::Type::BINARY: {
-      arrow::BinaryBuilder builder(memory_pool_);
-      for (const auto& key : group_keys_) {
-        if (key.is_null) {
-          ARROW_RETURN_NOT_OK(builder.AppendNull());
-        } else {
-          const auto& bytes = std::get<std::string>(key.value);
-          ARROW_RETURN_NOT_OK(
-              builder.Append(reinterpret_cast<const uint8_t*>(bytes.data()),
-                             static_cast<int32_t>(bytes.size())));
-        }
-      }
-      ARROW_RETURN_NOT_OK(builder.Finish(&out_key));
-      break;
-    }
-    default:
-      return arrow::Status::NotImplemented("unsupported group key output type: ",
-                                           output_key_field_->type()->ToString());
-  }
-
   std::vector<std::shared_ptr<arrow::Array>> columns;
-  columns.reserve(1 + aggs_.size());
-  columns.push_back(std::move(out_key));
+  const std::size_t key_count = keys_.size();
+  columns.reserve(key_count + aggs_.size());
+
+  if (output_key_fields_.size() != key_count) {
+    return arrow::Status::Invalid("group key field count mismatch");
+  }
+
+  for (std::size_t ki = 0; ki < key_count; ++ki) {
+    const auto& field = output_key_fields_[ki];
+    if (field == nullptr) {
+      return arrow::Status::Invalid("group key field must not be null");
+    }
+
+    std::shared_ptr<arrow::Array> out_key;
+    switch (field->type()->id()) {
+      case arrow::Type::INT32: {
+        arrow::Int32Builder builder(memory_pool_);
+        for (const auto& key : group_keys_) {
+          if (key.key_count != key_count) {
+            return arrow::Status::Invalid("group key arity mismatch");
+          }
+          const auto& part = key.parts[ki];
+          if (part.is_null) {
+            ARROW_RETURN_NOT_OK(builder.AppendNull());
+          } else {
+            ARROW_RETURN_NOT_OK(builder.Append(std::get<int32_t>(part.value)));
+          }
+        }
+        ARROW_RETURN_NOT_OK(builder.Finish(&out_key));
+        break;
+      }
+      case arrow::Type::UINT64: {
+        arrow::UInt64Builder builder(memory_pool_);
+        for (const auto& key : group_keys_) {
+          if (key.key_count != key_count) {
+            return arrow::Status::Invalid("group key arity mismatch");
+          }
+          const auto& part = key.parts[ki];
+          if (part.is_null) {
+            ARROW_RETURN_NOT_OK(builder.AppendNull());
+          } else {
+            ARROW_RETURN_NOT_OK(builder.Append(std::get<uint64_t>(part.value)));
+          }
+        }
+        ARROW_RETURN_NOT_OK(builder.Finish(&out_key));
+        break;
+      }
+      case arrow::Type::DECIMAL128: {
+        arrow::Decimal128Builder builder(field->type(), memory_pool_);
+        for (const auto& key : group_keys_) {
+          if (key.key_count != key_count) {
+            return arrow::Status::Invalid("group key arity mismatch");
+          }
+          const auto& part = key.parts[ki];
+          if (part.is_null) {
+            ARROW_RETURN_NOT_OK(builder.AppendNull());
+          } else {
+            const auto& bytes = std::get<Decimal128Bytes>(part.value);
+            ARROW_RETURN_NOT_OK(builder.Append(std::string_view(
+                reinterpret_cast<const char*>(bytes.data()), bytes.size())));
+          }
+        }
+        ARROW_RETURN_NOT_OK(builder.Finish(&out_key));
+        break;
+      }
+      case arrow::Type::DECIMAL256: {
+        arrow::Decimal256Builder builder(field->type(), memory_pool_);
+        for (const auto& key : group_keys_) {
+          if (key.key_count != key_count) {
+            return arrow::Status::Invalid("group key arity mismatch");
+          }
+          const auto& part = key.parts[ki];
+          if (part.is_null) {
+            ARROW_RETURN_NOT_OK(builder.AppendNull());
+          } else {
+            const auto& bytes = std::get<Decimal256Bytes>(part.value);
+            ARROW_RETURN_NOT_OK(builder.Append(std::string_view(
+                reinterpret_cast<const char*>(bytes.data()), bytes.size())));
+          }
+        }
+        ARROW_RETURN_NOT_OK(builder.Finish(&out_key));
+        break;
+      }
+      case arrow::Type::BINARY: {
+        arrow::BinaryBuilder builder(memory_pool_);
+        for (const auto& key : group_keys_) {
+          if (key.key_count != key_count) {
+            return arrow::Status::Invalid("group key arity mismatch");
+          }
+          const auto& part = key.parts[ki];
+          if (part.is_null) {
+            ARROW_RETURN_NOT_OK(builder.AppendNull());
+          } else {
+            const auto& bytes = std::get<std::string>(part.value);
+            ARROW_RETURN_NOT_OK(builder.Append(reinterpret_cast<const uint8_t*>(bytes.data()),
+                                               static_cast<int32_t>(bytes.size())));
+          }
+        }
+        ARROW_RETURN_NOT_OK(builder.Finish(&out_key));
+        break;
+      }
+      default:
+        return arrow::Status::NotImplemented("unsupported group key output type: ",
+                                             field->type()->ToString());
+    }
+
+    columns.push_back(std::move(out_key));
+  }
 
   for (const auto& agg : aggs_) {
     switch (agg.kind) {

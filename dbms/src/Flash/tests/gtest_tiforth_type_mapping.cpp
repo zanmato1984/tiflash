@@ -324,7 +324,7 @@ arrow::Status RunTypeMappingAndOps() {
     ARROW_ASSIGN_OR_RAISE(auto build_batch, ToArrow(build_block));
     ARROW_ASSIGN_OR_RAISE(auto probe_batch, ToArrow(probe_block));
 
-    tiforth::JoinKey key{.left = "s", .right = "s"};
+    tiforth::JoinKey key{.left = {"s"}, .right = {"s"}};
     std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches;
     build_batches.push_back(build_batch);
 

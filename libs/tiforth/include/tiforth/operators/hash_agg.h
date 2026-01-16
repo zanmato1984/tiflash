@@ -47,13 +47,18 @@ class HashAggTransformOp final : public TransformOp {
   using Decimal256Bytes = std::array<uint8_t, 32>;
   using KeyValue = std::variant<int32_t, uint64_t, Decimal128Bytes, Decimal256Bytes, std::string>;
 
-  struct NormalizedKey {
+  struct KeyPart {
     bool is_null = false;
     KeyValue value;
   };
+
+  struct NormalizedKey {
+    uint8_t key_count = 0;
+    std::array<KeyPart, 2> parts;
+  };
   struct OutputKey {
-    bool is_null = false;
-    KeyValue value;
+    uint8_t key_count = 0;
+    std::array<KeyPart, 2> parts;
   };
   struct KeyHash {
     std::size_t operator()(const NormalizedKey& key) const noexcept;
@@ -89,7 +94,7 @@ class HashAggTransformOp final : public TransformOp {
   std::vector<AggState> aggs_;
 
   std::shared_ptr<arrow::Schema> output_schema_;
-  std::shared_ptr<arrow::Field> output_key_field_;
+  std::vector<std::shared_ptr<arrow::Field>> output_key_fields_;
 
   arrow::MemoryPool* memory_pool_ = nullptr;
 

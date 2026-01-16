@@ -71,24 +71,34 @@ arrow::Result<std::shared_ptr<arrow::Array>> DatumToArray(const arrow::Datum& da
 }  // namespace
 
 std::size_t HashJoinTransformOp::KeyHash::operator()(
-    const HashJoinTransformOp::KeyValue& key) const noexcept {
-  return std::visit(
-      [&](const auto& v) -> std::size_t {
-        using V = std::decay_t<decltype(v)>;
-        if constexpr (std::is_same_v<V, int32_t>) {
-          return std::hash<int32_t>{}(v);
-        } else if constexpr (std::is_same_v<V, uint64_t>) {
-          return std::hash<uint64_t>{}(v);
-        } else if constexpr (std::is_same_v<V, Decimal128Bytes> ||
-                             std::is_same_v<V, Decimal256Bytes>) {
-          return HashBytes(v);
-        } else if constexpr (std::is_same_v<V, std::string>) {
-          return std::hash<std::string>{}(v);
-        } else {
-          return 0;
-        }
-      },
-      key);
+    const HashJoinTransformOp::CompositeKey& key) const noexcept {
+  uint64_t h = 14695981039346656037ULL;
+  h ^= static_cast<uint64_t>(key.key_count);
+  h *= 1099511628211ULL;
+
+  for (uint8_t i = 0; i < key.key_count && i < key.parts.size(); ++i) {
+    const std::size_t part_hash = std::visit(
+        [&](const auto& v) -> std::size_t {
+          using V = std::decay_t<decltype(v)>;
+          if constexpr (std::is_same_v<V, int32_t>) {
+            return std::hash<int32_t>{}(v);
+          } else if constexpr (std::is_same_v<V, uint64_t>) {
+            return std::hash<uint64_t>{}(v);
+          } else if constexpr (std::is_same_v<V, Decimal128Bytes> ||
+                               std::is_same_v<V, Decimal256Bytes>) {
+            return HashBytes(v);
+          } else if constexpr (std::is_same_v<V, std::string>) {
+            return std::hash<std::string>{}(v);
+          } else {
+            return 0;
+          }
+        },
+        key.parts[i]);
+    h ^= static_cast<uint64_t>(part_hash);
+    h *= 1099511628211ULL;
+  }
+
+  return static_cast<std::size_t>(h);
 }
 
 arrow::Status HashJoinTransformOp::BuildIndex() {
@@ -105,20 +115,38 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
     return arrow::Status::Invalid("build schema must not be null");
   }
 
-  build_key_index_ = build_schema_->GetFieldIndex(key_.right);
-  if (build_key_index_ < 0 || build_key_index_ >= build_schema_->num_fields()) {
-    return arrow::Status::Invalid("unknown build join key: ", key_.right);
+  if (key_.left.size() != key_.right.size()) {
+    return arrow::Status::Invalid("join key arity mismatch between probe and build");
+  }
+  key_count_ = static_cast<uint8_t>(key_.right.size());
+  if (key_count_ == 0 || key_count_ > 2) {
+    return arrow::Status::NotImplemented("MS9 supports 1 or 2 join keys");
   }
 
-  // Decode collation metadata if present; missing metadata defaults to BINARY behavior.
-  key_collation_id_ = -1;
-  if (const auto& field = build_schema_->field(build_key_index_); field != nullptr) {
-    ARROW_ASSIGN_OR_RAISE(const auto logical_type, GetLogicalType(*field));
-    if (logical_type.id == LogicalTypeId::kString) {
-      key_collation_id_ = logical_type.collation_id >= 0 ? logical_type.collation_id : 63;
-      const auto collation = CollationFromId(key_collation_id_);
-      if (collation.kind == CollationKind::kUnsupported) {
-        return arrow::Status::NotImplemented("unsupported collation id: ", key_collation_id_);
+  key_collation_ids_.fill(-1);
+  key_is_padding_binary_.fill(false);
+
+  for (uint8_t i = 0; i < key_count_; ++i) {
+    if (key_.right[i].empty()) {
+      return arrow::Status::Invalid("build join key name must not be empty");
+    }
+    const int idx = build_schema_->GetFieldIndex(key_.right[i]);
+    if (idx < 0 || idx >= build_schema_->num_fields()) {
+      return arrow::Status::Invalid("unknown build join key: ", key_.right[i]);
+    }
+    build_key_indices_[i] = idx;
+
+    // Decode collation metadata if present; missing metadata defaults to BINARY behavior.
+    if (const auto& field = build_schema_->field(idx); field != nullptr) {
+      ARROW_ASSIGN_OR_RAISE(const auto logical_type, GetLogicalType(*field));
+      if (logical_type.id == LogicalTypeId::kString) {
+        const int32_t collation_id = logical_type.collation_id >= 0 ? logical_type.collation_id : 63;
+        const auto collation = CollationFromId(collation_id);
+        if (collation.kind == CollationKind::kUnsupported) {
+          return arrow::Status::NotImplemented("unsupported collation id: ", collation_id);
+        }
+        key_collation_ids_[i] = collation_id;
+        key_is_padding_binary_[i] = (collation.kind == CollationKind::kPaddingBinary);
       }
     }
   }
@@ -150,12 +178,16 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
   build_combined_ =
       arrow::RecordBatch::Make(build_schema_, total_rows, std::move(combined_columns));
 
-  const auto key_array_any = build_combined_->column(build_key_index_);
-  if (key_array_any == nullptr) {
-    return arrow::Status::Invalid("build join key column must not be null");
+  std::array<std::shared_ptr<arrow::Array>, 2> key_arrays{};
+  for (uint8_t i = 0; i < key_count_; ++i) {
+    key_arrays[i] = build_combined_->column(build_key_indices_[i]);
+    if (key_arrays[i] == nullptr) {
+      return arrow::Status::Invalid("build join key column must not be null");
+    }
   }
 
-  const auto make_key = [&](const arrow::Array& array, int64_t row) -> arrow::Result<KeyValue> {
+  const auto make_key_part = [&](const arrow::Array& array, int64_t row,
+                                 bool padding_binary) -> arrow::Result<KeyValue> {
     switch (array.type_id()) {
       case arrow::Type::INT32:
         return static_cast<const arrow::Int32Array&>(array).Value(row);
@@ -182,11 +214,8 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
       case arrow::Type::BINARY: {
         const auto& bin = static_cast<const arrow::BinaryArray&>(array);
         std::string_view view = bin.GetView(row);
-        if (key_collation_id_ >= 0) {
-          const auto collation = CollationFromId(key_collation_id_);
-          if (collation.kind == CollationKind::kPaddingBinary) {
-            view = RightTrimAsciiSpace(view);
-          }
+        if (padding_binary) {
+          view = RightTrimAsciiSpace(view);
         }
         return std::string(view.data(), view.size());
       }
@@ -200,10 +229,22 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
   // Build the hash index on the concatenated build side.
   const int64_t rows = build_combined_->num_rows();
   for (int64_t row = 0; row < rows; ++row) {
-    if (key_array_any->IsNull(row)) {
+    bool any_null = false;
+    for (uint8_t i = 0; i < key_count_; ++i) {
+      if (key_arrays[i] != nullptr && key_arrays[i]->IsNull(row)) {
+        any_null = true;
+        break;
+      }
+    }
+    if (any_null) {
       continue;
     }
-    ARROW_ASSIGN_OR_RAISE(const auto key, make_key(*key_array_any, row));
+
+    CompositeKey key;
+    key.key_count = key_count_;
+    for (uint8_t i = 0; i < key_count_; ++i) {
+      ARROW_ASSIGN_OR_RAISE(key.parts[i], make_key_part(*key_arrays[i], row, key_is_padding_binary_[i]));
+    }
     build_index_[key].push_back(row);
   }
 
@@ -249,9 +290,39 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
   }
 
   if (output_schema_ == nullptr) {
-    probe_key_index_ = probe_schema->GetFieldIndex(key_.left);
-    if (probe_key_index_ < 0 || probe_key_index_ >= probe_schema->num_fields()) {
-      return arrow::Status::Invalid("unknown probe join key: ", key_.left);
+    if (key_.left.size() != key_.right.size()) {
+      return arrow::Status::Invalid("join key arity mismatch between probe and build");
+    }
+    if (key_count_ == 0) {
+      key_count_ = static_cast<uint8_t>(key_.left.size());
+    }
+    if (key_count_ == 0 || key_count_ > 2) {
+      return arrow::Status::NotImplemented("MS9 supports 1 or 2 join keys");
+    }
+
+    for (uint8_t i = 0; i < key_count_; ++i) {
+      if (key_.left[i].empty()) {
+        return arrow::Status::Invalid("probe join key name must not be empty");
+      }
+      const int idx = probe_schema->GetFieldIndex(key_.left[i]);
+      if (idx < 0 || idx >= probe_schema->num_fields()) {
+        return arrow::Status::Invalid("unknown probe join key: ", key_.left[i]);
+      }
+      probe_key_indices_[i] = idx;
+
+      if (key_collation_ids_[i] >= 0) {
+        if (const auto& field = probe_schema->field(idx); field != nullptr) {
+          ARROW_ASSIGN_OR_RAISE(const auto logical_type, GetLogicalType(*field));
+          if (logical_type.id != LogicalTypeId::kString) {
+            return arrow::Status::NotImplemented("join key collation mismatch between build and probe");
+          }
+          const int32_t collation_id =
+              logical_type.collation_id >= 0 ? logical_type.collation_id : 63;
+          if (collation_id != key_collation_ids_[i]) {
+            return arrow::Status::NotImplemented("join key collation mismatch between build and probe");
+          }
+        }
+      }
     }
     ARROW_ASSIGN_OR_RAISE(output_schema_, BuildOutputSchema(probe_schema));
   } else {
@@ -261,19 +332,24 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
     }
   }
 
-  const auto probe_key_any = probe.column(probe_key_index_);
-  if (probe_key_any == nullptr) {
-    return arrow::Status::Invalid("probe join key column must not be null");
+  std::array<std::shared_ptr<arrow::Array>, 2> probe_key_arrays{};
+  std::array<std::shared_ptr<arrow::Array>, 2> build_key_arrays{};
+  for (uint8_t i = 0; i < key_count_; ++i) {
+    probe_key_arrays[i] = probe.column(probe_key_indices_[i]);
+    if (probe_key_arrays[i] == nullptr) {
+      return arrow::Status::Invalid("probe join key column must not be null");
+    }
+    build_key_arrays[i] = build_combined_->column(build_key_indices_[i]);
+    if (build_key_arrays[i] == nullptr) {
+      return arrow::Status::Invalid("build join key column must not be null");
+    }
+    if (probe_key_arrays[i]->type_id() != build_key_arrays[i]->type_id()) {
+      return arrow::Status::NotImplemented("join key type mismatch between build and probe");
+    }
   }
 
-  if (build_combined_->column(build_key_index_) == nullptr) {
-    return arrow::Status::Invalid("build join key column must not be null");
-  }
-  if (probe_key_any->type_id() != build_combined_->column(build_key_index_)->type_id()) {
-    return arrow::Status::NotImplemented("join key type mismatch between build and probe");
-  }
-
-  const auto make_key = [&](const arrow::Array& array, int64_t row) -> arrow::Result<KeyValue> {
+  const auto make_key_part = [&](const arrow::Array& array, int64_t row,
+                                 bool padding_binary) -> arrow::Result<KeyValue> {
     switch (array.type_id()) {
       case arrow::Type::INT32:
         return static_cast<const arrow::Int32Array&>(array).Value(row);
@@ -294,11 +370,8 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
       case arrow::Type::BINARY: {
         const auto& bin = static_cast<const arrow::BinaryArray&>(array);
         std::string_view view = bin.GetView(row);
-        if (key_collation_id_ >= 0) {
-          const auto collation = CollationFromId(key_collation_id_);
-          if (collation.kind == CollationKind::kPaddingBinary) {
-            view = RightTrimAsciiSpace(view);
-          }
+        if (padding_binary) {
+          view = RightTrimAsciiSpace(view);
         }
         return std::string(view.data(), view.size());
       }
@@ -314,10 +387,23 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
 
   const int64_t probe_rows = probe.num_rows();
   for (int64_t row = 0; row < probe_rows; ++row) {
-    if (probe_key_any->IsNull(row)) {
+    bool any_null = false;
+    for (uint8_t i = 0; i < key_count_; ++i) {
+      if (probe_key_arrays[i] != nullptr && probe_key_arrays[i]->IsNull(row)) {
+        any_null = true;
+        break;
+      }
+    }
+    if (any_null) {
       continue;
     }
-    ARROW_ASSIGN_OR_RAISE(const auto key, make_key(*probe_key_any, row));
+
+    CompositeKey key;
+    key.key_count = key_count_;
+    for (uint8_t i = 0; i < key_count_; ++i) {
+      ARROW_ASSIGN_OR_RAISE(key.parts[i],
+                            make_key_part(*probe_key_arrays[i], row, key_is_padding_binary_[i]));
+    }
     auto it = build_index_.find(key);
     if (it == build_index_.end()) {
       continue;

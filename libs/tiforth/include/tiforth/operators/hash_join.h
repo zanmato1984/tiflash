@@ -23,8 +23,8 @@ class Schema;
 namespace tiforth {
 
 struct JoinKey {
-  std::string left;
-  std::string right;
+  std::vector<std::string> left;
+  std::vector<std::string> right;
 };
 
 class HashJoinTransformOp final : public TransformOp {
@@ -40,8 +40,26 @@ class HashJoinTransformOp final : public TransformOp {
   using Decimal128Bytes = std::array<uint8_t, 16>;
   using Decimal256Bytes = std::array<uint8_t, 32>;
   using KeyValue = std::variant<int32_t, uint64_t, Decimal128Bytes, Decimal256Bytes, std::string>;
+
+  struct CompositeKey {
+    uint8_t key_count = 0;
+    std::array<KeyValue, 2> parts;
+
+    bool operator==(const CompositeKey& rhs) const noexcept {
+      if (key_count != rhs.key_count) {
+        return false;
+      }
+      for (uint8_t i = 0; i < key_count && i < parts.size(); ++i) {
+        if (parts[i] != rhs.parts[i]) {
+          return false;
+        }
+      }
+      return true;
+    }
+  };
+
   struct KeyHash {
-    std::size_t operator()(const KeyValue& key) const noexcept;
+    std::size_t operator()(const CompositeKey& key) const noexcept;
   };
 
   arrow::Status BuildIndex();
@@ -55,12 +73,14 @@ class HashJoinTransformOp final : public TransformOp {
   std::shared_ptr<arrow::RecordBatch> build_combined_;
   std::shared_ptr<arrow::Schema> output_schema_;
 
-  int build_key_index_ = -1;
-  int probe_key_index_ = -1;
+  uint8_t key_count_ = 0;
+  std::array<int, 2> build_key_indices_ = {-1, -1};
+  std::array<int, 2> probe_key_indices_ = {-1, -1};
 
-  int32_t key_collation_id_ = -1;
+  std::array<int32_t, 2> key_collation_ids_ = {-1, -1};
+  std::array<bool, 2> key_is_padding_binary_ = {false, false};
 
-  std::unordered_map<KeyValue, std::vector<int64_t>, KeyHash> build_index_;
+  std::unordered_map<CompositeKey, std::vector<int64_t>, KeyHash> build_index_;
   bool index_built_ = false;
 
   arrow::MemoryPool* memory_pool_ = nullptr;
