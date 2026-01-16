@@ -1,9 +1,11 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include <arrow/record_batch.h>
@@ -41,15 +43,23 @@ class HashAggTransformOp final : public TransformOp {
       std::shared_ptr<arrow::RecordBatch>* batch) override;
 
  private:
-  struct Key {
+  using Decimal128Bytes = std::array<uint8_t, 16>;
+  using Decimal256Bytes = std::array<uint8_t, 32>;
+  using KeyValue = std::variant<int32_t, uint64_t, Decimal128Bytes, Decimal256Bytes, std::string>;
+
+  struct NormalizedKey {
     bool is_null = false;
-    int32_t value = 0;
+    KeyValue value;
+  };
+  struct OutputKey {
+    bool is_null = false;
+    KeyValue value;
   };
   struct KeyHash {
-    std::size_t operator()(const Key& key) const noexcept;
+    std::size_t operator()(const NormalizedKey& key) const noexcept;
   };
   struct KeyEq {
-    bool operator()(const Key& lhs, const Key& rhs) const noexcept;
+    bool operator()(const NormalizedKey& lhs, const NormalizedKey& rhs) const noexcept;
   };
 
   struct AggState {
@@ -73,20 +83,21 @@ class HashAggTransformOp final : public TransformOp {
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> FinalizeOutput();
   arrow::Result<std::shared_ptr<arrow::Schema>> BuildOutputSchema() const;
 
-  uint32_t GetOrAddGroup(const Key& key);
+  uint32_t GetOrAddGroup(const NormalizedKey& key, OutputKey output_key);
 
   std::vector<AggKey> keys_;
   std::vector<AggState> aggs_;
 
   std::shared_ptr<arrow::Schema> output_schema_;
+  std::shared_ptr<arrow::Field> output_key_field_;
 
   arrow::MemoryPool* memory_pool_ = nullptr;
 
   bool finalized_ = false;
   bool eos_forwarded_ = false;
 
-  std::unordered_map<Key, uint32_t, KeyHash, KeyEq> key_to_group_id_;
-  std::vector<Key> group_keys_;
+  std::unordered_map<NormalizedKey, uint32_t, KeyHash, KeyEq> key_to_group_id_;
+  std::vector<OutputKey> group_keys_;
 };
 
 }  // namespace tiforth

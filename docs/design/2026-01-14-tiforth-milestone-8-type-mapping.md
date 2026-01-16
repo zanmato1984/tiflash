@@ -106,6 +106,11 @@ Under `TIFLASH_ENABLE_TIFORTH`, provide:
   - MyDate/MyDateTime columns (UInt64) to Arrow uint64 arrays
   - String columns to Arrow binary arrays
 
+Notes (implemented):
+
+- Numeric primitives (`Int*/UInt*`, `Float*`) also map to Arrow primitives on the common path, since they are
+  representation-compatible and unblock mixed-schema batches.
+
 ## Definition of Done (MS8 series)
 
 - TiForth: unit tests for metadata parsing + collation compare.
@@ -113,3 +118,12 @@ Under `TIFLASH_ENABLE_TIFORTH`, provide:
 - `ninja -C libs/tiforth/build-debug && ctest --test-dir libs/tiforth/build-debug`
 - `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms && gtests_dbms --gtest_filter=TiForth*`
 
+## Follow-up Completed In This Iteration (MS8D/MS8E)
+
+- TiForth operators: hash join / hash agg / sort keys extended to handle `uint64`, `decimal128/256`, and `binary`
+  strings with collation metadata (BINARY + PAD SPACE BIN). Implementation notes:
+  - join builds a key->row-index map on a concatenated build-side batch and uses Arrow `Take` to materialize output,
+    so it naturally supports mixed column types while keeping a deterministic row order.
+  - hash agg keeps an output key value (first seen) while using a normalized key for hashing/equality under PAD SPACE.
+- TiFlash (guarded) gtest: builds a `DB::Block` containing `Decimal256`, `MyDateTime(6)`, and collated strings,
+  converts to Arrow via MS8B, then validates TiForth `HashAgg` and `HashJoin` behavior.

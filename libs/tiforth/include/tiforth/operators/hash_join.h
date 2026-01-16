@@ -1,10 +1,12 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <arrow/record_batch.h>
@@ -35,9 +37,11 @@ class HashJoinTransformOp final : public TransformOp {
       std::shared_ptr<arrow::RecordBatch>* batch) override;
 
  private:
-  struct BuildRowRef {
-    std::size_t batch_index = 0;
-    int64_t row = 0;
+  using Decimal128Bytes = std::array<uint8_t, 16>;
+  using Decimal256Bytes = std::array<uint8_t, 32>;
+  using KeyValue = std::variant<int32_t, uint64_t, Decimal128Bytes, Decimal256Bytes, std::string>;
+  struct KeyHash {
+    std::size_t operator()(const KeyValue& key) const noexcept;
   };
 
   arrow::Status BuildIndex();
@@ -48,12 +52,15 @@ class HashJoinTransformOp final : public TransformOp {
   JoinKey key_;
 
   std::shared_ptr<arrow::Schema> build_schema_;
+  std::shared_ptr<arrow::RecordBatch> build_combined_;
   std::shared_ptr<arrow::Schema> output_schema_;
 
   int build_key_index_ = -1;
   int probe_key_index_ = -1;
 
-  std::unordered_map<int32_t, std::vector<BuildRowRef>> build_index_;
+  int32_t key_collation_id_ = -1;
+
+  std::unordered_map<KeyValue, std::vector<int64_t>, KeyHash> build_index_;
   bool index_built_ = false;
 
   arrow::MemoryPool* memory_pool_ = nullptr;

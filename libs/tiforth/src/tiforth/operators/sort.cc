@@ -1,15 +1,21 @@
 #include "tiforth/operators/sort.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <arrow/array/concatenate.h>
+#include <arrow/builder.h>
 #include <arrow/chunked_array.h>
 #include <arrow/compute/api_vector.h>
 #include <arrow/memory_pool.h>
 #include <arrow/status.h>
 
+#include "tiforth/collation.h"
 #include "tiforth/detail/arrow_compute.h"
+#include "tiforth/type_metadata.h"
 
 namespace tiforth {
 
@@ -90,9 +96,54 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> SortTransformOp::SortAll() {
   }
 
   ARROW_RETURN_NOT_OK(detail::EnsureArrowComputeInitialized());
-  ARROW_ASSIGN_OR_RAISE(
-      auto indices,
-      arrow::compute::SortIndices(*key_array, arrow::compute::SortOrder::Ascending, &exec_context_));
+  arrow::Datum indices;
+  if (const auto& key_field = output_schema_->field(key_index); key_field != nullptr) {
+    ARROW_ASSIGN_OR_RAISE(const auto logical_type, GetLogicalType(*key_field));
+    if (logical_type.id == LogicalTypeId::kString) {
+      const int32_t collation_id =
+          logical_type.collation_id >= 0 ? logical_type.collation_id : 63;
+      const auto collation = CollationFromId(collation_id);
+      if (collation.kind == CollationKind::kUnsupported) {
+        return arrow::Status::NotImplemented("unsupported collation id: ", collation_id);
+      }
+      if (key_array->type_id() != arrow::Type::BINARY) {
+        return arrow::Status::NotImplemented("string sort requires binary key array");
+      }
+      const auto bin = std::static_pointer_cast<arrow::BinaryArray>(key_array);
+
+      std::vector<uint64_t> idx;
+      idx.reserve(static_cast<std::size_t>(total_rows));
+      for (uint64_t i = 0; i < static_cast<uint64_t>(total_rows); ++i) {
+        idx.push_back(i);
+      }
+
+      std::stable_sort(idx.begin(), idx.end(), [&](uint64_t lhs, uint64_t rhs) -> bool {
+        const bool lhs_null = bin->IsNull(static_cast<int64_t>(lhs));
+        const bool rhs_null = bin->IsNull(static_cast<int64_t>(rhs));
+        if (lhs_null != rhs_null) {
+          return rhs_null;  // nulls last
+        }
+        if (lhs_null) {
+          return false;
+        }
+        const std::string_view lhs_view = bin->GetView(static_cast<int64_t>(lhs));
+        const std::string_view rhs_view = bin->GetView(static_cast<int64_t>(rhs));
+        return CompareString(collation, lhs_view, rhs_view) < 0;
+      });
+
+      arrow::UInt64Builder idx_builder(exec_context_.memory_pool());
+      ARROW_RETURN_NOT_OK(idx_builder.AppendValues(idx));
+      std::shared_ptr<arrow::Array> idx_array;
+      ARROW_RETURN_NOT_OK(idx_builder.Finish(&idx_array));
+      indices = arrow::Datum(std::move(idx_array));
+    }
+  }
+  if (!indices.is_value()) {
+    ARROW_ASSIGN_OR_RAISE(indices,
+                          arrow::compute::SortIndices(*key_array,
+                                                      arrow::compute::SortOrder::Ascending,
+                                                      &exec_context_));
+  }
 
   std::vector<std::shared_ptr<arrow::Array>> sorted_columns;
   sorted_columns.reserve(combined_columns.size());
