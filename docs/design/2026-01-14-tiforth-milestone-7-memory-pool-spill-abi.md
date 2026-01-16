@@ -88,6 +88,13 @@ MS7 focuses on:
 - ownership rules + explicit destroy functions
 - error reporting conventions (status code + owned message)
 
+MS7C implementation status:
+
+- Added header skeleton at `libs/tiforth/include/tiforth_c/tiforth.h`:
+  - declares opaque handles + lifecycle APIs (not implemented yet)
+  - defines `TIFORTH_C_ABI_VERSION` and a `tiforth_status_t` convention
+  - reserves option struct fields for forward-compatible extension
+
 ### Go/Rust bindings
 
 Plan only:
