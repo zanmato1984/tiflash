@@ -18,6 +18,7 @@
 #include "tiforth/engine.h"
 #include "tiforth/expr.h"
 #include "tiforth/operators/filter.h"
+#include "tiforth/operators/hash_agg.h"
 #include "tiforth/operators/pass_through.h"
 #include "tiforth/pipeline.h"
 #include "tiforth/task.h"
@@ -41,6 +42,24 @@ class DummySourceOp final : public SourceOp {
  protected:
   OperatorStatus readImpl(Block& block) override {
     // This operator is used only for constructing a TiFlash-shaped DAG in this test.
+    (void)block;
+    return OperatorStatus::HAS_OUTPUT;
+  }
+};
+
+class DummyAggSourceOp final : public SourceOp {
+ public:
+  explicit DummyAggSourceOp(PipelineExecutorContext& exec_context, const String& req_id)
+      : SourceOp(exec_context, req_id) {
+    auto type = std::make_shared<DataTypeInt32>();
+    ColumnsWithTypeAndName cols{ColumnWithTypeAndName(type, "k"), ColumnWithTypeAndName(type, "v")};
+    setHeader(Block(cols));
+  }
+
+  String getName() const override { return "DummyAggSourceOp"; }
+
+ protected:
+  OperatorStatus readImpl(Block& block) override {
     (void)block;
     return OperatorStatus::HAS_OUTPUT;
   }
@@ -79,6 +98,23 @@ class DummyFilterTransformOp final : public TransformOp {
   void transformHeaderImpl(Block& header) override { (void)header; }
 };
 
+class DummyHashAggTransformOp final : public TransformOp {
+ public:
+  explicit DummyHashAggTransformOp(PipelineExecutorContext& exec_context, const String& req_id)
+      : TransformOp(exec_context, req_id) {}
+
+  String getName() const override { return "DummyHashAggTransformOp"; }
+
+ protected:
+  OperatorStatus transformImpl(Block& block) override {
+    // This operator is used only for constructing a TiFlash-shaped DAG in this test.
+    // TiForth performs the real aggregation after translation.
+    return block ? OperatorStatus::HAS_OUTPUT : OperatorStatus::NEED_INPUT;
+  }
+
+  void transformHeaderImpl(Block& header) override { (void)header; }
+};
+
 class DummySinkOp final : public SinkOp {
  public:
   explicit DummySinkOp(PipelineExecutorContext& exec_context, const String& req_id)
@@ -104,6 +140,50 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeBatch() {
   return arrow::RecordBatch::Make(schema, /*num_rows=*/3, {array});
 }
 
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeAggBatch0() {
+  auto schema = arrow::schema({arrow::field("k", arrow::int32()), arrow::field("v", arrow::int32())});
+
+  arrow::Int32Builder k_builder;
+  ARROW_RETURN_NOT_OK(k_builder.Append(1));
+  ARROW_RETURN_NOT_OK(k_builder.Append(2));
+  ARROW_RETURN_NOT_OK(k_builder.Append(1));
+  ARROW_RETURN_NOT_OK(k_builder.AppendNull());
+  std::shared_ptr<arrow::Array> k_array;
+  ARROW_RETURN_NOT_OK(k_builder.Finish(&k_array));
+
+  arrow::Int32Builder v_builder;
+  ARROW_RETURN_NOT_OK(v_builder.Append(10));
+  ARROW_RETURN_NOT_OK(v_builder.Append(20));
+  ARROW_RETURN_NOT_OK(v_builder.AppendNull());
+  ARROW_RETURN_NOT_OK(v_builder.Append(7));
+  std::shared_ptr<arrow::Array> v_array;
+  ARROW_RETURN_NOT_OK(v_builder.Finish(&v_array));
+
+  return arrow::RecordBatch::Make(schema, /*num_rows=*/4, {k_array, v_array});
+}
+
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeAggBatch1() {
+  auto schema = arrow::schema({arrow::field("k", arrow::int32()), arrow::field("v", arrow::int32())});
+
+  arrow::Int32Builder k_builder;
+  ARROW_RETURN_NOT_OK(k_builder.Append(2));
+  ARROW_RETURN_NOT_OK(k_builder.Append(3));
+  ARROW_RETURN_NOT_OK(k_builder.AppendNull());
+  ARROW_RETURN_NOT_OK(k_builder.Append(4));
+  std::shared_ptr<arrow::Array> k_array;
+  ARROW_RETURN_NOT_OK(k_builder.Finish(&k_array));
+
+  arrow::Int32Builder v_builder;
+  ARROW_RETURN_NOT_OK(v_builder.Append(1));
+  ARROW_RETURN_NOT_OK(v_builder.Append(5));
+  ARROW_RETURN_NOT_OK(v_builder.AppendNull());
+  ARROW_RETURN_NOT_OK(v_builder.AppendNull());
+  std::shared_ptr<arrow::Array> v_array;
+  ARROW_RETURN_NOT_OK(v_builder.Finish(&v_array));
+
+  return arrow::RecordBatch::Make(schema, /*num_rows=*/4, {k_array, v_array});
+}
+
 arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag,
                                            tiforth::PipelineBuilder* builder) {
   if (builder == nullptr) {
@@ -120,6 +200,17 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag,
       ARROW_RETURN_NOT_OK(builder->AppendTransform(
           [predicate]() -> arrow::Result<tiforth::TransformOpPtr> {
             return std::make_unique<tiforth::FilterTransformOp>(predicate);
+          }));
+      continue;
+    }
+    if (dynamic_cast<const DummyHashAggTransformOp*>(transform.get()) != nullptr) {
+      std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
+      std::vector<tiforth::AggFunc> aggs;
+      aggs.push_back({"cnt", "count_all", nullptr});
+      aggs.push_back({"sum_v", "sum_int32", tiforth::MakeFieldRef("v")});
+      ARROW_RETURN_NOT_OK(builder->AppendTransform(
+          [keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
+            return std::make_unique<tiforth::HashAggTransformOp>(keys, aggs);
           }));
       continue;
     }
@@ -227,6 +318,96 @@ arrow::Status RunFilterTranslationSmoke() {
   return arrow::Status::OK();
 }
 
+arrow::Status RunHashAggTranslationSmoke() {
+  PipelineExecutorContext exec_context;
+  const String req_id = "tiforth_pipeline_translate_hashagg";
+
+  PipelineExecBuilder dag;
+  dag.setSourceOp(std::make_unique<DummyAggSourceOp>(exec_context, req_id));
+  dag.appendTransformOp(std::make_unique<DummyHashAggTransformOp>(exec_context, req_id));
+  dag.setSinkOp(std::make_unique<DummySinkOp>(exec_context, req_id));
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, builder.get()));
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
+
+  ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
+  if (initial_state != tiforth::TaskState::kNeedInput) {
+    return arrow::Status::Invalid("expected TaskState::kNeedInput");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto batch0, MakeAggBatch0());
+  ARROW_RETURN_NOT_OK(task->PushInput(batch0));
+  ARROW_ASSIGN_OR_RAISE(auto batch1, MakeAggBatch1());
+  ARROW_RETURN_NOT_OK(task->PushInput(batch1));
+  ARROW_RETURN_NOT_OK(task->CloseInput());
+
+  std::vector<std::shared_ptr<arrow::RecordBatch>> outputs;
+  while (true) {
+    ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
+    if (state == tiforth::TaskState::kFinished) {
+      break;
+    }
+    if (state == tiforth::TaskState::kNeedInput) {
+      continue;
+    }
+    if (state != tiforth::TaskState::kHasOutput) {
+      return arrow::Status::Invalid("unexpected task state");
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto out, task->PullOutput());
+    if (out == nullptr) {
+      return arrow::Status::Invalid("expected non-null output batch");
+    }
+    outputs.push_back(std::move(out));
+  }
+
+  if (outputs.size() != 1) {
+    return arrow::Status::Invalid("expected exactly 1 output batch");
+  }
+
+  const auto& out = outputs[0];
+  if (out->num_columns() != 3 || out->num_rows() != 5) {
+    return arrow::Status::Invalid("unexpected output shape");
+  }
+  if (out->schema()->field(0)->name() != "k" || out->schema()->field(1)->name() != "cnt" ||
+      out->schema()->field(2)->name() != "sum_v") {
+    return arrow::Status::Invalid("unexpected output schema");
+  }
+
+  arrow::Int32Builder k_expect_builder;
+  ARROW_RETURN_NOT_OK(k_expect_builder.Append(1));
+  ARROW_RETURN_NOT_OK(k_expect_builder.Append(2));
+  ARROW_RETURN_NOT_OK(k_expect_builder.AppendNull());
+  ARROW_RETURN_NOT_OK(k_expect_builder.Append(3));
+  ARROW_RETURN_NOT_OK(k_expect_builder.Append(4));
+  std::shared_ptr<arrow::Array> k_expect;
+  ARROW_RETURN_NOT_OK(k_expect_builder.Finish(&k_expect));
+
+  arrow::UInt64Builder cnt_expect_builder;
+  ARROW_RETURN_NOT_OK(cnt_expect_builder.AppendValues({2, 2, 2, 1, 1}));
+  std::shared_ptr<arrow::Array> cnt_expect;
+  ARROW_RETURN_NOT_OK(cnt_expect_builder.Finish(&cnt_expect));
+
+  arrow::Int64Builder sum_expect_builder;
+  ARROW_RETURN_NOT_OK(sum_expect_builder.Append(10));
+  ARROW_RETURN_NOT_OK(sum_expect_builder.Append(21));
+  ARROW_RETURN_NOT_OK(sum_expect_builder.Append(7));
+  ARROW_RETURN_NOT_OK(sum_expect_builder.Append(5));
+  ARROW_RETURN_NOT_OK(sum_expect_builder.AppendNull());
+  std::shared_ptr<arrow::Array> sum_expect;
+  ARROW_RETURN_NOT_OK(sum_expect_builder.Finish(&sum_expect));
+
+  if (!k_expect->Equals(*out->column(0)) || !cnt_expect->Equals(*out->column(1)) ||
+      !sum_expect->Equals(*out->column(2))) {
+    return arrow::Status::Invalid("unexpected output values");
+  }
+
+  return arrow::Status::OK();
+}
+
 }  // namespace
 
 TEST(TiForthPipelineTranslateTest, TiFlashDagToTiForth) {
@@ -236,6 +417,11 @@ TEST(TiForthPipelineTranslateTest, TiFlashDagToTiForth) {
 
 TEST(TiForthPipelineTranslateTest, TiFlashDagWithFilterToTiForth) {
   auto status = RunFilterTranslationSmoke();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthPipelineTranslateTest, TiFlashDagWithHashAggToTiForth) {
+  auto status = RunHashAggTranslationSmoke();
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 
