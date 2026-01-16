@@ -57,7 +57,7 @@ Under `dbms/src/Flash/TiForth/` (guarded):
    - Accept: `std::vector<DB::Block>` (or a Block stream)
    - Convert each input block to `RecordBatch`, push into a TiForth `Task`
    - Pull output `RecordBatch`es, convert back to `DB::Block`
-   - Return: `std::vector<DB::Block>`
+   - Return: `std::vector<DB::TiForth::BlockConversionResult>` (`DB::Block` + `options_by_name` side-channel)
 
 This “runner” is not the final production integration, but it validates correctness of:
 
@@ -76,7 +76,8 @@ Use Arrow physical type + metadata as the contract (MS8):
 Roundtrip decision:
 
 - `binary` without `tiforth.logical_type=string` is treated as raw bytes and maps back to `DataTypeString`
-  (collation metadata is optional; for MS9 we keep a “collation id by column name” side channel for callers that need it).
+  (collation metadata is optional; for MS9 we keep a “collation id by column name” side-channel for callers that need it).
+  Note: this side-channel is currently keyed by Arrow field name, so duplicate field names (e.g. join outputs) can overwrite.
 
 ## Translation / Execution (Later MS9+)
 
@@ -92,15 +93,14 @@ This part is deliberately deferred until the Block bridge is validated.
 
 - MS9B: roundtrip conversion gtest for the supported type set.
 - MS9C: end-to-end gtest that:
-  - builds input `DB::Block` data (including Decimal256, MyDateTime(6), collated strings)
-  - runs a TiForth pipeline via the Block runner (no Arrow visible to the test assertions)
+  - builds input `DB::Block` data and runs TiForth pipelines via the Block runner (no Arrow visible to assertions)
   - validates output `DB::Block` values match expectations
+  - current coverage includes: collated string filter; 2-key hash agg (collated string + int32); 2-key hash join (collated strings + Decimal256, with MyDateTime carried through output)
 
 ## Files / Modules (Planned)
 
 - `dbms/src/Flash/TiForth/ArrowTypeMapping.{h,cpp}` (exists; extend if needed)
 - `dbms/src/Flash/TiForth/ArrowBlockConversion.{h,cpp}` (new; RecordBatch <-> Block)
-- `dbms/src/Flash/TiForth/Runner.{h,cpp}` (new; test-only runner initially)
+- `dbms/src/Flash/TiForth/BlockPipelineRunner.{h,cpp}` (new; test-only runner initially)
 - `dbms/src/Flash/tests/gtest_tiforth_block_roundtrip.cpp` (new)
 - `dbms/src/Flash/tests/gtest_tiforth_block_runner.cpp` (new)
-

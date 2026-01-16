@@ -1,9 +1,9 @@
 # Work in Progress
-- MS10B: Docs: sync milestone 9 host-integration design doc with actual APIs/tests (runner returns `BlockConversionResult`, note duplicate-name collation limitation, list current gtests).
 
 # To Do
 
 # Completed
+- MS10B: Docs: sync milestone 9 host-integration design doc with actual APIs/tests and known limitations (runner returns `BlockConversionResult`, note duplicate-name collation side-channel). Files: docs/design/2026-01-14-tiforth-milestone-9-host-integration.md, .codex/progress/daemon.md.
 - MS10A: TiFlash (guarded): extend Block runner gtests with end-to-end Block assertions for 2-key HashAgg and 2-key HashJoin (joins Decimal256 + MyDateTime + collated strings). Files: dbms/src/Flash/tests/gtest_tiforth_block_runner.cpp, .codex/progress/daemon.md. Tests: `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms && ./cmake-build-tiflash-tiforth-debug/dbms/gtests_dbms --gtest_filter=TiForth*`.
 - Review objectives: MS1-9 common-path goals are met for TiFlash-first integration (library/framework, operators, type mapping, Block<->Arrow bridge, Block runner, composite keys) with passing unit + gtests; derived MS10A/B to tighten end-to-end coverage and keep docs aligned.
 - MS9D: TiForth: hash agg + hash join support 2-key composite keys (int32/uint64/decimal/binary) with per-key collation normalization; add unit tests. Decisions: fixed arity=1/2 key structs; hash agg tracks null per key-part and preserves first-seen raw output key while hashing normalized (padding BIN trims); hash join skips rows with any null key-part and validates string collation id match across build/probe. Files: libs/tiforth/include/tiforth/operators/{hash_agg,hash_join}.h, libs/tiforth/src/tiforth/operators/{hash_agg,hash_join}.cc, libs/tiforth/tests/tiforth_hash_{agg,join}_test.cpp, dbms/src/Flash/tests/gtest_tiforth_{type_mapping,pipeline_translate}.cpp, .codex/progress/daemon.md. Tests: `ninja -C libs/tiforth/build-debug && ctest --test-dir libs/tiforth/build-debug`; `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms && ./cmake-build-tiflash-tiforth-debug/dbms/gtests_dbms --gtest_filter=TiForth*`.
