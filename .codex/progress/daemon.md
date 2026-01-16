@@ -1,10 +1,11 @@
 # Work in Progress
-- MS5: write milestone design doc (hash aggregation + minimal aggregate functions + test strategy).
+- MS5A: implement `HashAggTransformOp` (blocking end-of-stream output) + TiForth unit tests.
 
 # To Do
-- MS5: implement hash aggregation operator (common path: single input, no partial merge) + minimal aggregate funcs; add unit tests + one TiFlash translation smoke (guarded by `TIFLASH_ENABLE_TIFORTH`).
+- MS5B: add TiFlash gtest (guarded by `TIFLASH_ENABLE_TIFORTH`) translating a TiFlash DAG with agg into a TiForth pipeline; validate output (hardcoded config/expected).
 
 # Completed
+- MS5 design: hash aggregation plan (blocking op; single int32 key; `count_all` + `sum_int32`; deterministic output order; tests). Files: docs/design/2026-01-14-tiforth-milestone-5-hash-aggregation.md, .codex/progress/daemon.md.
 - MS4B: TiFlash gtest translating a TiFlash DAG with filter into a TiForth pipeline (dummy filter op -> TiForth `FilterTransformOp` with hardcoded predicate `x > 1`); validate filtered Arrow output. Guarded by `TIFLASH_ENABLE_TIFORTH`. Validation: `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms` + `gtests_dbms --gtest_filter=TiForthPipelineTranslateTest.*` OK. Files: dbms/src/Flash/tests/gtest_tiforth_pipeline_translate.cpp, .codex/progress/daemon.md.
 - MS4A: add `FilterTransformOp` (SQL WHERE: keep TRUE; drop FALSE/NULL) using Arrow compute `Filter` + cached output schema; refactor Arrow compute init into `tiforth::detail::EnsureArrowComputeInitialized()` (shared by Expr eval and operators); add `tiforth_filter_test`. Validation: `ninja -C libs/tiforth/build-debug` + `ctest --test-dir libs/tiforth/build-debug`; `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms` + `gtests_dbms --gtest_filter=TiForthPipelineTranslateTest.*` OK. Files: libs/tiforth/include/tiforth/{tiforth.h,detail/arrow_compute.h,operators/filter.h}, libs/tiforth/src/tiforth/{CMakeLists.txt,expr.cc,detail/arrow_compute.cc,operators/filter.cc}, libs/tiforth/tests/{CMakeLists.txt,tiforth_filter_test.cpp}, .codex/progress/daemon.md.
 - MS4 design: Filter + predicate evaluation plan (SQL WHERE semantics via Arrow compute filter; minimal boolean/comparison kernels; initial differential testing plan). Files: docs/design/2026-01-14-tiforth-milestone-4-filter-expression-evaluation.md, .codex/progress/daemon.md.
