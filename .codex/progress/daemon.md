@@ -1,10 +1,10 @@
 # Work in Progress
 
 # To Do
-- MS7B: add spill hook interfaces (no spill implementation yet); thread through `EngineOptions`.
 - MS7C: add initial C ABI header skeleton + versioning notes (no bindings yet).
 
 # Completed
+- MS7B: add spill hook interface skeleton + engine plumbing. Key decisions: `tiforth::SpillManager` C++ vtable with `RequestSpill/WriteSpill/ReadSpill`; default `DenySpillManager` installed when options omit a manager. Files: libs/tiforth/include/tiforth/spill.h, libs/tiforth/include/tiforth/engine.h, libs/tiforth/src/tiforth/engine.cc, libs/tiforth/tests/{CMakeLists.txt,tiforth_spill_hooks_test.cpp}, libs/tiforth/include/tiforth/tiforth.h, docs/design/2026-01-14-tiforth-milestone-7-memory-pool-spill-abi.md, .codex/progress/daemon.md. Notes: no operator spills yet; future milestones add actual spilling + backpressure.
 - MS7A: plumb `arrow::MemoryPool` through `Engine`/operators + add allocation-routing unit test. Key decisions: `EngineOptions.memory_pool` is required non-null; operators accept optional `arrow::MemoryPool*` and wire it into Arrow `ExecContext`/builders. Files: libs/tiforth/include/tiforth/engine.h, libs/tiforth/src/tiforth/engine.cc, libs/tiforth/include/tiforth/operators/{filter.h,projection.h,sort.h,hash_agg.h,hash_join.h}, libs/tiforth/src/tiforth/operators/{filter.cc,projection.cc,sort.cc,hash_agg.cc,hash_join.cc}, libs/tiforth/tests/{CMakeLists.txt,tiforth_memory_pool_test.cpp}. Notes: Arrow compute still allocates outside pool for some STL containers (expected).
 - MS7 design: memory pool + spill hooks + ABI/bindings plan. Files: docs/design/2026-01-14-tiforth-milestone-7-memory-pool-spill-abi.md, .codex/progress/daemon.md.
 - MS2-MS4: TiForth foundation + first compute ops (RecordBatch task/pipeline framework, Expr IR, Projection, Filter) + TiFlash translation gtests (pass-through, filter). Key decisions: Arrow C++ boundary, host-driven task stepping, Arrow compute delegation + lazy init, schema stability via cached schema pointers. Files: libs/tiforth/include/tiforth/*, libs/tiforth/src/tiforth/*, docs/design/2026-01-14-tiforth-milestone-{1,2,3,4}-*.md, dbms/src/Flash/tests/gtest_tiforth_pipeline_translate.cpp, .codex/progress/daemon.md.

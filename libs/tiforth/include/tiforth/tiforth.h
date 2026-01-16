@@ -8,6 +8,7 @@
 #include "tiforth/expr.h"
 #include "tiforth/operators.h"
 #include "tiforth/pipeline.h"
+#include "tiforth/spill.h"
 #include "tiforth/task.h"
 
 #include "tiforth/operators/filter.h"

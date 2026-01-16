@@ -68,8 +68,8 @@ Introduce (design-only in MS7) a host-provided interface:
 
 Initial MS7 implementation may provide:
 
-- a default “deny spill” manager in TiForth
-- plumb the pointer through `EngineOptions`
+- `tiforth::SpillManager` C++ interface + default `DenySpillManager` (`libs/tiforth/include/tiforth/spill.h`)
+- plumbed via `EngineOptions.spill_manager` (default installed when absent)
 - no operator actually spills yet (just checks the hook for future milestones)
 
 ## ABI / Bindings Plan
@@ -99,4 +99,3 @@ Plan only:
 
 - MS7 design doc committed.
 - Follow-up MS7 implementation tasks created in `.codex/progress/daemon.md`.
-

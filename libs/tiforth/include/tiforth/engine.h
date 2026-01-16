@@ -7,8 +7,11 @@
 
 namespace tiforth {
 
+class SpillManager;
+
 struct EngineOptions {
   arrow::MemoryPool* memory_pool = arrow::default_memory_pool();
+  std::shared_ptr<SpillManager> spill_manager;
 };
 
 class Engine {
@@ -21,12 +24,14 @@ class Engine {
   ~Engine();
 
   arrow::MemoryPool* memory_pool() const { return memory_pool_; }
+  SpillManager* spill_manager() const { return spill_manager_.get(); }
 
  private:
   explicit Engine(EngineOptions options);
 
   [[maybe_unused]] EngineOptions options_;
   arrow::MemoryPool* memory_pool_ = arrow::default_memory_pool();
+  std::shared_ptr<SpillManager> spill_manager_;
 };
 
 }  // namespace tiforth

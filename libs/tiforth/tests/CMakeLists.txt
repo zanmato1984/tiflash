@@ -8,3 +8,4 @@ add_tiforth_test(tiforth_hash_join_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_has
 add_tiforth_test(tiforth_memory_pool_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_memory_pool_test.cpp")
 add_tiforth_test(tiforth_projection_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_projection_test.cpp")
 add_tiforth_test(tiforth_sort_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_sort_test.cpp")
+add_tiforth_test(tiforth_spill_hooks_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_spill_hooks_test.cpp")
