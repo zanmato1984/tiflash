@@ -10,6 +10,7 @@
 #include "tiforth/pipeline.h"
 #include "tiforth/spill.h"
 #include "tiforth/task.h"
+#include "tiforth/type_metadata.h"
 
 #include "tiforth/operators/filter.h"
 #include "tiforth/operators/hash_agg.h"
