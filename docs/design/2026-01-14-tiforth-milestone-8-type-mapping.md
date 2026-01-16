@@ -1,7 +1,7 @@
 # TiForth Milestone 8: TiFlash Type -> Arrow Mapping + Semantics Hooks
 
 - Author(s): TBD
-- Last Updated: 2026-01-16
+- Last Updated: 2026-01-17
 - Status: Draft
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS1-7 (pipeline/task framework + basic operators)
@@ -80,7 +80,12 @@ Arrow compute `equal/less/greater` on `binary` is bytewise and ignores TiDB coll
 
 MS8 introduces a TiForth compare hook for predicates:
 
-- functions: `=,!=,<,<=,>,>=` (implemented as `FunctionRegistry` overrides for Arrow compute call names)
+- functions: `=,!=,<,<=,>,>=` integrated into Arrow compute via an `arrow::compute::FunctionRegistry`
+  overlay owned by `Engine`:
+  - register TiForth collated kernels under `tiforth.collated_*`
+  - override Arrow names (`equal/less/...`) via Arrow `MetaFunction` that dispatches to TiForth kernels
+    on binary-like types and delegates to the parent registry otherwise
+  - collation id is passed via a TiForth `FunctionOptions` built from Arrow `Field` metadata
 - supported collations (initial):
   - `BINARY` (id 63): raw byte compare (no trimming)
   - padding BIN collations (ids 46/83/47/65): right-trim ASCII space before compare
@@ -92,8 +97,11 @@ Future: add CI/unicode collations by porting TiFlash LUT-based collators into Ti
 Arrow compute decimal arithmetic does not match TiFlash/TiDB precision/scale inference rules (and hosts need a
 single source of truth for overflow behavior).
 
-MS8F adds a minimal self-implemented scalar function framework and ports TiFlash decimal `plus` semantics for
-`add(decimal, decimal)`:
+MS8F ports TiFlash decimal `plus` semantics for `add(decimal, decimal)` using Arrow compute kernels:
+
+- register `tiforth.decimal_add` as an Arrow `ScalarFunction` with decimal kernels (dispatch by type id)
+- override Arrow `add` via an Arrow `MetaFunction` that routes decimal+decimal to `tiforth.decimal_add`
+  and delegates to the parent registry for other types
 
 - type inference mirrors TiFlash `PlusDecimalInferer` (`Common/Decimal.h`): `scale=max(s1,s2)`,
   `prec=min(scale + max(p1-s1,p2-s2) + 1, 65)`, and choose Arrow `decimal128` vs `decimal256` by precision

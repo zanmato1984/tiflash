@@ -1,7 +1,7 @@
 # TiForth Milestone 3 (Part B): Projection + Minimal Scalar Functions (Detailed Steps)
 
 - Author(s): TBD
-- Last Updated: 2026-01-16
+- Last Updated: 2026-01-17
 - Status: Draft
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-3-pipeline-framework.md`
@@ -62,9 +62,17 @@ Start with a small set of functions implemented by delegating to Arrow compute:
 
 The function set is intentionally tiny for Milestone 3B; it expands in later milestones.
 
-Implementation note (current code): expression evaluation dispatches calls through a TiForth-owned
-`FunctionRegistry` so later milestones can override Arrow compute for tricky semantics. The default
-still delegates to Arrow compute when no override matches.
+Implementation note (current code): TiForth does not implement its own function registry. Instead,
+each `Engine` owns an **Arrow** `arrow::compute::FunctionRegistry` overlay (parent = Arrow global
+registry) with TiForth custom kernels registered. For standard function names (`add`, `equal`, ...)
+TiForth installs Arrow `MetaFunction` overrides that:
+
+- select TiForth kernels on tricky types (decimal add, collated string compare),
+- delegate to the parent registry for all other types.
+
+Expression evaluation calls Arrow compute `CallFunction` with an `ExecContext` pointing at the
+engine registry. Collation-aware comparisons pass a TiForth `FunctionOptions` (collation id)
+derived from input field metadata.
 
 ## Implementation Plan
 
@@ -74,7 +82,7 @@ still delegates to Arrow compute when no override matches.
 - Add `libs/tiforth/src/tiforth/expr.cc` implementing:
   - evaluation (`EvalExpr(batch, expr) -> arrow::Result<arrow::Datum>`)
   - broadcasting scalars to arrays when needed (`MakeArrayFromScalar`)
-  - Arrow compute invocation (`arrow::compute::CallFunction`)
+  - Arrow compute invocation (`arrow::compute::CallFunction`) with the engine registry
   - lazy `arrow::compute::Initialize()` to ensure built-in kernels are registered
   - chunked array results: concatenate chunks into a single `arrow::Array` (common scalar kernels produce arrays)
 

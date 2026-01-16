@@ -1,5 +1,7 @@
 #include "tiforth/expr.h"
 
+#include <optional>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -14,22 +16,14 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 
+#include "tiforth/detail/arrow_compute.h"
 #include "tiforth/engine.h"
-#include "tiforth/function_registry.h"
+#include "tiforth/functions/collated_compare.h"
 #include "tiforth/type_metadata.h"
 
 namespace tiforth {
 
 namespace {
-
-const FunctionRegistry& GetRegistry(const Engine* engine) {
-  if (engine != nullptr) {
-    return engine->function_registry();
-  }
-
-  static std::shared_ptr<FunctionRegistry> default_registry = FunctionRegistry::MakeDefault();
-  return *default_registry;
-}
 
 arrow::compute::ExecContext* GetExecContext(arrow::compute::ExecContext* maybe_exec_context,
                                            arrow::compute::ExecContext* local_exec_context) {
@@ -60,11 +54,58 @@ arrow::Result<LogicalType> InferLogicalType(const arrow::Datum& datum,
   return out;
 }
 
-arrow::Result<TypedDatum> EvalExprTypedImpl(const arrow::RecordBatch& batch, const Expr& expr,
+struct TypedValue {
+  arrow::Datum datum;
+  std::shared_ptr<arrow::Field> field;
+  LogicalType logical_type;
+};
+
+arrow::Result<int32_t> ResolveStringCollationId(const std::vector<TypedValue>& args) {
+  std::optional<int32_t> collation_id;
+  for (const auto& arg : args) {
+    if (arg.logical_type.id != LogicalTypeId::kString) {
+      continue;
+    }
+    const int32_t id = arg.logical_type.collation_id >= 0 ? arg.logical_type.collation_id : 63;
+    if (collation_id.has_value() && *collation_id != id) {
+      return arrow::Status::NotImplemented("collation mismatch: ", *collation_id, " vs ", id);
+    }
+    collation_id = id;
+  }
+  return collation_id.value_or(63);
+}
+
+bool IsCollatedCompareFunction(std::string_view name) {
+  return name == "equal" || name == "not_equal" || name == "less" || name == "less_equal" ||
+         name == "greater" || name == "greater_equal";
+}
+
+arrow::Result<std::unique_ptr<arrow::compute::FunctionOptions>> MaybeMakeCallOptions(
+    std::string_view function_name, const std::vector<TypedValue>& args) {
+  if (!IsCollatedCompareFunction(function_name)) {
+    return nullptr;
+  }
+
+  bool has_string = false;
+  for (const auto& arg : args) {
+    if (arg.logical_type.id == LogicalTypeId::kString) {
+      has_string = true;
+      break;
+    }
+  }
+  if (!has_string) {
+    return nullptr;
+  }
+
+  ARROW_ASSIGN_OR_RAISE(const auto collation_id, ResolveStringCollationId(args));
+  return functions::MakeCollatedCompareOptions(collation_id);
+}
+
+arrow::Result<TypedValue> EvalExprTypedImpl(const arrow::RecordBatch& batch, const Expr& expr,
                                            const Engine* engine,
                                            arrow::compute::ExecContext* exec_context) {
   return std::visit(
-      [&](const auto& node) -> arrow::Result<TypedDatum> {
+      [&](const auto& node) -> arrow::Result<TypedValue> {
         using T = std::decay_t<decltype(node)>;
         if constexpr (std::is_same_v<T, FieldRef>) {
           auto schema = batch.schema();
@@ -90,25 +131,42 @@ arrow::Result<TypedDatum> EvalExprTypedImpl(const arrow::RecordBatch& batch, con
           }
           auto datum = arrow::Datum(batch.column(index));
           ARROW_ASSIGN_OR_RAISE(auto logical_type, InferLogicalType(datum, field));
-          return TypedDatum{std::move(datum), std::move(field), logical_type};
+          return TypedValue{std::move(datum), std::move(field), logical_type};
         } else if constexpr (std::is_same_v<T, Literal>) {
           if (node.value == nullptr) {
             return arrow::Status::Invalid("literal value must not be null");
           }
           auto datum = arrow::Datum(node.value);
           ARROW_ASSIGN_OR_RAISE(auto logical_type, InferLogicalType(datum, /*field=*/nullptr));
-          return TypedDatum{std::move(datum), /*field=*/nullptr, logical_type};
+          return TypedValue{std::move(datum), /*field=*/nullptr, logical_type};
         } else if constexpr (std::is_same_v<T, Call>) {
-          std::vector<TypedDatum> args;
+          std::vector<TypedValue> args;
           args.reserve(node.args.size());
           for (const auto& arg : node.args) {
             if (arg == nullptr) {
               return arrow::Status::Invalid("call arg must not be null");
             }
-            ARROW_ASSIGN_OR_RAISE(auto datum, EvalExprTypedImpl(batch, *arg, engine, exec_context));
-            args.push_back(std::move(datum));
+            ARROW_ASSIGN_OR_RAISE(auto value, EvalExprTypedImpl(batch, *arg, engine, exec_context));
+            args.push_back(std::move(value));
           }
-          return GetRegistry(engine).Call(node.function_name, args, exec_context);
+
+          if (exec_context == nullptr) {
+            return arrow::Status::Invalid("exec_context must not be null");
+          }
+          ARROW_RETURN_NOT_OK(detail::EnsureArrowComputeInitialized());
+
+          std::vector<arrow::Datum> arrow_args;
+          arrow_args.reserve(args.size());
+          for (const auto& arg : args) {
+            arrow_args.push_back(arg.datum);
+          }
+
+          ARROW_ASSIGN_OR_RAISE(auto options, MaybeMakeCallOptions(node.function_name, args));
+          ARROW_ASSIGN_OR_RAISE(auto out,
+                                arrow::compute::CallFunction(node.function_name, arrow_args,
+                                                             options.get(), exec_context));
+          ARROW_ASSIGN_OR_RAISE(auto logical_type, InferLogicalType(out, /*field=*/nullptr));
+          return TypedValue{std::move(out), /*field=*/nullptr, logical_type};
         } else {
           return arrow::Status::Invalid("unknown Expr variant");
         }
@@ -146,7 +204,8 @@ arrow::Result<arrow::Datum> EvalExpr(const arrow::RecordBatch& batch, const Expr
                                     const Engine* engine,
                                     arrow::compute::ExecContext* exec_context) {
   arrow::compute::ExecContext local_exec_context(
-      engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool());
+      engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool(), /*executor=*/nullptr,
+      engine != nullptr ? engine->function_registry() : nullptr);
   auto* ctx = GetExecContext(exec_context, &local_exec_context);
   ARROW_ASSIGN_OR_RAISE(auto typed, EvalExprTypedImpl(batch, expr, engine, ctx));
   return std::move(typed.datum);
@@ -156,7 +215,8 @@ arrow::Result<std::shared_ptr<arrow::Array>> EvalExprAsArray(
     const arrow::RecordBatch& batch, const Expr& expr, const Engine* engine,
     arrow::compute::ExecContext* exec_context) {
   arrow::compute::ExecContext local_exec_context(
-      engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool());
+      engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool(), /*executor=*/nullptr,
+      engine != nullptr ? engine->function_registry() : nullptr);
   auto* ctx = GetExecContext(exec_context, &local_exec_context);
 
   ARROW_ASSIGN_OR_RAISE(auto typed, EvalExprTypedImpl(batch, expr, engine, ctx));
@@ -182,4 +242,3 @@ arrow::Result<std::shared_ptr<arrow::Array>> EvalExprAsArray(
 }
 
 }  // namespace tiforth
-

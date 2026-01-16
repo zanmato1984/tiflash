@@ -18,7 +18,9 @@ ProjectionTransformOp::ProjectionTransformOp(const Engine* engine, std::vector<P
       exprs_(std::move(exprs)),
       exec_context_(memory_pool != nullptr
                         ? memory_pool
-                        : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool())) {}
+                        : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool()),
+                    /*executor=*/nullptr,
+                    engine != nullptr ? engine->function_registry() : nullptr) {}
 
 arrow::Result<std::shared_ptr<arrow::Schema>> ProjectionTransformOp::ComputeOutputSchema(
     const arrow::RecordBatch& input, const std::vector<std::shared_ptr<arrow::Array>>& arrays) const {

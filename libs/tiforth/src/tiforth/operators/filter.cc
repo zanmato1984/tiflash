@@ -43,7 +43,9 @@ FilterTransformOp::FilterTransformOp(const Engine* engine, ExprPtr predicate,
       predicate_(std::move(predicate)),
       exec_context_(memory_pool != nullptr
                         ? memory_pool
-                        : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool())) {}
+                        : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool()),
+                    /*executor=*/nullptr,
+                    engine != nullptr ? engine->function_registry() : nullptr) {}
 
 arrow::Result<OperatorStatus> FilterTransformOp::TransformImpl(
     std::shared_ptr<arrow::RecordBatch>* batch) {

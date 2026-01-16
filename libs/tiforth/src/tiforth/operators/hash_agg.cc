@@ -168,7 +168,9 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
     }
   }
 
-  arrow::compute::ExecContext exec_context(memory_pool_);
+  arrow::compute::ExecContext exec_context(memory_pool_, /*executor=*/nullptr,
+                                          engine_ != nullptr ? engine_->function_registry()
+                                                             : nullptr);
 
   std::array<std::shared_ptr<arrow::Array>, 2> key_arrays{};
   for (std::size_t i = 0; i < key_count; ++i) {
