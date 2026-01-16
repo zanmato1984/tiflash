@@ -5,5 +5,10 @@
 #define TIFORTH_VERSION_PATCH 0
 
 #include "tiforth/engine.h"
+#include "tiforth/expr.h"
+#include "tiforth/operators.h"
 #include "tiforth/pipeline.h"
 #include "tiforth/task.h"
+
+#include "tiforth/operators/pass_through.h"
+#include "tiforth/operators/projection.h"

@@ -2,3 +2,4 @@ add_tiforth_test(tiforth_smoke_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_smoke_t
 add_tiforth_test(tiforth_arrow_array_smoke_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_arrow_array_smoke_test.cpp")
 add_tiforth_test(tiforth_arrow_compute_smoke_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_arrow_compute_smoke_test.cpp")
 add_tiforth_test(tiforth_pass_through_reader_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_pass_through_reader_test.cpp")
+add_tiforth_test(tiforth_projection_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_projection_test.cpp")

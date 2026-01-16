@@ -14,8 +14,7 @@ else()
 endif()
 add_library(tiforth::tiforth ALIAS tiforth)
 
-target_sources(tiforth PRIVATE engine.cc pipeline.cc task.cc)
-target_sources(tiforth PRIVATE pipeline_exec.cc)
+target_sources(tiforth PRIVATE engine.cc expr.cc pipeline.cc pipeline_exec.cc operators/projection.cc task.cc)
 target_compile_features(tiforth PUBLIC cxx_std_20)
 
 target_include_directories(
