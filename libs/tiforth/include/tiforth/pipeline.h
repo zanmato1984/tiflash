@@ -1,11 +1,14 @@
 #pragma once
 
+#include <functional>
 #include <memory>
+#include <vector>
 
 #include <arrow/result.h>
 #include <arrow/record_batch.h>
 
 #include "tiforth/engine.h"
+#include "tiforth/operators.h"
 #include "tiforth/task.h"
 
 namespace tiforth {
@@ -21,12 +24,17 @@ class PipelineBuilder {
 
   ~PipelineBuilder();
 
+  using TransformFactory = std::function<arrow::Result<TransformOpPtr>()>;
+
+  arrow::Status AppendTransform(TransformFactory factory);
+
   arrow::Result<std::unique_ptr<Pipeline>> Finalize();
 
  private:
   explicit PipelineBuilder(const Engine* engine);
 
   const Engine* engine_;
+  std::vector<TransformFactory> transform_factories_;
 };
 
 class Pipeline {
@@ -39,9 +47,10 @@ class Pipeline {
       std::shared_ptr<arrow::RecordBatchReader> input) const;
 
  private:
-  explicit Pipeline(const Engine* engine);
+  Pipeline(const Engine* engine, std::vector<PipelineBuilder::TransformFactory> transform_factories);
 
   const Engine* engine_;
+  std::vector<PipelineBuilder::TransformFactory> transform_factories_;
 
   friend class PipelineBuilder;
 };

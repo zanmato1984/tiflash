@@ -8,12 +8,91 @@
 namespace tiforth {
 
 arrow::Result<std::unique_ptr<Task>> Task::Create() {
-  return std::unique_ptr<Task>(new Task());
+  return Create(TransformOps{});
+}
+
+arrow::Result<std::unique_ptr<Task>> Task::Create(TransformOps transforms) {
+  auto task = std::unique_ptr<Task>(new Task());
+  ARROW_RETURN_NOT_OK(task->Init(std::move(transforms)));
+  return task;
 }
 
 Task::Task() = default;
 
 Task::~Task() = default;
+
+class Task::InputSourceOp final : public SourceOp {
+ public:
+  explicit InputSourceOp(Task* task) : task_(task) {}
+
+ protected:
+  arrow::Result<OperatorStatus> ReadImpl(std::shared_ptr<arrow::RecordBatch>* batch) override {
+    if (task_ == nullptr) {
+      return arrow::Status::Invalid("task must not be null");
+    }
+
+    if (!task_->input_queue_.empty()) {
+      *batch = std::move(task_->input_queue_.front());
+      task_->input_queue_.pop_front();
+      return OperatorStatus::kHasOutput;
+    }
+
+    if (!task_->input_closed_ && task_->input_reader_ != nullptr) {
+      ARROW_RETURN_NOT_OK(task_->input_reader_->ReadNext(batch));
+      if (*batch == nullptr) {
+        task_->input_closed_ = true;
+        return OperatorStatus::kFinished;
+      }
+      ARROW_RETURN_NOT_OK(task_->ValidateOrSetSchema((*batch)->schema()));
+      return OperatorStatus::kHasOutput;
+    }
+
+    if (task_->input_closed_) {
+      batch->reset();
+      return OperatorStatus::kFinished;
+    }
+
+    batch->reset();
+    return OperatorStatus::kNeedInput;
+  }
+
+ private:
+  Task* task_;
+};
+
+class Task::OutputSinkOp final : public SinkOp {
+ public:
+  explicit OutputSinkOp(Task* task) : task_(task) {}
+
+ protected:
+  arrow::Result<OperatorStatus> WriteImpl(std::shared_ptr<arrow::RecordBatch> batch) override {
+    if (task_ == nullptr) {
+      return arrow::Status::Invalid("task must not be null");
+    }
+
+    if (batch == nullptr) {
+      return OperatorStatus::kFinished;
+    }
+
+    task_->output_queue_.push_back(std::move(batch));
+    return OperatorStatus::kNeedInput;
+  }
+
+ private:
+  Task* task_;
+};
+
+arrow::Status Task::Init(TransformOps transforms) {
+  PipelineExecBuilder builder;
+  builder.SetSourceOp(std::make_unique<InputSourceOp>(this));
+  for (auto& transform : transforms) {
+    builder.AppendTransformOp(std::move(transform));
+  }
+  builder.SetSinkOp(std::make_unique<OutputSinkOp>(this));
+
+  ARROW_ASSIGN_OR_RAISE(exec_, builder.Build());
+  return arrow::Status::OK();
+}
 
 arrow::Status Task::ValidateOrSetSchema(const std::shared_ptr<arrow::Schema>& schema) {
   if (schema == nullptr) {
@@ -87,27 +166,25 @@ arrow::Result<TaskState> Task::Step() {
     return TaskState::kHasOutput;
   }
 
-  if (input_queue_.empty() && !input_closed_ && input_reader_ != nullptr) {
-    std::shared_ptr<arrow::RecordBatch> batch;
-    ARROW_RETURN_NOT_OK(input_reader_->ReadNext(&batch));
-    if (batch == nullptr) {
-      input_closed_ = true;
-    } else {
-      ARROW_RETURN_NOT_OK(ValidateOrSetSchema(batch->schema()));
-      input_queue_.push_back(std::move(batch));
-    }
+  if (exec_ == nullptr) {
+    return arrow::Status::Invalid("task is not initialized");
   }
 
-  if (!input_queue_.empty()) {
-    output_queue_.push_back(std::move(input_queue_.front()));
-    input_queue_.pop_front();
+  ARROW_ASSIGN_OR_RAISE(const auto op_status, exec_->Execute());
+
+  if (!output_queue_.empty()) {
     return TaskState::kHasOutput;
   }
 
-  if (input_closed_) {
-    return TaskState::kFinished;
+  switch (op_status) {
+    case OperatorStatus::kNeedInput:
+      return TaskState::kNeedInput;
+    case OperatorStatus::kFinished:
+      return TaskState::kFinished;
+    case OperatorStatus::kHasOutput:
+      return arrow::Status::Invalid("unexpected operator status kHasOutput without output");
   }
-  return TaskState::kNeedInput;
+  return arrow::Status::Invalid("unknown operator status");
 }
 
 }  // namespace tiforth
