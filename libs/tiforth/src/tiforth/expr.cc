@@ -1,6 +1,5 @@
 #include "tiforth/expr.h"
 
-#include <mutex>
 #include <type_traits>
 #include <utility>
 
@@ -9,22 +8,14 @@
 #include <arrow/chunked_array.h>
 #include <arrow/compute/api_scalar.h>
 #include <arrow/compute/exec.h>
-#include <arrow/compute/initialize.h>
 #include <arrow/record_batch.h>
 #include <arrow/status.h>
+
+#include "tiforth/detail/arrow_compute.h"
 
 namespace tiforth {
 
 namespace {
-
-std::once_flag arrow_compute_init_once;
-arrow::Status arrow_compute_init_status = arrow::Status::OK();
-
-arrow::Status EnsureArrowComputeInitialized() {
-  std::call_once(arrow_compute_init_once,
-                 []() { arrow_compute_init_status = arrow::compute::Initialize(); });
-  return arrow_compute_init_status;
-}
 
 arrow::compute::ExecContext* GetExecContext(arrow::compute::ExecContext* maybe_exec_context,
                                            arrow::compute::ExecContext* local_exec_context) {
@@ -60,7 +51,7 @@ arrow::Result<arrow::Datum> EvalExprImpl(const arrow::RecordBatch& batch, const 
           }
           return arrow::Datum(node.value);
         } else if constexpr (std::is_same_v<T, Call>) {
-          ARROW_RETURN_NOT_OK(EnsureArrowComputeInitialized());
+          ARROW_RETURN_NOT_OK(detail::EnsureArrowComputeInitialized());
 
           std::vector<arrow::Datum> args;
           args.reserve(node.args.size());

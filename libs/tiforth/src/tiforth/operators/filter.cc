@@ -1,0 +1,100 @@
+#include "tiforth/operators/filter.h"
+
+#include <utility>
+#include <vector>
+
+#include <arrow/array/concatenate.h>
+#include <arrow/chunked_array.h>
+#include <arrow/compute/api_vector.h>
+#include <arrow/status.h>
+#include <arrow/type.h>
+
+#include "tiforth/detail/arrow_compute.h"
+
+namespace tiforth {
+
+namespace {
+
+arrow::Result<std::shared_ptr<arrow::Array>> DatumToArray(const arrow::Datum& datum,
+                                                         arrow::MemoryPool* pool) {
+  if (datum.is_array()) {
+    return datum.make_array();
+  }
+  if (datum.is_chunked_array()) {
+    auto chunked = datum.chunked_array();
+    if (chunked == nullptr) {
+      return arrow::Status::Invalid("expected non-null chunked array datum");
+    }
+    if (chunked->num_chunks() == 1) {
+      return chunked->chunk(0);
+    }
+    return arrow::Concatenate(chunked->chunks(), pool);
+  }
+  return arrow::Status::Invalid("expected array or chunked array result");
+}
+
+}  // namespace
+
+FilterTransformOp::FilterTransformOp(ExprPtr predicate)
+    : predicate_(std::move(predicate)), exec_context_() {}
+
+arrow::Result<OperatorStatus> FilterTransformOp::TransformImpl(
+    std::shared_ptr<arrow::RecordBatch>* batch) {
+  if (*batch == nullptr) {
+    return OperatorStatus::kHasOutput;
+  }
+  if (predicate_ == nullptr) {
+    return arrow::Status::Invalid("filter predicate must not be null");
+  }
+
+  const auto& input = **batch;
+  if (output_schema_ == nullptr) {
+    output_schema_ = input.schema();
+  } else if (!output_schema_->Equals(*input.schema(), /*check_metadata=*/true)) {
+    return arrow::Status::Invalid("filter input schema mismatch");
+  }
+
+  ARROW_RETURN_NOT_OK(detail::EnsureArrowComputeInitialized());
+
+  ARROW_ASSIGN_OR_RAISE(auto predicate_array, EvalExprAsArray(input, *predicate_, &exec_context_));
+  if (predicate_array == nullptr) {
+    return arrow::Status::Invalid("filter predicate result must not be null");
+  }
+  if (predicate_array->length() != input.num_rows()) {
+    return arrow::Status::Invalid("filter predicate length mismatch");
+  }
+  if (predicate_array->type_id() != arrow::Type::BOOL) {
+    return arrow::Status::Invalid("filter predicate must evaluate to boolean");
+  }
+
+  const arrow::compute::FilterOptions options(arrow::compute::FilterOptions::DROP);
+
+  std::vector<std::shared_ptr<arrow::Array>> out_columns;
+  out_columns.reserve(input.num_columns());
+  for (int i = 0; i < input.num_columns(); ++i) {
+    ARROW_ASSIGN_OR_RAISE(auto filtered,
+                          arrow::compute::Filter(arrow::Datum(input.column(i)),
+                                                 arrow::Datum(predicate_array), options,
+                                                 &exec_context_));
+    ARROW_ASSIGN_OR_RAISE(auto out_array, DatumToArray(filtered, exec_context_.memory_pool()));
+    out_columns.push_back(std::move(out_array));
+  }
+
+  int64_t out_rows = 0;
+  if (!out_columns.empty()) {
+    out_rows = out_columns.front()->length();
+  } else {
+    ARROW_ASSIGN_OR_RAISE(auto filtered_pred,
+                          arrow::compute::Filter(arrow::Datum(predicate_array),
+                                                 arrow::Datum(predicate_array), options,
+                                                 &exec_context_));
+    ARROW_ASSIGN_OR_RAISE(auto filtered_pred_array,
+                          DatumToArray(filtered_pred, exec_context_.memory_pool()));
+    out_rows = filtered_pred_array->length();
+  }
+
+  *batch = arrow::RecordBatch::Make(output_schema_, out_rows, std::move(out_columns));
+  return OperatorStatus::kHasOutput;
+}
+
+}  // namespace tiforth
