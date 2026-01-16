@@ -56,9 +56,10 @@ arrow::Status RunFilterGreaterThan() {
   auto predicate = MakeCall("greater",
                             {MakeFieldRef("x"),
                              MakeLiteral(std::make_shared<arrow::Int32Scalar>(2))});
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([predicate]() -> arrow::Result<TransformOpPtr> {
-    return std::make_unique<FilterTransformOp>(predicate);
-  }));
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      [engine_ptr = engine.get(), predicate]() -> arrow::Result<TransformOpPtr> {
+        return std::make_unique<FilterTransformOp>(engine_ptr, predicate);
+      }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
@@ -129,9 +130,10 @@ arrow::Status RunFilterDropsNullPredicate() {
   auto predicate = MakeCall("greater",
                             {MakeFieldRef("x"),
                              MakeLiteral(std::make_shared<arrow::Int32Scalar>(1))});
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([predicate]() -> arrow::Result<TransformOpPtr> {
-    return std::make_unique<FilterTransformOp>(predicate);
-  }));
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      [engine_ptr = engine.get(), predicate]() -> arrow::Result<TransformOpPtr> {
+        return std::make_unique<FilterTransformOp>(engine_ptr, predicate);
+      }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());

@@ -16,6 +16,7 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 
+#include "tiforth/engine.h"
 #include "tiforth/collation.h"
 #include "tiforth/type_metadata.h"
 
@@ -97,10 +98,13 @@ bool HashAggTransformOp::KeyEq::operator()(const NormalizedKey& lhs,
   return true;
 }
 
-HashAggTransformOp::HashAggTransformOp(std::vector<AggKey> keys, std::vector<AggFunc> aggs,
-                                       arrow::MemoryPool* memory_pool)
-    : keys_(std::move(keys)),
-      memory_pool_(memory_pool != nullptr ? memory_pool : arrow::default_memory_pool()) {
+HashAggTransformOp::HashAggTransformOp(const Engine* engine, std::vector<AggKey> keys,
+                                       std::vector<AggFunc> aggs, arrow::MemoryPool* memory_pool)
+    : engine_(engine),
+      keys_(std::move(keys)),
+      memory_pool_(memory_pool != nullptr
+                       ? memory_pool
+                       : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool())) {
   aggs_.reserve(aggs.size());
   for (auto& agg : aggs) {
     if (agg.func == "count_all") {
@@ -148,6 +152,9 @@ uint32_t HashAggTransformOp::GetOrAddGroup(const NormalizedKey& key, OutputKey o
 }
 
 arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) {
+  if (engine_ == nullptr) {
+    return arrow::Status::Invalid("hash agg engine must not be null");
+  }
   const std::size_t key_count = keys_.size();
   if (key_count == 0 || key_count > 2) {
     return arrow::Status::NotImplemented("MS9 supports 1 or 2 group keys");
@@ -165,7 +172,8 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
 
   std::array<std::shared_ptr<arrow::Array>, 2> key_arrays{};
   for (std::size_t i = 0; i < key_count; ++i) {
-    ARROW_ASSIGN_OR_RAISE(key_arrays[i], EvalExprAsArray(input, *keys_[i].expr, &exec_context));
+    ARROW_ASSIGN_OR_RAISE(key_arrays[i],
+                          EvalExprAsArray(input, *keys_[i].expr, engine_, &exec_context));
     if (key_arrays[i] == nullptr) {
       return arrow::Status::Invalid("group key must not evaluate to null array");
     }
@@ -233,7 +241,8 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
       return arrow::Status::Invalid("sum_int32 arg must not be null");
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto arg_any, EvalExprAsArray(input, *agg.arg, &exec_context));
+    ARROW_ASSIGN_OR_RAISE(auto arg_any,
+                          EvalExprAsArray(input, *agg.arg, engine_, &exec_context));
     if (arg_any == nullptr) {
       return arrow::Status::Invalid("sum_int32 arg must not evaluate to null array");
     }

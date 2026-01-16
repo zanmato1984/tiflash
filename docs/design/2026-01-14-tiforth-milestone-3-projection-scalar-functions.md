@@ -62,6 +62,10 @@ Start with a small set of functions implemented by delegating to Arrow compute:
 
 The function set is intentionally tiny for Milestone 3B; it expands in later milestones.
 
+Implementation note (current code): expression evaluation dispatches calls through a TiForth-owned
+`FunctionRegistry` so later milestones can override Arrow compute for tricky semantics. The default
+still delegates to Arrow compute when no override matches.
+
 ## Implementation Plan
 
 ### 1) Add expression types and evaluation helper

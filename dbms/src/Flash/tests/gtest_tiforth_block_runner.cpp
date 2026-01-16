@@ -30,6 +30,7 @@
 #include "tiforth/operators/hash_agg.h"
 #include "tiforth/operators/hash_join.h"
 #include "tiforth/operators/filter.h"
+#include "tiforth/operators/projection.h"
 #include "tiforth/pipeline.h"
 
 namespace DB::tests {
@@ -72,8 +73,8 @@ arrow::Status RunFilterOnBlockWithCollation() {
                 tiforth::MakeLiteral(std::make_shared<arrow::StringScalar>("a"))});
 
   ARROW_RETURN_NOT_OK(builder->AppendTransform(
-      [predicate]() -> arrow::Result<tiforth::TransformOpPtr> {
-        return std::make_unique<tiforth::FilterTransformOp>(predicate);
+      [engine_ptr = engine.get(), predicate]() -> arrow::Result<tiforth::TransformOpPtr> {
+        return std::make_unique<tiforth::FilterTransformOp>(engine_ptr, predicate);
       }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
@@ -122,6 +123,130 @@ arrow::Status RunFilterOnBlockWithCollation() {
   return arrow::Status::OK();
 }
 
+arrow::Status RunProjectionDecimalAddOnBlock() {
+  // Input: a is Nullable(Decimal(38,2)), b is Nullable(Decimal(38,3)).
+  const auto a_nested_type = createDecimal(/*prec=*/38, /*scale=*/2);
+  const auto b_nested_type = createDecimal(/*prec=*/38, /*scale=*/3);
+
+  auto a_nested = a_nested_type->createColumn();
+  auto b_nested = b_nested_type->createColumn();
+  auto* a_dec = typeid_cast<ColumnDecimal<Decimal128>*>(a_nested.get());
+  auto* b_dec = typeid_cast<ColumnDecimal<Decimal128>*>(b_nested.get());
+  if (a_dec == nullptr || b_dec == nullptr) {
+    return arrow::Status::Invalid("expected Decimal128 columns for inputs");
+  }
+
+  auto a_null = ColumnUInt8::create();
+  auto b_null = ColumnUInt8::create();
+
+  const auto append_a = [&](std::optional<Int128> raw) {
+    if (raw.has_value()) {
+      a_dec->insert(Decimal128(*raw));
+      a_null->insert(Field(static_cast<UInt64>(0)));
+    } else {
+      a_dec->insert(Decimal128(Int128(0)));
+      a_null->insert(Field(static_cast<UInt64>(1)));
+    }
+  };
+  const auto append_b = [&](std::optional<Int128> raw) {
+    if (raw.has_value()) {
+      b_dec->insert(Decimal128(*raw));
+      b_null->insert(Field(static_cast<UInt64>(0)));
+    } else {
+      b_dec->insert(Decimal128(Int128(0)));
+      b_null->insert(Field(static_cast<UInt64>(1)));
+    }
+  };
+
+  // Values are stored as scaled integers:
+  // - a: scale=2 => 1.23 is 123
+  // - b: scale=3 => 0.100 is 100
+  append_a(Int128(123));
+  append_b(Int128(100));
+
+  append_a(Int128(456));
+  append_b(Int128(2345));
+
+  append_a(std::nullopt);
+  append_b(Int128(2345));
+
+  auto a_col = ColumnNullable::create(std::move(a_nested), std::move(a_null));
+  auto b_col = ColumnNullable::create(std::move(b_nested), std::move(b_null));
+
+  const auto a_type = makeNullable(a_nested_type);
+  const auto b_type = makeNullable(b_nested_type);
+
+  ColumnsWithTypeAndName cols;
+  cols.emplace_back(std::move(a_col), a_type, "a");
+  cols.emplace_back(std::move(b_col), b_type, "b");
+  Block input(std::move(cols));
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+
+  std::vector<tiforth::ProjectionExpr> exprs;
+  exprs.push_back({"sum", tiforth::MakeCall("add", {tiforth::MakeFieldRef("a"), tiforth::MakeFieldRef("b")})});
+
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      [engine_ptr = engine.get(), exprs]() -> arrow::Result<tiforth::TransformOpPtr> {
+        return std::make_unique<tiforth::ProjectionTransformOp>(engine_ptr, exprs);
+      }));
+
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+
+  ARROW_ASSIGN_OR_RAISE(
+      auto outputs,
+      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input},
+                                          /*input_options_by_name=*/{},
+                                          arrow::default_memory_pool()));
+  if (outputs.size() != 1) {
+    return arrow::Status::Invalid("expected exactly 1 output block");
+  }
+
+  const auto& out = outputs[0].block;
+  if (out.columns() != 1 || out.rows() != 3) {
+    return arrow::Status::Invalid("unexpected projection output shape");
+  }
+
+  const auto& elem = out.getByName("sum");
+  const auto* out_nullable = typeid_cast<const ColumnNullable*>(elem.column.get());
+  if (out_nullable == nullptr) {
+    return arrow::Status::Invalid("expected nullable decimal output column");
+  }
+  const auto* out_dec =
+      typeid_cast<const ColumnDecimal<Decimal256>*>(&out_nullable->getNestedColumn());
+  if (out_dec == nullptr) {
+    return arrow::Status::Invalid("expected Decimal256 nested column for output");
+  }
+
+  const auto nested_type = removeNullable(elem.type);
+  if (nested_type == nullptr || !nested_type->isDecimal()) {
+    return arrow::Status::Invalid("expected decimal output type");
+  }
+  const auto out_prec = getDecimalPrecision(*nested_type, /*default_value=*/0);
+  const auto out_scale = getDecimalScale(*nested_type, /*default_value=*/0);
+  if (out_prec != 40 || out_scale != 3) {
+    return arrow::Status::Invalid("unexpected decimal add output precision/scale");
+  }
+
+  if (out_nullable->isNullAt(0) || out_nullable->isNullAt(1) || !out_nullable->isNullAt(2)) {
+    return arrow::Status::Invalid("unexpected null map in decimal add output");
+  }
+
+  const auto& data = out_dec->getData();
+  if (data.size() != 3) {
+    return arrow::Status::Invalid("unexpected decimal output size");
+  }
+  // Expected sums (scaled by 10^3):
+  // 1.23 + 0.100 = 1.330  -> 1330
+  // 4.56 + 2.345 = 6.905  -> 6905
+  if (data[0] != Decimal256(Int256(1330)) || data[1] != Decimal256(Int256(6905))) {
+    return arrow::Status::Invalid("unexpected decimal add output values");
+  }
+
+  return arrow::Status::OK();
+}
+
 arrow::Status RunTwoKeyHashAggOnBlocks() {
   // Input: group by (s, k2) where s uses padding BIN collation ("a" == "a ").
   auto s_col = ColumnString::create();
@@ -163,8 +288,9 @@ arrow::Status RunTwoKeyHashAggOnBlocks() {
   aggs.push_back({"cnt", "count_all", nullptr});
   aggs.push_back({"sum_v", "sum_int32", tiforth::MakeFieldRef("v")});
 
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-    return std::make_unique<tiforth::HashAggTransformOp>(keys, aggs);
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([engine_ptr = engine.get(), keys,
+                                                aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
+    return std::make_unique<tiforth::HashAggTransformOp>(engine_ptr, keys, aggs);
   }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
@@ -409,6 +535,11 @@ arrow::Status RunTwoKeyHashJoinOnBlocks() {
 
 TEST(TiForthBlockRunnerTest, FilterOnBlockWithCollation) {
   auto status = RunFilterOnBlockWithCollation();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthBlockRunnerTest, ProjectionDecimalAdd) {
+  auto status = RunProjectionDecimalAddOnBlock();
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 

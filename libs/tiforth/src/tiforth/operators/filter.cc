@@ -10,6 +10,7 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 
+#include "tiforth/engine.h"
 #include "tiforth/detail/arrow_compute.h"
 
 namespace tiforth {
@@ -36,14 +37,21 @@ arrow::Result<std::shared_ptr<arrow::Array>> DatumToArray(const arrow::Datum& da
 
 }  // namespace
 
-FilterTransformOp::FilterTransformOp(ExprPtr predicate, arrow::MemoryPool* memory_pool)
-    : predicate_(std::move(predicate)),
-      exec_context_(memory_pool != nullptr ? memory_pool : arrow::default_memory_pool()) {}
+FilterTransformOp::FilterTransformOp(const Engine* engine, ExprPtr predicate,
+                                     arrow::MemoryPool* memory_pool)
+    : engine_(engine),
+      predicate_(std::move(predicate)),
+      exec_context_(memory_pool != nullptr
+                        ? memory_pool
+                        : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool())) {}
 
 arrow::Result<OperatorStatus> FilterTransformOp::TransformImpl(
     std::shared_ptr<arrow::RecordBatch>* batch) {
   if (*batch == nullptr) {
     return OperatorStatus::kHasOutput;
+  }
+  if (engine_ == nullptr) {
+    return arrow::Status::Invalid("filter engine must not be null");
   }
   if (predicate_ == nullptr) {
     return arrow::Status::Invalid("filter predicate must not be null");
@@ -58,7 +66,8 @@ arrow::Result<OperatorStatus> FilterTransformOp::TransformImpl(
 
   ARROW_RETURN_NOT_OK(detail::EnsureArrowComputeInitialized());
 
-  ARROW_ASSIGN_OR_RAISE(auto predicate_array, EvalExprAsArray(input, *predicate_, &exec_context_));
+  ARROW_ASSIGN_OR_RAISE(
+      auto predicate_array, EvalExprAsArray(input, *predicate_, engine_, &exec_context_));
   if (predicate_array == nullptr) {
     return arrow::Status::Invalid("filter predicate result must not be null");
   }

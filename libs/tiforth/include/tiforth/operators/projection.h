@@ -26,7 +26,8 @@ struct ProjectionExpr {
 
 class ProjectionTransformOp final : public TransformOp {
  public:
-  ProjectionTransformOp(std::vector<ProjectionExpr> exprs, arrow::MemoryPool* memory_pool = nullptr);
+  ProjectionTransformOp(const Engine* engine, std::vector<ProjectionExpr> exprs,
+                        arrow::MemoryPool* memory_pool = nullptr);
 
  protected:
   arrow::Result<OperatorStatus> TransformImpl(
@@ -34,8 +35,9 @@ class ProjectionTransformOp final : public TransformOp {
 
  private:
   arrow::Result<std::shared_ptr<arrow::Schema>> ComputeOutputSchema(
-      const std::vector<std::shared_ptr<arrow::Array>>& arrays) const;
+      const arrow::RecordBatch& input, const std::vector<std::shared_ptr<arrow::Array>>& arrays) const;
 
+  const Engine* engine_ = nullptr;
   std::vector<ProjectionExpr> exprs_;
   std::shared_ptr<arrow::Schema> output_schema_;
   arrow::compute::ExecContext exec_context_;

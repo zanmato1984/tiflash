@@ -86,9 +86,10 @@ arrow::Status RunHashAggSmoke() {
   aggs.push_back({"cnt", "count_all", nullptr});
   aggs.push_back({"sum_v", "sum_int32", MakeFieldRef("v")});
 
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([keys, aggs]() -> arrow::Result<TransformOpPtr> {
-    return std::make_unique<HashAggTransformOp>(keys, aggs);
-  }));
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      [engine_ptr = engine.get(), keys, aggs]() -> arrow::Result<TransformOpPtr> {
+        return std::make_unique<HashAggTransformOp>(engine_ptr, keys, aggs);
+      }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
@@ -178,9 +179,10 @@ arrow::Status RunHashAggTwoKeySmoke() {
   aggs.push_back({"cnt", "count_all", nullptr});
   aggs.push_back({"sum_v", "sum_int32", MakeFieldRef("v")});
 
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([keys, aggs]() -> arrow::Result<TransformOpPtr> {
-    return std::make_unique<HashAggTransformOp>(keys, aggs);
-  }));
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      [engine_ptr = engine.get(), keys, aggs]() -> arrow::Result<TransformOpPtr> {
+        return std::make_unique<HashAggTransformOp>(engine_ptr, keys, aggs);
+      }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());

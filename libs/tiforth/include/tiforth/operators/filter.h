@@ -19,13 +19,14 @@ namespace tiforth {
 
 class FilterTransformOp final : public TransformOp {
  public:
-  explicit FilterTransformOp(ExprPtr predicate, arrow::MemoryPool* memory_pool = nullptr);
+  FilterTransformOp(const Engine* engine, ExprPtr predicate, arrow::MemoryPool* memory_pool = nullptr);
 
  protected:
   arrow::Result<OperatorStatus> TransformImpl(
       std::shared_ptr<arrow::RecordBatch>* batch) override;
 
  private:
+  const Engine* engine_ = nullptr;
   ExprPtr predicate_;
   std::shared_ptr<arrow::Schema> output_schema_;
   arrow::compute::ExecContext exec_context_;

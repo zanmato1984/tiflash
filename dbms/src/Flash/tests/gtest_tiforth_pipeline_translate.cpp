@@ -242,8 +242,11 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeJoinProbeBatch() {
   return arrow::RecordBatch::Make(schema, /*num_rows=*/4, {k_array, pv_array});
 }
 
-arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag,
+arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag, const tiforth::Engine* engine,
                                            tiforth::PipelineBuilder* builder) {
+  if (engine == nullptr) {
+    return arrow::Status::Invalid("engine must not be null");
+  }
   if (builder == nullptr) {
     return arrow::Status::Invalid("builder must not be null");
   }
@@ -256,8 +259,8 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag,
           "greater", {tiforth::MakeFieldRef("x"),
                       tiforth::MakeLiteral(std::make_shared<arrow::Int32Scalar>(1))});
       ARROW_RETURN_NOT_OK(builder->AppendTransform(
-          [predicate]() -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::FilterTransformOp>(predicate);
+          [engine, predicate]() -> arrow::Result<tiforth::TransformOpPtr> {
+            return std::make_unique<tiforth::FilterTransformOp>(engine, predicate);
           }));
       continue;
     }
@@ -267,8 +270,8 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag,
       aggs.push_back({"cnt", "count_all", nullptr});
       aggs.push_back({"sum_v", "sum_int32", tiforth::MakeFieldRef("v")});
       ARROW_RETURN_NOT_OK(builder->AppendTransform(
-          [keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::HashAggTransformOp>(keys, aggs);
+          [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
+            return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
           }));
       continue;
     }
@@ -321,7 +324,7 @@ arrow::Status RunTranslationSmoke() {
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
-  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, builder.get()));
+  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, engine.get(), builder.get()));
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
 
@@ -363,7 +366,7 @@ arrow::Status RunFilterTranslationSmoke() {
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
-  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, builder.get()));
+  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, engine.get(), builder.get()));
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
 
@@ -416,7 +419,7 @@ arrow::Status RunHashAggTranslationSmoke() {
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
-  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, builder.get()));
+  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, engine.get(), builder.get()));
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
 
@@ -506,7 +509,7 @@ arrow::Status RunHashJoinTranslationSmoke() {
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
-  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, builder.get()));
+  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, engine.get(), builder.get()));
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
 

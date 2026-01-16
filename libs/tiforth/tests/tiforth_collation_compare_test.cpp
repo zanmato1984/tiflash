@@ -46,9 +46,10 @@ arrow::Status RunFilterEquals(int32_t collation_id, const std::vector<std::strin
   auto predicate = MakeCall(
       "equal",
       {MakeFieldRef("s"), MakeLiteral(std::make_shared<arrow::BinaryScalar>(literal))});
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([predicate]() -> arrow::Result<TransformOpPtr> {
-    return std::make_unique<FilterTransformOp>(predicate);
-  }));
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      [engine_ptr = engine.get(), predicate]() -> arrow::Result<TransformOpPtr> {
+        return std::make_unique<FilterTransformOp>(engine_ptr, predicate);
+      }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
@@ -87,4 +88,3 @@ TEST(TiForthCollationCompareTest, PaddingBinaryTrimsSpaces) {
 }
 
 }  // namespace tiforth
-

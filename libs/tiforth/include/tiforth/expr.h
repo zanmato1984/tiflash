@@ -19,6 +19,8 @@ class ExecContext;
 
 namespace tiforth {
 
+class Engine;
+
 struct Expr;
 using ExprPtr = std::shared_ptr<Expr>;
 
@@ -46,9 +48,10 @@ ExprPtr MakeLiteral(std::shared_ptr<arrow::Scalar> value);
 ExprPtr MakeCall(std::string function_name, std::vector<ExprPtr> args);
 
 arrow::Result<arrow::Datum> EvalExpr(const arrow::RecordBatch& batch, const Expr& expr,
-                                    arrow::compute::ExecContext* exec_context);
+                                    const Engine* engine, arrow::compute::ExecContext* exec_context);
 
 arrow::Result<std::shared_ptr<arrow::Array>> EvalExprAsArray(
-    const arrow::RecordBatch& batch, const Expr& expr, arrow::compute::ExecContext* exec_context);
+    const arrow::RecordBatch& batch, const Expr& expr, const Engine* engine,
+    arrow::compute::ExecContext* exec_context);
 
 }  // namespace tiforth

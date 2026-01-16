@@ -25,6 +25,7 @@
 #include <arrow/util/decimal.h>
 
 #include <cassert>
+#include <functional>
 #include <optional>
 #include <string_view>
 #include <unordered_map>
@@ -98,11 +99,15 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ToArrow(const Block & block) 
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> RunPipeline(
     std::shared_ptr<arrow::RecordBatch> input,
-    std::vector<tiforth::PipelineBuilder::TransformFactory> transforms) {
+    std::vector<std::function<arrow::Result<tiforth::TransformOpPtr>(const tiforth::Engine*)>>
+        transforms) {
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
   for (auto & factory : transforms) {
-    ARROW_RETURN_NOT_OK(builder->AppendTransform(std::move(factory)));
+    ARROW_RETURN_NOT_OK(builder->AppendTransform([engine_ptr = engine.get(),
+                                                  factory = std::move(factory)]() mutable {
+      return factory(engine_ptr);
+    }));
   }
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
@@ -157,9 +162,10 @@ arrow::Status RunTypeMappingAndOps() {
     std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef("s")}};
     std::vector<tiforth::AggFunc> aggs;
     aggs.push_back({"cnt", "count_all", nullptr});
-    std::vector<tiforth::PipelineBuilder::TransformFactory> transforms;
-    transforms.push_back([keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-      return std::make_unique<tiforth::HashAggTransformOp>(keys, aggs);
+    std::vector<std::function<arrow::Result<tiforth::TransformOpPtr>(const tiforth::Engine*)>>
+        transforms;
+    transforms.push_back([keys, aggs](const tiforth::Engine* engine) -> arrow::Result<tiforth::TransformOpPtr> {
+      return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
     });
     ARROW_ASSIGN_OR_RAISE(auto outputs, RunPipeline(input, std::move(transforms)));
     if (outputs.size() != 1) {
@@ -192,9 +198,10 @@ arrow::Status RunTypeMappingAndOps() {
     std::vector<tiforth::AggKey> keys = {{"d", tiforth::MakeFieldRef("d")}};
     std::vector<tiforth::AggFunc> aggs;
     aggs.push_back({"cnt", "count_all", nullptr});
-    std::vector<tiforth::PipelineBuilder::TransformFactory> transforms;
-    transforms.push_back([keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-      return std::make_unique<tiforth::HashAggTransformOp>(keys, aggs);
+    std::vector<std::function<arrow::Result<tiforth::TransformOpPtr>(const tiforth::Engine*)>>
+        transforms;
+    transforms.push_back([keys, aggs](const tiforth::Engine* engine) -> arrow::Result<tiforth::TransformOpPtr> {
+      return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
     });
     ARROW_ASSIGN_OR_RAISE(auto outputs, RunPipeline(input, std::move(transforms)));
     if (outputs.size() != 1) {
@@ -227,9 +234,10 @@ arrow::Status RunTypeMappingAndOps() {
     std::vector<tiforth::AggKey> keys = {{"t", tiforth::MakeFieldRef("t")}};
     std::vector<tiforth::AggFunc> aggs;
     aggs.push_back({"cnt", "count_all", nullptr});
-    std::vector<tiforth::PipelineBuilder::TransformFactory> transforms;
-    transforms.push_back([keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-      return std::make_unique<tiforth::HashAggTransformOp>(keys, aggs);
+    std::vector<std::function<arrow::Result<tiforth::TransformOpPtr>(const tiforth::Engine*)>>
+        transforms;
+    transforms.push_back([keys, aggs](const tiforth::Engine* engine) -> arrow::Result<tiforth::TransformOpPtr> {
+      return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
     });
     ARROW_ASSIGN_OR_RAISE(auto outputs, RunPipeline(input, std::move(transforms)));
     if (outputs.size() != 1) {
@@ -328,8 +336,9 @@ arrow::Status RunTypeMappingAndOps() {
     std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches;
     build_batches.push_back(build_batch);
 
-    std::vector<tiforth::PipelineBuilder::TransformFactory> transforms;
-    transforms.push_back([build_batches, key]() -> arrow::Result<tiforth::TransformOpPtr> {
+    std::vector<std::function<arrow::Result<tiforth::TransformOpPtr>(const tiforth::Engine*)>>
+        transforms;
+    transforms.push_back([build_batches, key](const tiforth::Engine* /*engine*/) -> arrow::Result<tiforth::TransformOpPtr> {
       return std::make_unique<tiforth::HashJoinTransformOp>(build_batches, key);
     });
 

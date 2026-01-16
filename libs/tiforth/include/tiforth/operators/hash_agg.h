@@ -35,7 +35,7 @@ struct AggFunc {
 
 class HashAggTransformOp final : public TransformOp {
  public:
-  HashAggTransformOp(std::vector<AggKey> keys, std::vector<AggFunc> aggs,
+  HashAggTransformOp(const Engine* engine, std::vector<AggKey> keys, std::vector<AggFunc> aggs,
                      arrow::MemoryPool* memory_pool = nullptr);
 
  protected:
@@ -90,6 +90,7 @@ class HashAggTransformOp final : public TransformOp {
 
   uint32_t GetOrAddGroup(const NormalizedKey& key, OutputKey output_key);
 
+  const Engine* engine_ = nullptr;
   std::vector<AggKey> keys_;
   std::vector<AggState> aggs_;
 

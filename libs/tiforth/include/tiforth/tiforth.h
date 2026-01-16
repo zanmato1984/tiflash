@@ -6,6 +6,7 @@
 
 #include "tiforth/engine.h"
 #include "tiforth/expr.h"
+#include "tiforth/function_registry.h"
 #include "tiforth/operators.h"
 #include "tiforth/pipeline.h"
 #include "tiforth/spill.h"

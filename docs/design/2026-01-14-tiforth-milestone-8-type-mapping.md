@@ -80,16 +80,29 @@ Arrow compute `equal/less/greater` on `binary` is bytewise and ignores TiDB coll
 
 MS8 introduces a TiForth compare hook for predicates:
 
-- functions: `=,!=,<,<=,>,>=` (implemented as internal handling of Arrow compute call names)
+- functions: `=,!=,<,<=,>,>=` (implemented as `FunctionRegistry` overrides for Arrow compute call names)
 - supported collations (initial):
   - `BINARY` (id 63): raw byte compare (no trimming)
   - padding BIN collations (ids 46/83/47/65): right-trim ASCII space before compare
 
 Future: add CI/unicode collations by porting TiFlash LUT-based collators into TiForth.
 
+### Decimal arithmetic (MS8F)
+
+Arrow compute decimal arithmetic does not match TiFlash/TiDB precision/scale inference rules (and hosts need a
+single source of truth for overflow behavior).
+
+MS8F adds a minimal self-implemented scalar function framework and ports TiFlash decimal `plus` semantics for
+`add(decimal, decimal)`:
+
+- type inference mirrors TiFlash `PlusDecimalInferer` (`Common/Decimal.h`): `scale=max(s1,s2)`,
+  `prec=min(scale + max(p1-s1,p2-s2) + 1, 65)`, and choose Arrow `decimal128` vs `decimal256` by precision
+- execution aligns scales by multiplying by powers of 10 and performs exact integer addition
+- overflow check uses Arrow decimal `FitsInPrecision(prec)` (only relevant when `prec` hits the TiFlash cap)
+
 ### Date/time and decimal functions
 
-MS8 does not fully port MySQL datetime/decimal functions. It only ensures:
+MS8 does not fully port MySQL datetime functions. It only ensures:
 
 - packed MyDate/MyDateTime values are preserved across the boundary
 - comparisons on packed representations are well-defined within a fixed type/fsp column

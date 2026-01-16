@@ -7,18 +7,26 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 
+#include "tiforth/engine.h"
+#include "tiforth/type_metadata.h"
+
 namespace tiforth {
 
-ProjectionTransformOp::ProjectionTransformOp(std::vector<ProjectionExpr> exprs,
+ProjectionTransformOp::ProjectionTransformOp(const Engine* engine, std::vector<ProjectionExpr> exprs,
                                              arrow::MemoryPool* memory_pool)
-    : exprs_(std::move(exprs)),
-      exec_context_(memory_pool != nullptr ? memory_pool : arrow::default_memory_pool()) {}
+    : engine_(engine),
+      exprs_(std::move(exprs)),
+      exec_context_(memory_pool != nullptr
+                        ? memory_pool
+                        : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool())) {}
 
 arrow::Result<std::shared_ptr<arrow::Schema>> ProjectionTransformOp::ComputeOutputSchema(
-    const std::vector<std::shared_ptr<arrow::Array>>& arrays) const {
+    const arrow::RecordBatch& input, const std::vector<std::shared_ptr<arrow::Array>>& arrays) const {
   if (arrays.size() != exprs_.size()) {
     return arrow::Status::Invalid("projection output array count mismatch");
   }
+
+  const auto input_schema = input.schema();
 
   std::vector<std::shared_ptr<arrow::Field>> fields;
   fields.reserve(exprs_.size());
@@ -30,7 +38,42 @@ arrow::Result<std::shared_ptr<arrow::Schema>> ProjectionTransformOp::ComputeOutp
     if (arrays[i] == nullptr) {
       return arrow::Status::Invalid("projection array must not be null");
     }
-    fields.push_back(arrow::field(name, arrays[i]->type()));
+
+    // Preserve metadata when the projection is a direct field reference.
+    std::shared_ptr<arrow::Field> out_field;
+    if (input_schema != nullptr && exprs_[i].expr != nullptr) {
+      if (const auto* field_ref = std::get_if<FieldRef>(&exprs_[i].expr->node); field_ref != nullptr) {
+        int index = field_ref->index;
+        if (index < 0 && !field_ref->name.empty()) {
+          index = input_schema->GetFieldIndex(field_ref->name);
+        }
+        if (index >= 0 && index < input_schema->num_fields()) {
+          out_field = input_schema->field(index);
+        }
+      }
+    }
+
+    if (out_field == nullptr) {
+      out_field = arrow::field(name, arrays[i]->type());
+
+      // Carry TiForth logical type metadata for common tricky types where Arrow physical
+      // type alone is not enough for round-tripping (e.g. host collation side-channel).
+      LogicalType logical_type;
+      if (arrays[i]->type_id() == arrow::Type::DECIMAL128 || arrays[i]->type_id() == arrow::Type::DECIMAL256) {
+        const auto& dec = static_cast<const arrow::DecimalType&>(*arrays[i]->type());
+        logical_type.id = LogicalTypeId::kDecimal;
+        logical_type.decimal_precision = static_cast<int32_t>(dec.precision());
+        logical_type.decimal_scale = static_cast<int32_t>(dec.scale());
+      }
+
+      if (logical_type.id != LogicalTypeId::kUnknown) {
+        ARROW_ASSIGN_OR_RAISE(out_field, WithLogicalTypeMetadata(out_field, logical_type));
+      }
+    } else {
+      out_field = out_field->WithName(name);
+    }
+
+    fields.push_back(std::move(out_field));
   }
   return arrow::schema(std::move(fields));
 }
@@ -39,6 +82,9 @@ arrow::Result<OperatorStatus> ProjectionTransformOp::TransformImpl(
     std::shared_ptr<arrow::RecordBatch>* batch) {
   if (*batch == nullptr) {
     return OperatorStatus::kHasOutput;
+  }
+  if (engine_ == nullptr) {
+    return arrow::Status::Invalid("projection engine must not be null");
   }
 
   const auto& input = **batch;
@@ -49,7 +95,7 @@ arrow::Result<OperatorStatus> ProjectionTransformOp::TransformImpl(
     if (expr.expr == nullptr) {
       return arrow::Status::Invalid("projection expr must not be null");
     }
-    ARROW_ASSIGN_OR_RAISE(auto array, EvalExprAsArray(input, *expr.expr, &exec_context_));
+    ARROW_ASSIGN_OR_RAISE(auto array, EvalExprAsArray(input, *expr.expr, engine_, &exec_context_));
     if (array->length() != input.num_rows()) {
       return arrow::Status::Invalid("projection array length mismatch");
     }
@@ -57,7 +103,7 @@ arrow::Result<OperatorStatus> ProjectionTransformOp::TransformImpl(
   }
 
   if (output_schema_ == nullptr) {
-    ARROW_ASSIGN_OR_RAISE(output_schema_, ComputeOutputSchema(arrays));
+    ARROW_ASSIGN_OR_RAISE(output_schema_, ComputeOutputSchema(input, arrays));
   } else {
     if (static_cast<std::size_t>(output_schema_->num_fields()) != arrays.size()) {
       return arrow::Status::Invalid("projection output schema field count mismatch");
