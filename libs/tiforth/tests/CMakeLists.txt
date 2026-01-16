@@ -3,4 +3,5 @@ add_tiforth_test(tiforth_arrow_array_smoke_test "${CMAKE_CURRENT_SOURCE_DIR}/tif
 add_tiforth_test(tiforth_arrow_compute_smoke_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_arrow_compute_smoke_test.cpp")
 add_tiforth_test(tiforth_pass_through_reader_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_pass_through_reader_test.cpp")
 add_tiforth_test(tiforth_filter_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_filter_test.cpp")
+add_tiforth_test(tiforth_hash_agg_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_hash_agg_test.cpp")
 add_tiforth_test(tiforth_projection_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_projection_test.cpp")

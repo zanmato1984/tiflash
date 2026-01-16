@@ -11,5 +11,6 @@
 #include "tiforth/task.h"
 
 #include "tiforth/operators/filter.h"
+#include "tiforth/operators/hash_agg.h"
 #include "tiforth/operators/pass_through.h"
 #include "tiforth/operators/projection.h"

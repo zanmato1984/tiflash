@@ -1,10 +1,11 @@
 # Work in Progress
-- MS5A: implement `HashAggTransformOp` (blocking end-of-stream output) + TiForth unit tests.
-
-# To Do
 - MS5B: add TiFlash gtest (guarded by `TIFLASH_ENABLE_TIFORTH`) translating a TiFlash DAG with agg into a TiForth pipeline; validate output (hardcoded config/expected).
 
+# To Do
+- (none)
+
 # Completed
+- MS5A: add `HashAggTransformOp` (blocking end-of-stream output; MS5 common path: single int32 key; `count_all` + `sum_int32`; deterministic group order) + `tiforth_hash_agg_test`. Validation: `ninja -C libs/tiforth/build-debug` + `ctest --test-dir libs/tiforth/build-debug`; `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms` + `gtests_dbms --gtest_filter=TiForthPipelineTranslateTest.*` OK. Files: libs/tiforth/include/tiforth/{tiforth.h,operators/hash_agg.h}, libs/tiforth/src/tiforth/{CMakeLists.txt,operators/hash_agg.cc}, libs/tiforth/tests/{CMakeLists.txt,tiforth_hash_agg_test.cpp}, .codex/progress/daemon.md.
 - MS5 design: hash aggregation plan (blocking op; single int32 key; `count_all` + `sum_int32`; deterministic output order; tests). Files: docs/design/2026-01-14-tiforth-milestone-5-hash-aggregation.md, .codex/progress/daemon.md.
 - MS4B: TiFlash gtest translating a TiFlash DAG with filter into a TiForth pipeline (dummy filter op -> TiForth `FilterTransformOp` with hardcoded predicate `x > 1`); validate filtered Arrow output. Guarded by `TIFLASH_ENABLE_TIFORTH`. Validation: `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms` + `gtests_dbms --gtest_filter=TiForthPipelineTranslateTest.*` OK. Files: dbms/src/Flash/tests/gtest_tiforth_pipeline_translate.cpp, .codex/progress/daemon.md.
 - MS4A: add `FilterTransformOp` (SQL WHERE: keep TRUE; drop FALSE/NULL) using Arrow compute `Filter` + cached output schema; refactor Arrow compute init into `tiforth::detail::EnsureArrowComputeInitialized()` (shared by Expr eval and operators); add `tiforth_filter_test`. Validation: `ninja -C libs/tiforth/build-debug` + `ctest --test-dir libs/tiforth/build-debug`; `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms` + `gtests_dbms --gtest_filter=TiForthPipelineTranslateTest.*` OK. Files: libs/tiforth/include/tiforth/{tiforth.h,detail/arrow_compute.h,operators/filter.h}, libs/tiforth/src/tiforth/{CMakeLists.txt,expr.cc,detail/arrow_compute.cc,operators/filter.cc}, libs/tiforth/tests/{CMakeLists.txt,tiforth_filter_test.cpp}, .codex/progress/daemon.md.
