@@ -12,6 +12,7 @@
 
 namespace arrow {
 class Array;
+class MemoryPool;
 class Schema;
 }  // namespace arrow
 
@@ -25,7 +26,7 @@ struct SortKey {
 
 class SortTransformOp final : public TransformOp {
  public:
-  explicit SortTransformOp(std::vector<SortKey> keys);
+  explicit SortTransformOp(std::vector<SortKey> keys, arrow::MemoryPool* memory_pool = nullptr);
 
  protected:
   arrow::Result<OperatorStatus> TransformImpl(
@@ -45,4 +46,3 @@ class SortTransformOp final : public TransformOp {
 };
 
 }  // namespace tiforth
-

@@ -14,6 +14,7 @@
 
 namespace arrow {
 class Array;
+class MemoryPool;
 class Schema;
 }  // namespace arrow
 
@@ -32,7 +33,8 @@ struct AggFunc {
 
 class HashAggTransformOp final : public TransformOp {
  public:
-  HashAggTransformOp(std::vector<AggKey> keys, std::vector<AggFunc> aggs);
+  HashAggTransformOp(std::vector<AggKey> keys, std::vector<AggFunc> aggs,
+                     arrow::MemoryPool* memory_pool = nullptr);
 
  protected:
   arrow::Result<OperatorStatus> TransformImpl(
@@ -77,6 +79,8 @@ class HashAggTransformOp final : public TransformOp {
   std::vector<AggState> aggs_;
 
   std::shared_ptr<arrow::Schema> output_schema_;
+
+  arrow::MemoryPool* memory_pool_ = nullptr;
 
   bool finalized_ = false;
   bool eos_forwarded_ = false;

@@ -6,6 +6,7 @@
 #include <arrow/array/concatenate.h>
 #include <arrow/chunked_array.h>
 #include <arrow/compute/api_vector.h>
+#include <arrow/memory_pool.h>
 #include <arrow/status.h>
 
 #include "tiforth/detail/arrow_compute.h"
@@ -34,8 +35,9 @@ arrow::Result<std::shared_ptr<arrow::Array>> DatumToArray(const arrow::Datum& da
 
 }  // namespace
 
-SortTransformOp::SortTransformOp(std::vector<SortKey> keys)
-    : keys_(std::move(keys)), exec_context_() {}
+SortTransformOp::SortTransformOp(std::vector<SortKey> keys, arrow::MemoryPool* memory_pool)
+    : keys_(std::move(keys)),
+      exec_context_(memory_pool != nullptr ? memory_pool : arrow::default_memory_pool()) {}
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> SortTransformOp::SortAll() {
   if (keys_.size() != 1) {

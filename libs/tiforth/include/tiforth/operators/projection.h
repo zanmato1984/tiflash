@@ -13,6 +13,7 @@
 
 namespace arrow {
 class Array;
+class MemoryPool;
 class Schema;
 }  // namespace arrow
 
@@ -25,7 +26,7 @@ struct ProjectionExpr {
 
 class ProjectionTransformOp final : public TransformOp {
  public:
-  explicit ProjectionTransformOp(std::vector<ProjectionExpr> exprs);
+  ProjectionTransformOp(std::vector<ProjectionExpr> exprs, arrow::MemoryPool* memory_pool = nullptr);
 
  protected:
   arrow::Result<OperatorStatus> TransformImpl(

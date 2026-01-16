@@ -6,14 +6,17 @@
 
 #include <arrow/array.h>
 #include <arrow/builder.h>
+#include <arrow/memory_pool.h>
 #include <arrow/status.h>
 #include <arrow/type.h>
 
 namespace tiforth {
 
 HashJoinTransformOp::HashJoinTransformOp(std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches,
-                                       JoinKey key)
-    : build_batches_(std::move(build_batches)), key_(std::move(key)) {}
+                                         JoinKey key, arrow::MemoryPool* memory_pool)
+    : build_batches_(std::move(build_batches)),
+      key_(std::move(key)),
+      memory_pool_(memory_pool != nullptr ? memory_pool : arrow::default_memory_pool()) {}
 
 arrow::Status HashJoinTransformOp::BuildIndex() {
   if (index_built_) {
@@ -156,7 +159,7 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
   std::vector<std::unique_ptr<arrow::Int32Builder>> builders;
   builders.reserve(out_cols);
   for (int i = 0; i < out_cols; ++i) {
-    builders.push_back(std::make_unique<arrow::Int32Builder>());
+    builders.push_back(std::make_unique<arrow::Int32Builder>(memory_pool_));
   }
 
   int64_t out_rows = 0;
@@ -211,4 +214,3 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
 }
 
 }  // namespace tiforth
-

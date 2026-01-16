@@ -3,13 +3,16 @@
 #include <utility>
 
 #include <arrow/array.h>
+#include <arrow/memory_pool.h>
 #include <arrow/status.h>
 #include <arrow/type.h>
 
 namespace tiforth {
 
-ProjectionTransformOp::ProjectionTransformOp(std::vector<ProjectionExpr> exprs)
-    : exprs_(std::move(exprs)), exec_context_() {}
+ProjectionTransformOp::ProjectionTransformOp(std::vector<ProjectionExpr> exprs,
+                                             arrow::MemoryPool* memory_pool)
+    : exprs_(std::move(exprs)),
+      exec_context_(memory_pool != nullptr ? memory_pool : arrow::default_memory_pool()) {}
 
 arrow::Result<std::shared_ptr<arrow::Schema>> ProjectionTransformOp::ComputeOutputSchema(
     const std::vector<std::shared_ptr<arrow::Array>>& arrays) const {

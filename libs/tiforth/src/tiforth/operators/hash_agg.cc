@@ -5,6 +5,8 @@
 
 #include <arrow/array.h>
 #include <arrow/builder.h>
+#include <arrow/compute/exec.h>
+#include <arrow/memory_pool.h>
 #include <arrow/status.h>
 #include <arrow/type.h>
 
@@ -27,8 +29,10 @@ bool HashAggTransformOp::KeyEq::operator()(const Key& lhs, const Key& rhs) const
   return lhs.value == rhs.value;
 }
 
-HashAggTransformOp::HashAggTransformOp(std::vector<AggKey> keys, std::vector<AggFunc> aggs)
-    : keys_(std::move(keys)) {
+HashAggTransformOp::HashAggTransformOp(std::vector<AggKey> keys, std::vector<AggFunc> aggs,
+                                       arrow::MemoryPool* memory_pool)
+    : keys_(std::move(keys)),
+      memory_pool_(memory_pool != nullptr ? memory_pool : arrow::default_memory_pool()) {
   aggs_.reserve(aggs.size());
   for (auto& agg : aggs) {
     if (agg.func == "count_all") {
@@ -83,7 +87,9 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
     return arrow::Status::Invalid("group key expr must not be null");
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto key_array_any, EvalExprAsArray(input, *keys_[0].expr, nullptr));
+  arrow::compute::ExecContext exec_context(memory_pool_);
+  ARROW_ASSIGN_OR_RAISE(auto key_array_any,
+                        EvalExprAsArray(input, *keys_[0].expr, &exec_context));
   if (key_array_any == nullptr) {
     return arrow::Status::Invalid("group key must not evaluate to null array");
   }
@@ -108,7 +114,7 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
       return arrow::Status::Invalid("sum_int32 arg must not be null");
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto arg_any, EvalExprAsArray(input, *agg.arg, nullptr));
+    ARROW_ASSIGN_OR_RAISE(auto arg_any, EvalExprAsArray(input, *agg.arg, &exec_context));
     if (arg_any == nullptr) {
       return arrow::Status::Invalid("sum_int32 arg must not evaluate to null array");
     }
@@ -194,7 +200,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> HashAggTransformOp::FinalizeO
     ARROW_ASSIGN_OR_RAISE(output_schema_, BuildOutputSchema());
   }
 
-  arrow::Int32Builder key_builder;
+  arrow::Int32Builder key_builder(memory_pool_);
   for (const auto& key : group_keys_) {
     if (key.is_null) {
       ARROW_RETURN_NOT_OK(key_builder.AppendNull());
@@ -214,7 +220,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> HashAggTransformOp::FinalizeO
       case AggState::Kind::kUnsupported:
         return arrow::Status::NotImplemented("unsupported aggregate func: ", agg.func);
       case AggState::Kind::kCountAll: {
-        arrow::UInt64Builder builder;
+        arrow::UInt64Builder builder(memory_pool_);
         ARROW_RETURN_NOT_OK(builder.AppendValues(agg.count_all));
         std::shared_ptr<arrow::Array> out;
         ARROW_RETURN_NOT_OK(builder.Finish(&out));
@@ -222,7 +228,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> HashAggTransformOp::FinalizeO
         break;
       }
       case AggState::Kind::kSumInt32: {
-        arrow::Int64Builder builder;
+        arrow::Int64Builder builder(memory_pool_);
         for (std::size_t i = 0; i < agg.sum_i64.size(); ++i) {
           if (i >= agg.sum_has_value.size() || agg.sum_has_value[i] == 0) {
             ARROW_RETURN_NOT_OK(builder.AppendNull());

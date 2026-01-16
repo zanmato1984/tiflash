@@ -6,6 +6,7 @@
 #include <arrow/array/concatenate.h>
 #include <arrow/chunked_array.h>
 #include <arrow/compute/api_vector.h>
+#include <arrow/memory_pool.h>
 #include <arrow/status.h>
 #include <arrow/type.h>
 
@@ -35,8 +36,9 @@ arrow::Result<std::shared_ptr<arrow::Array>> DatumToArray(const arrow::Datum& da
 
 }  // namespace
 
-FilterTransformOp::FilterTransformOp(ExprPtr predicate)
-    : predicate_(std::move(predicate)), exec_context_() {}
+FilterTransformOp::FilterTransformOp(ExprPtr predicate, arrow::MemoryPool* memory_pool)
+    : predicate_(std::move(predicate)),
+      exec_context_(memory_pool != nullptr ? memory_pool : arrow::default_memory_pool()) {}
 
 arrow::Result<OperatorStatus> FilterTransformOp::TransformImpl(
     std::shared_ptr<arrow::RecordBatch>* batch) {

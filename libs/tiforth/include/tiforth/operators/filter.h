@@ -11,6 +11,7 @@
 
 namespace arrow {
 class Array;
+class MemoryPool;
 class Schema;
 }  // namespace arrow
 
@@ -18,7 +19,7 @@ namespace tiforth {
 
 class FilterTransformOp final : public TransformOp {
  public:
-  explicit FilterTransformOp(ExprPtr predicate);
+  explicit FilterTransformOp(ExprPtr predicate, arrow::MemoryPool* memory_pool = nullptr);
 
  protected:
   arrow::Result<OperatorStatus> TransformImpl(
@@ -31,4 +32,3 @@ class FilterTransformOp final : public TransformOp {
 };
 
 }  // namespace tiforth
-

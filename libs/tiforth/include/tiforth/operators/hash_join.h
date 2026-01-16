@@ -14,6 +14,7 @@
 
 namespace arrow {
 class Array;
+class MemoryPool;
 class Schema;
 }  // namespace arrow
 
@@ -26,7 +27,8 @@ struct JoinKey {
 
 class HashJoinTransformOp final : public TransformOp {
  public:
-  HashJoinTransformOp(std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches, JoinKey key);
+  HashJoinTransformOp(std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches, JoinKey key,
+                      arrow::MemoryPool* memory_pool = nullptr);
 
  protected:
   arrow::Result<OperatorStatus> TransformImpl(
@@ -53,7 +55,8 @@ class HashJoinTransformOp final : public TransformOp {
 
   std::unordered_map<int32_t, std::vector<BuildRowRef>> build_index_;
   bool index_built_ = false;
+
+  arrow::MemoryPool* memory_pool_ = nullptr;
 };
 
 }  // namespace tiforth
-
