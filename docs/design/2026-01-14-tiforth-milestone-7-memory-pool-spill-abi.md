@@ -95,6 +95,13 @@ MS7C implementation status:
   - defines `TIFORTH_C_ABI_VERSION` and a `tiforth_status_t` convention
   - reserves option struct fields for forward-compatible extension
 
+MS7D implementation status:
+
+- Added buildable `tiforth_capi` library target with stub implementations:
+  - symbols match the header, but return `TIFORTH_STATUS_NOT_IMPLEMENTED` for now
+  - basic validation for `abi_version` and reserved option fields
+  - `tiforth_free` implemented via `free(3)` for `tiforth_status_t.message`
+
 ### Go/Rust bindings
 
 Plan only:

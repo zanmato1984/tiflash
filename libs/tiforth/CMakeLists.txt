@@ -34,6 +34,7 @@ endif()
 include(cmake/find/arrow.cmake)
 
 add_subdirectory(src/tiforth)
+add_subdirectory(src/tiforth_capi)
 
 if(TIFORTH_BUILD_TESTS)
   include(cmake/testing/testing.cmake)
