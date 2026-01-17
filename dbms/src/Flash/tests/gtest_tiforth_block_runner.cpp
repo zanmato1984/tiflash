@@ -332,6 +332,106 @@ arrow::Status RunProjectionDecimalAddOnBlock() {
   return arrow::Status::OK();
 }
 
+arrow::Status RunProjectionDecimalAddIntOnBlock() {
+  // Input: a is Nullable(Decimal(20,2)), i is Int64.
+  const auto a_nested_type = createDecimal(/*prec=*/20, /*scale=*/2);
+  auto a_nested = a_nested_type->createColumn();
+  auto* a_dec = typeid_cast<ColumnDecimal<Decimal128>*>(a_nested.get());
+  if (a_dec == nullptr) {
+    return arrow::Status::Invalid("expected Decimal128 column for input decimal");
+  }
+
+  auto a_null = ColumnUInt8::create();
+  const auto append_a = [&](std::optional<Int128> raw) {
+    if (raw.has_value()) {
+      a_dec->insert(Decimal128(*raw));
+      a_null->insert(Field(static_cast<UInt64>(0)));
+    } else {
+      a_dec->insert(Decimal128(Int128(0)));
+      a_null->insert(Field(static_cast<UInt64>(1)));
+    }
+  };
+
+  // Values stored as scaled integers (scale=2).
+  append_a(Int128(123));       // 1.23
+  append_a(Int128(456));       // 4.56
+  append_a(std::nullopt);      // NULL
+
+  auto a_col = ColumnNullable::create(std::move(a_nested), std::move(a_null));
+  auto a_type = makeNullable(a_nested_type);
+
+  auto i_col = ColumnInt64::create();
+  i_col->insert(Field(static_cast<Int64>(5)));
+  i_col->insert(Field(static_cast<Int64>(-7)));
+  i_col->insert(Field(static_cast<Int64>(1)));
+  auto i_type = std::make_shared<DataTypeInt64>();
+
+  ColumnsWithTypeAndName cols;
+  cols.emplace_back(std::move(a_col), a_type, "a");
+  cols.emplace_back(std::move(i_col), i_type, "i");
+  Block input(std::move(cols));
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+
+  std::vector<tiforth::ProjectionExpr> exprs;
+  exprs.push_back({"sum", tiforth::MakeCall("add", {tiforth::MakeFieldRef("a"), tiforth::MakeFieldRef("i")})});
+
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      [engine_ptr = engine.get(), exprs]() -> arrow::Result<tiforth::TransformOpPtr> {
+        return std::make_unique<tiforth::ProjectionTransformOp>(engine_ptr, exprs);
+      }));
+
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(
+      auto outputs,
+      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input},
+                                          /*input_options_by_name=*/{},
+                                          arrow::default_memory_pool()));
+  if (outputs.size() != 1) {
+    return arrow::Status::Invalid("expected exactly 1 output block");
+  }
+
+  const auto& out = outputs[0].block;
+  if (out.columns() != 1 || out.rows() != 3) {
+    return arrow::Status::Invalid("unexpected projection output shape");
+  }
+
+  const auto& elem = out.getByName("sum");
+  const auto* out_nullable = typeid_cast<const ColumnNullable*>(elem.column.get());
+  if (out_nullable == nullptr) {
+    return arrow::Status::Invalid("expected nullable decimal output column");
+  }
+  const auto* out_dec =
+      typeid_cast<const ColumnDecimal<Decimal128>*>(&out_nullable->getNestedColumn());
+  if (out_dec == nullptr) {
+    return arrow::Status::Invalid("expected Decimal128 nested column for output");
+  }
+
+  const auto nested_type = removeNullable(elem.type);
+  if (nested_type == nullptr || !nested_type->isDecimal()) {
+    return arrow::Status::Invalid("expected decimal output type");
+  }
+  const auto out_prec = getDecimalPrecision(*nested_type, /*default_value=*/0);
+  const auto out_scale = getDecimalScale(*nested_type, /*default_value=*/0);
+  if (out_prec != 22 || out_scale != 2) {
+    return arrow::Status::Invalid("unexpected decimal+int add output precision/scale");
+  }
+
+  if (out_nullable->isNullAt(0) || out_nullable->isNullAt(1) || !out_nullable->isNullAt(2)) {
+    return arrow::Status::Invalid("unexpected null map in decimal+int output");
+  }
+
+  const auto& data = out_dec->getData();
+  if (data.size() != 3) {
+    return arrow::Status::Invalid("unexpected output size");
+  }
+  if (data[0] != Decimal128(Int128(623)) || data[1] != Decimal128(Int128(-244))) {
+    return arrow::Status::Invalid("unexpected decimal+int output values");
+  }
+  return arrow::Status::OK();
+}
+
 arrow::Status RunTwoKeyHashAggOnBlocks() {
   // Input: group by (s, k2) where s uses padding BIN collation ("a" == "a ").
   auto s_col = ColumnString::create();
@@ -630,6 +730,11 @@ TEST(TiForthBlockRunnerTest, FilterMixedStringCollationCoercibility) {
 
 TEST(TiForthBlockRunnerTest, ProjectionDecimalAdd) {
   auto status = RunProjectionDecimalAddOnBlock();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthBlockRunnerTest, ProjectionDecimalAddInt) {
+  auto status = RunProjectionDecimalAddIntOnBlock();
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 

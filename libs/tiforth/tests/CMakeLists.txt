@@ -14,3 +14,4 @@ add_tiforth_test(tiforth_sort_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_sort_tes
 add_tiforth_test(tiforth_spill_hooks_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_spill_hooks_test.cpp")
 add_tiforth_test(tiforth_type_metadata_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_type_metadata_test.cpp")
 add_tiforth_test(tiforth_mytime_temporal_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_mytime_temporal_test.cpp")
+add_tiforth_test(tiforth_decimal_add_test "${CMAKE_CURRENT_SOURCE_DIR}/tiforth_decimal_add_test.cpp")
