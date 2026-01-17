@@ -2,7 +2,7 @@
 
 - Author(s): TBD
 - Last Updated: 2026-01-17
-- Status: Implemented
+- Status: Implemented (Block bridge + minimal TiFlash execution wiring)
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS1-8 (TiForth pipeline/operators + Arrow type mapping contract + TiFlash Block->Arrow)
 
@@ -16,11 +16,14 @@ Current TiForth integration is validated mostly by:
 This does not yet provide a practical path to run TiForth inside the real TiFlash execution flow, because TiFlash is
 Block-based (`DB::Block`, `DB::IColumn`) while TiForth is Arrow-based.
 
-The missing integration pieces are:
+The missing integration pieces were:
 
 - Arrow `RecordBatch` -> TiFlash `DB::Block` conversion for a common subset of types (the reverse direction of MS8B)
 - a small “runner” adapter that can execute a TiForth `Task` while consuming/producing `DB::Block` (tests first)
 - (later) translation from a subset of TiFlash pipeline DAG nodes to TiForth operators (beyond dummy gtests)
+
+This milestone now includes a minimal wiring into the TiFlash execution entrypoint (`queryExecute`) behind a runtime
+flag, but only for a pass-through DAG shape (source-only).
 
 ## Goals
 
@@ -34,6 +37,7 @@ The missing integration pieces are:
 - Keep everything **guarded by** `TIFLASH_ENABLE_TIFORTH` (build option `ENABLE_TIFORTH`).
 - Keep TiForth independent: no `dbms/` types or headers added to `libs/tiforth/`.
 - Enable rapid validation by adding at least one gtest that runs TiForth end-to-end using **only Block I/O**.
+- Provide an experimental third execution mode in TiFlash gtests: dag / pipeline / tiforth.
 
 ## Non-goals (MS9 initial)
 
@@ -91,6 +95,18 @@ Once Block<->Arrow bridges exist, translation can move beyond gtests:
 
 This part is deliberately deferred until the Block bridge is validated.
 
+### Minimal TiFlash Execution Wiring (Implemented)
+
+- Add runtime setting: `enable_tiforth_executor` (default `false`).
+- `queryExecute` now has a third path (guarded by `TIFLASH_ENABLE_TIFORTH`):
+  - if `enable_tiforth_executor=1`: execute via TiForth `Pipeline` (currently pass-through only)
+  - else keep existing behavior: `enable_resource_control=1` -> TiFlash pipeline executor; otherwise BlockInputStream.
+- Current support is intentionally narrow:
+  - only pass-through DAG requests (single executor: `TableScan` / `PartitionTableScan` / `ExchangeReceiver`)
+  - all other DAG shapes throw `NOT_IMPLEMENTED` (operator/function coverage is tracked by later milestones).
+- Implementation is Block-based: build a `BlockInputStream` via existing `Planner` (source-only DAG), then run a TiForth
+  pass-through pipeline via `DB::TiForth::RunTiForthPipelineOnBlocks` and return output Blocks back to TiFlash.
+
 ## Test Strategy
 
 - MS9B: roundtrip conversion gtest for the supported type set.
@@ -104,5 +120,10 @@ This part is deliberately deferred until the Block bridge is validated.
 - `dbms/src/Flash/TiForth/ArrowTypeMapping.{h,cpp}`
 - `dbms/src/Flash/TiForth/ArrowBlockConversion.{h,cpp}`
 - `dbms/src/Flash/TiForth/BlockPipelineRunner.{h,cpp}`
+- `dbms/src/Flash/TiForth/TiForthQueryExecutor.{h,cpp}`
+- `dbms/src/Flash/executeQuery.cpp` (third execution path behind `enable_tiforth_executor`)
+- `dbms/src/Interpreters/Settings.h` (`enable_tiforth_executor`)
+- `dbms/src/TestUtils/ExecutorTestUtils.{h,cpp}` (tri-mode: dag/pipeline/tiforth)
 - `dbms/src/Flash/tests/gtest_tiforth_block_roundtrip.cpp`
 - `dbms/src/Flash/tests/gtest_tiforth_block_runner.cpp`
+- `dbms/src/Flash/tests/gtest_tiforth_query_executor_passthrough.cpp`

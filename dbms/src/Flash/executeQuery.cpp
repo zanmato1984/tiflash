@@ -24,6 +24,9 @@
 #include <Flash/Pipeline/Pipeline.h>
 #include <Flash/Pipeline/Schedule/TaskScheduler.h>
 #include <Flash/Planner/Planner.h>
+#if defined(TIFLASH_ENABLE_TIFORTH)
+#include <Flash/TiForth/TiForthQueryExecutor.h>
+#endif
 #include <Flash/executeQuery.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/ProcessList.h>
@@ -176,6 +179,69 @@ std::optional<QueryExecutorPtr> executeAsPipeline(Context & context, bool intern
         LOG_INFO(logger, fmt::format("Query pipeline:\n{}", executor->toString()));
     return {std::move(executor)};
 }
+
+#if defined(TIFLASH_ENABLE_TIFORTH)
+bool isTiForthPassThroughDag(const DAGRequest & dag_request)
+{
+    size_t executor_count = 0;
+    bool supported = true;
+    dag_request.traverse([&](const tipb::Executor & executor) {
+        ++executor_count;
+        if (executor_count > 1)
+        {
+            supported = false;
+            return false;
+        }
+
+        switch (executor.tp())
+        {
+        case tipb::ExecType::TypeTableScan:
+        case tipb::ExecType::TypePartitionTableScan:
+        case tipb::ExecType::TypeExchangeReceiver:
+            return true;
+        default:
+            supported = false;
+            return false;
+        }
+    });
+    return supported && executor_count == 1;
+}
+
+QueryExecutorPtr executeAsTiForth(Context & context, bool internal)
+{
+    RUNTIME_ASSERT(context.getDAGContext());
+    auto & dag_context = *context.getDAGContext();
+    // TiFlash resource control only works for its native pipeline model.
+    dag_context.clearResourceGroupName();
+    const auto & logger = dag_context.log;
+    RUNTIME_ASSERT(logger);
+
+    prepareForExecute(context);
+    dag_context.switchToStreamMode();
+
+    /// query level memory tracker
+    auto memory_tracker = prepareQueryLevelMemoryTracker(context, dag_context, internal);
+
+    FAIL_POINT_TRIGGER_EXCEPTION(FailPoints::random_interpreter_failpoint);
+
+    if (!isTiForthPassThroughDag(dag_context.dag_request))
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "TiForth executor supports only pass-through DAG requests for now");
+
+    Planner planner{context};
+    auto stream = planner.execute();
+
+    auto tiforth_executor = DB::TiForth::TiForthQueryExecutor::CreatePassThrough(
+        memory_tracker,
+        context,
+        logger->identifier(),
+        stream,
+        /*input_options_by_name=*/{},
+        arrow::default_memory_pool());
+    if (!tiforth_executor.ok())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Failed to create TiForth query executor: {}", tiforth_executor.status().ToString());
+    return std::move(tiforth_executor).ValueOrDie();
+}
+#endif // defined(TIFLASH_ENABLE_TIFORTH)
 } // namespace
 
 QueryExecutorPtr queryExecute(Context & context, bool internal)
@@ -187,6 +253,12 @@ QueryExecutorPtr queryExecute(Context & context, bool internal)
             "The setting `profiles.default.enable_planner` has been removed and is no longer effective. "
             "The planner interpreter will be enabled by default.");
     }
+#if defined(TIFLASH_ENABLE_TIFORTH)
+    if (context.getSettingsRef().enable_tiforth_executor)
+    {
+        return executeAsTiForth(context, internal);
+    }
+#endif
     if (context.getSettingsRef().enable_resource_control)
     {
         if (auto res = executeAsPipeline(context, internal); likely(res))
