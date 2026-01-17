@@ -7,10 +7,17 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 
+#include "tiforth/detail/expr_compiler.h"
 #include "tiforth/engine.h"
 #include "tiforth/type_metadata.h"
 
 namespace tiforth {
+
+struct ProjectionTransformOp::Compiled {
+  std::vector<detail::CompiledExpr> exprs;
+};
+
+ProjectionTransformOp::~ProjectionTransformOp() = default;
 
 ProjectionTransformOp::ProjectionTransformOp(const Engine* engine, std::vector<ProjectionExpr> exprs,
                                              arrow::MemoryPool* memory_pool)
@@ -100,11 +107,30 @@ arrow::Result<OperatorStatus> ProjectionTransformOp::TransformImpl(
   std::vector<std::shared_ptr<arrow::Array>> arrays;
   arrays.reserve(exprs_.size());
 
-  for (const auto& expr : exprs_) {
-    if (expr.expr == nullptr) {
-      return arrow::Status::Invalid("projection expr must not be null");
+  if (compiled_ == nullptr) {
+    auto compiled = std::make_unique<Compiled>();
+    compiled->exprs.reserve(exprs_.size());
+    for (const auto& expr : exprs_) {
+      if (expr.expr == nullptr) {
+        return arrow::Status::Invalid("projection expr must not be null");
+      }
+      ARROW_ASSIGN_OR_RAISE(auto compiled_expr,
+                            detail::CompileExpr(input.schema(), *expr.expr, engine_, &exec_context_));
+      compiled->exprs.push_back(std::move(compiled_expr));
     }
-    ARROW_ASSIGN_OR_RAISE(auto array, EvalExprAsArray(input, *expr.expr, engine_, &exec_context_));
+    compiled_ = std::move(compiled);
+  }
+
+  if (compiled_->exprs.size() != exprs_.size()) {
+    return arrow::Status::Invalid("projection compiled expr count mismatch");
+  }
+
+  for (std::size_t i = 0; i < exprs_.size(); ++i) {
+    ARROW_ASSIGN_OR_RAISE(auto array,
+                          detail::ExecuteExprAsArray(compiled_->exprs[i], input, &exec_context_));
+    if (array == nullptr) {
+      return arrow::Status::Invalid("projection result must not be null");
+    }
     if (array->length() != input.num_rows()) {
       return arrow::Status::Invalid("projection array length mismatch");
     }

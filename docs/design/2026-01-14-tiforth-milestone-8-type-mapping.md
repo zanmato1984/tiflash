@@ -83,8 +83,10 @@ MS8 introduces a TiForth compare hook for predicates:
 - functions: `=,!=,<,<=,>,>=` integrated into Arrow compute via an `arrow::compute::FunctionRegistry`
   overlay owned by `Engine`:
   - register TiForth collated kernels under `tiforth.collated_*`
-  - override Arrow names (`equal/less/...`) via Arrow `MetaFunction` that dispatches to TiForth kernels
-    on binary-like types and delegates to the parent registry otherwise
+  - TiForth does not override Arrow builtin names via `MetaFunction` (Arrow compute `Expression::Bind`
+    cannot bind meta-functions). Instead TiForth compiles its `Expr` IR into an Arrow compute
+    `Expression` and rewrites `equal/less/...` into `tiforth.collated_*` only when inputs carry
+    TiForth logical string metadata.
   - collation id is passed via a TiForth `FunctionOptions` built from Arrow `Field` metadata
 - supported collations (initial):
   - `BINARY` (id 63): raw byte compare (no trimming)
@@ -101,8 +103,8 @@ single source of truth for overflow behavior).
 MS8F ports TiFlash decimal `plus` semantics for `add(decimal, decimal)` using Arrow compute kernels:
 
 - register `tiforth.decimal_add` as an Arrow `ScalarFunction` with decimal kernels (dispatch by type id)
-- override Arrow `add` via an Arrow `MetaFunction` that routes decimal+decimal to `tiforth.decimal_add`
-  and delegates to the parent registry for other types
+- TiForth expression compilation rewrites `add` into `tiforth.decimal_add` only when at least one input
+  is a decimal (so non-decimal `add` uses Arrow builtin kernels unchanged)
 
 - type inference mirrors TiFlash `PlusDecimalInferer` (`Common/Decimal.h`): `scale=max(s1,s2)`,
   `prec=min(scale + max(p1-s1,p2-s2) + 1, 65)`, and choose Arrow `decimal128` vs `decimal256` by precision
@@ -120,8 +122,9 @@ Follow-up implemented (MS2-followup): add initial packed-MyTime (UInt64) scalar 
 registered into Arrow compute via the engine registry, driven by TiForth logical type metadata:
 
 - `toYear/toMonth/toDayOfMonth/toMyDate` on `uint64` packed MyDate/MyDateTime
-- intercept `hour/minute/second/microSecond` with Arrow `MetaFunction` only when called with
-  `MyTimeOptions` (so Arrow native timestamp kernels are still used for non-packed inputs)
+- register packed extraction kernels under `tiforth.mytime_{hour,minute,second}` plus `microSecond`
+  (packed-only), and rewrite calls during TiForth expression compilation when the input is packed
+  MyDate/MyDateTime (so Arrow native timestamp kernels remain available for non-packed inputs)
 
 Future: add explicit TiForth kernels for casts/arithmetic per TiFlash behavior.
 

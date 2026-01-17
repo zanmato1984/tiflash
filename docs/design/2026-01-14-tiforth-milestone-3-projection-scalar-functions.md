@@ -64,15 +64,19 @@ The function set is intentionally tiny for Milestone 3B; it expands in later mil
 
 Implementation note (current code): TiForth does not implement its own function registry. Instead,
 each `Engine` owns an **Arrow** `arrow::compute::FunctionRegistry` overlay (parent = Arrow global
-registry) with TiForth custom kernels registered. For standard function names (`add`, `equal`, ...)
-TiForth installs Arrow `MetaFunction` overrides that:
+registry) with TiForth custom kernels registered (usually under `tiforth.*` names).
 
-- select TiForth kernels on tricky types (decimal add, collated string compare),
-- delegate to the parent registry for all other types.
+TiForth does **not** override Arrow builtin function names via `MetaFunction` because Arrow compute
+`Expression::Bind` cannot bind meta-functions (they have no kernels). Instead, TiForth compiles its
+own `tiforth::Expr` IR into an Arrow compute `Expression`, and does **compile-time dispatch**:
 
-Expression evaluation calls Arrow compute `CallFunction` with an `ExecContext` pointing at the
-engine registry. Collation-aware comparisons pass a TiForth `FunctionOptions` (collation id)
-derived from input field metadata.
+- rewrite calls like `add/equal/hour` into `tiforth.decimal_add`, `tiforth.collated_equal`,
+  `tiforth.mytime_hour` when inputs require TiFlash/TiDB semantics,
+- attach `FunctionOptions` (collation id / packed-MyTime type) derived from Arrow field metadata,
+- bind once (`Expression::Bind`) and execute via `ExecuteScalarExpression`.
+
+Operators cache bound expressions per input schema so per-batch evaluation avoids repeated kernel
+lookup/init.
 
 Current organization: custom kernels live under `libs/tiforth/src/tiforth/functions/scalar/` grouped
 by Arrow compute categories (e.g. arithmetic/comparison/temporal).
@@ -85,7 +89,8 @@ by Arrow compute categories (e.g. arithmetic/comparison/temporal).
 - Add `libs/tiforth/src/tiforth/expr.cc` implementing:
   - evaluation (`EvalExpr(batch, expr) -> arrow::Result<arrow::Datum>`)
   - broadcasting scalars to arrays when needed (`MakeArrayFromScalar`)
-  - Arrow compute invocation (`arrow::compute::CallFunction`) with the engine registry
+  - Arrow compute `Expression` compilation/binding (`detail/expr_compiler.cc`) with the engine registry
+  - execution (`arrow::compute::ExecuteScalarExpression`) for the common scalar-expression path
   - lazy `arrow::compute::Initialize()` to ensure built-in kernels are registered
   - chunked array results: concatenate chunks into a single `arrow::Array` (common scalar kernels produce arrays)
 

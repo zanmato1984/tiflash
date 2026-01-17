@@ -458,44 +458,6 @@ arrow::Status ExecMicroSecond(arrow::compute::KernelContext* ctx, const arrow::c
   return ExecPackedUnary<arrow::Int64Builder, int64_t>(ctx, batch, out, ExtractMicroSecond);
 }
 
-class PackedMyTimeMetaFunction final : public arrow::compute::MetaFunction {
- public:
-  PackedMyTimeMetaFunction(std::string name, std::string packed_name,
-                           arrow::compute::FunctionRegistry* fallback_registry)
-      : arrow::compute::MetaFunction(std::move(name), arrow::compute::Arity::Unary(),
-                                     arrow::compute::FunctionDoc::Empty()),
-        packed_name_(std::move(packed_name)),
-        fallback_registry_(fallback_registry) {}
-
- protected:
-  arrow::Result<arrow::Datum> ExecuteImpl(const std::vector<arrow::Datum>& args,
-                                         const arrow::compute::FunctionOptions* options,
-                                         arrow::compute::ExecContext* ctx) const override {
-    if (args.size() != 1) {
-      return arrow::Status::Invalid(name(), " requires 1 arg");
-    }
-    if (fallback_registry_ == nullptr) {
-      return arrow::Status::Invalid("fallback function registry must not be null");
-    }
-
-    const bool want_packed =
-        args[0].type() != nullptr && args[0].type()->id() == arrow::Type::UINT64 &&
-        dynamic_cast<const MyTimeOptions*>(options) != nullptr;
-    if (want_packed) {
-      return arrow::compute::CallFunction(packed_name_, args, options, ctx);
-    }
-
-    arrow::compute::ExecContext fallback_ctx(
-        ctx != nullptr ? ctx->memory_pool() : arrow::default_memory_pool(),
-        ctx != nullptr ? ctx->executor() : nullptr, fallback_registry_);
-    return arrow::compute::CallFunction(name(), args, /*options=*/nullptr, &fallback_ctx);
-  }
-
- private:
-  std::string packed_name_;
-  arrow::compute::FunctionRegistry* fallback_registry_ = nullptr;
-};
-
 arrow::compute::ScalarKernel MakePackedKernel(std::shared_ptr<arrow::DataType> out_type,
                                               arrow::compute::ArrayKernelExec exec) {
   arrow::compute::ScalarKernel kernel({arrow::compute::InputType(arrow::Type::UINT64)},
@@ -587,16 +549,13 @@ arrow::Status RegisterScalarTemporalFunctions(arrow::compute::FunctionRegistry* 
     ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(func), /*allow_overwrite=*/true));
   }
 
-  // TiDB-like extraction names. These exist in Arrow compute for timestamp types,
-  // so install MetaFunctions to only intercept packed-MyTime (UInt64) usage.
+  // TiDB-like extraction names. For packed-MyTime, prefer `tiforth.mytime_*`
+  // to avoid clobbering Arrow's timestamp extraction kernels.
   {
     auto hour = std::make_shared<arrow::compute::ScalarFunction>(
         "tiforth.mytime_hour", arrow::compute::Arity::Unary(), arrow::compute::FunctionDoc::Empty());
     ARROW_RETURN_NOT_OK(hour->AddKernel(MakePackedKernel(arrow::int64(), ExecHour)));
     ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(hour), /*allow_overwrite=*/true));
-    ARROW_RETURN_NOT_OK(registry->AddFunction(
-        std::make_shared<PackedMyTimeMetaFunction>("hour", "tiforth.mytime_hour", fallback_registry),
-        /*allow_overwrite=*/true));
   }
   {
     auto minute = std::make_shared<arrow::compute::ScalarFunction>(
@@ -604,9 +563,6 @@ arrow::Status RegisterScalarTemporalFunctions(arrow::compute::FunctionRegistry* 
         arrow::compute::FunctionDoc::Empty());
     ARROW_RETURN_NOT_OK(minute->AddKernel(MakePackedKernel(arrow::int64(), ExecMinute)));
     ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(minute), /*allow_overwrite=*/true));
-    ARROW_RETURN_NOT_OK(registry->AddFunction(
-        std::make_shared<PackedMyTimeMetaFunction>("minute", "tiforth.mytime_minute", fallback_registry),
-        /*allow_overwrite=*/true));
   }
   {
     auto second = std::make_shared<arrow::compute::ScalarFunction>(
@@ -614,22 +570,13 @@ arrow::Status RegisterScalarTemporalFunctions(arrow::compute::FunctionRegistry* 
         arrow::compute::FunctionDoc::Empty());
     ARROW_RETURN_NOT_OK(second->AddKernel(MakePackedKernel(arrow::int64(), ExecSecond)));
     ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(second), /*allow_overwrite=*/true));
-    ARROW_RETURN_NOT_OK(registry->AddFunction(
-        std::make_shared<PackedMyTimeMetaFunction>("second", "tiforth.mytime_second", fallback_registry),
-        /*allow_overwrite=*/true));
   }
   {
     auto micro = std::make_shared<arrow::compute::ScalarFunction>(
-        "tiforth.mytime_micro_second", arrow::compute::Arity::Unary(),
+        "microSecond", arrow::compute::Arity::Unary(),
         arrow::compute::FunctionDoc::Empty());
     ARROW_RETURN_NOT_OK(micro->AddKernel(MakePackedKernel(arrow::int64(), ExecMicroSecond)));
     ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(micro), /*allow_overwrite=*/true));
-
-    // "microSecond" is a TiDB/TiFlash naming; keep it as-is and intercept packed usage only.
-    ARROW_RETURN_NOT_OK(registry->AddFunction(
-        std::make_shared<PackedMyTimeMetaFunction>("microSecond", "tiforth.mytime_micro_second",
-                                                   fallback_registry),
-        /*allow_overwrite=*/true));
   }
 
   return arrow::Status::OK();

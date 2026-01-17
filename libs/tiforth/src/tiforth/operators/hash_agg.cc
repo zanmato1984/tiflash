@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -18,6 +19,7 @@
 
 #include "tiforth/engine.h"
 #include "tiforth/collation.h"
+#include "tiforth/detail/expr_compiler.h"
 #include "tiforth/type_metadata.h"
 
 namespace tiforth {
@@ -98,13 +100,22 @@ bool HashAggTransformOp::KeyEq::operator()(const NormalizedKey& lhs,
   return true;
 }
 
+struct HashAggTransformOp::Compiled {
+  std::vector<detail::CompiledExpr> key_exprs;
+  std::vector<std::optional<detail::CompiledExpr>> sum_arg_exprs;
+};
+
+HashAggTransformOp::~HashAggTransformOp() = default;
+
 HashAggTransformOp::HashAggTransformOp(const Engine* engine, std::vector<AggKey> keys,
                                        std::vector<AggFunc> aggs, arrow::MemoryPool* memory_pool)
     : engine_(engine),
       keys_(std::move(keys)),
       memory_pool_(memory_pool != nullptr
                        ? memory_pool
-                       : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool())) {
+                       : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool())),
+      exec_context_(memory_pool_, /*executor=*/nullptr,
+                   engine != nullptr ? engine->function_registry() : nullptr) {
   aggs_.reserve(aggs.size());
   for (auto& agg : aggs) {
     if (agg.func == "count_all") {
@@ -168,14 +179,39 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
     }
   }
 
-  arrow::compute::ExecContext exec_context(memory_pool_, /*executor=*/nullptr,
-                                          engine_ != nullptr ? engine_->function_registry()
-                                                             : nullptr);
+  if (compiled_ == nullptr) {
+    auto compiled = std::make_unique<Compiled>();
+    compiled->key_exprs.reserve(key_count);
+    for (std::size_t i = 0; i < key_count; ++i) {
+      ARROW_ASSIGN_OR_RAISE(auto compiled_key,
+                            detail::CompileExpr(input.schema(), *keys_[i].expr, engine_, &exec_context_));
+      compiled->key_exprs.push_back(std::move(compiled_key));
+    }
+
+    compiled->sum_arg_exprs.resize(aggs_.size());
+    for (std::size_t i = 0; i < aggs_.size(); ++i) {
+      const auto& agg = aggs_[i];
+      if (agg.kind != AggState::Kind::kSumInt32) {
+        continue;
+      }
+      if (agg.arg == nullptr) {
+        return arrow::Status::Invalid("sum_int32 arg must not be null");
+      }
+      ARROW_ASSIGN_OR_RAISE(auto compiled_arg,
+                            detail::CompileExpr(input.schema(), *agg.arg, engine_, &exec_context_));
+      compiled->sum_arg_exprs[i] = std::move(compiled_arg);
+    }
+
+    compiled_ = std::move(compiled);
+  }
+  if (compiled_ == nullptr || compiled_->key_exprs.size() != key_count) {
+    return arrow::Status::Invalid("compiled hash agg key expr count mismatch");
+  }
 
   std::array<std::shared_ptr<arrow::Array>, 2> key_arrays{};
   for (std::size_t i = 0; i < key_count; ++i) {
     ARROW_ASSIGN_OR_RAISE(key_arrays[i],
-                          EvalExprAsArray(input, *keys_[i].expr, engine_, &exec_context));
+                          detail::ExecuteExprAsArray(compiled_->key_exprs[i], input, &exec_context_));
     if (key_arrays[i] == nullptr) {
       return arrow::Status::Invalid("group key must not evaluate to null array");
     }
@@ -239,12 +275,14 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
       }
       continue;
     }
-    if (agg.arg == nullptr) {
+    if (compiled_ == nullptr || i >= compiled_->sum_arg_exprs.size() ||
+        !compiled_->sum_arg_exprs[i].has_value()) {
       return arrow::Status::Invalid("sum_int32 arg must not be null");
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto arg_any,
-                          EvalExprAsArray(input, *agg.arg, engine_, &exec_context));
+    ARROW_ASSIGN_OR_RAISE(
+        auto arg_any,
+        detail::ExecuteExprAsArray(*compiled_->sum_arg_exprs[i], input, &exec_context_));
     if (arg_any == nullptr) {
       return arrow::Status::Invalid("sum_int32 arg must not evaluate to null array");
     }

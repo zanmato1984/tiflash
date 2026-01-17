@@ -1,8 +1,8 @@
 #include <arrow/array.h>
 #include <arrow/builder.h>
 #include <arrow/compute/exec.h>
-#include <arrow/compute/function.h>
 #include <arrow/result.h>
+#include <arrow/record_batch.h>
 #include <arrow/status.h>
 #include <arrow/type.h>
 #include <arrow/util/decimal.h>
@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "tiforth/engine.h"
+#include "tiforth/expr.h"
 
 namespace tiforth {
 
@@ -82,10 +83,25 @@ arrow::Result<std::shared_ptr<arrow::Array>> MakeDecimal256Array(
   return out;
 }
 
-arrow::Result<arrow::Datum> CallAdd(const Engine& engine, const arrow::Datum& lhs,
-                                   const arrow::Datum& rhs) {
+arrow::Result<std::shared_ptr<arrow::Array>> EvalAdd(const Engine& engine,
+                                                     const std::shared_ptr<arrow::Array>& lhs,
+                                                     const std::shared_ptr<arrow::Array>& rhs) {
+  if (lhs == nullptr || rhs == nullptr) {
+    return arrow::Status::Invalid("lhs/rhs must not be null");
+  }
+  if (lhs->length() != rhs->length()) {
+    return arrow::Status::Invalid("lhs/rhs length mismatch");
+  }
+
+  auto schema = arrow::schema({arrow::field("lhs", lhs->type()), arrow::field("rhs", rhs->type())});
+  auto batch = arrow::RecordBatch::Make(schema, lhs->length(), {lhs, rhs});
+  if (batch == nullptr) {
+    return arrow::Status::Invalid("failed to build input batch");
+  }
+
+  auto expr = MakeCall("add", {MakeFieldRef("lhs"), MakeFieldRef("rhs")});
   arrow::compute::ExecContext ctx(engine.memory_pool(), /*executor=*/nullptr, engine.function_registry());
-  return arrow::compute::CallFunction("add", {lhs, rhs}, /*options=*/nullptr, &ctx);
+  return EvalExprAsArray(*batch, *expr, &engine, &ctx);
 }
 
 arrow::Status RunDecimal128PlusInt32() {
@@ -96,30 +112,30 @@ arrow::Status RunDecimal128PlusInt32() {
                                             {int64_t{123}, std::nullopt, int64_t{1000}}));
   ARROW_ASSIGN_OR_RAISE(auto i, MakeInt32Array({int32_t{2}, int32_t{3}, int32_t{-5}}));
 
-  ARROW_ASSIGN_OR_RAISE(auto out, CallAdd(*engine, arrow::Datum(d), arrow::Datum(i)));
-  if (!out.is_array()) {
-    return arrow::Status::Invalid("expected array output");
+  ARROW_ASSIGN_OR_RAISE(auto out, EvalAdd(*engine, d, i));
+  if (out == nullptr) {
+    return arrow::Status::Invalid("expected non-null output array");
   }
-  if (!out.type()->Equals(*arrow::decimal128(/*precision=*/13, /*scale=*/2))) {
-    return arrow::Status::Invalid("unexpected decimal+int32 output type: ", out.type()->ToString());
+  if (!out->type()->Equals(*arrow::decimal128(/*precision=*/13, /*scale=*/2))) {
+    return arrow::Status::Invalid("unexpected decimal+int32 output type: ", out->type()->ToString());
   }
 
   ARROW_ASSIGN_OR_RAISE(
       auto expect,
       MakeDecimal128Array(/*precision=*/13, /*scale=*/2, {int64_t{323}, std::nullopt, int64_t{500}}));
-  if (!expect->Equals(*out.make_array())) {
+  if (!expect->Equals(*out)) {
     return arrow::Status::Invalid("unexpected decimal+int32 output values");
   }
 
   // Validate commutativity (int32 + decimal128).
-  ARROW_ASSIGN_OR_RAISE(auto out2, CallAdd(*engine, arrow::Datum(i), arrow::Datum(d)));
-  if (!out2.is_array()) {
-    return arrow::Status::Invalid("expected array output (swapped)");
+  ARROW_ASSIGN_OR_RAISE(auto out2, EvalAdd(*engine, i, d));
+  if (out2 == nullptr) {
+    return arrow::Status::Invalid("expected non-null output array (swapped)");
   }
-  if (!out2.type()->Equals(*arrow::decimal128(/*precision=*/13, /*scale=*/2))) {
-    return arrow::Status::Invalid("unexpected int32+decimal output type: ", out2.type()->ToString());
+  if (!out2->type()->Equals(*arrow::decimal128(/*precision=*/13, /*scale=*/2))) {
+    return arrow::Status::Invalid("unexpected int32+decimal output type: ", out2->type()->ToString());
   }
-  if (!expect->Equals(*out2.make_array())) {
+  if (!expect->Equals(*out2)) {
     return arrow::Status::Invalid("unexpected int32+decimal output values");
   }
 
@@ -133,16 +149,16 @@ arrow::Status RunDecimal128PlusInt64PromotesToDecimal256() {
   ARROW_ASSIGN_OR_RAISE(auto d, MakeDecimal128Array(/*precision=*/38, /*scale=*/0, {int64_t{1}}));
   ARROW_ASSIGN_OR_RAISE(auto i, MakeInt64Array({int64_t{2}}));
 
-  ARROW_ASSIGN_OR_RAISE(auto out, CallAdd(*engine, arrow::Datum(d), arrow::Datum(i)));
-  if (!out.is_array()) {
-    return arrow::Status::Invalid("expected array output");
+  ARROW_ASSIGN_OR_RAISE(auto out, EvalAdd(*engine, d, i));
+  if (out == nullptr) {
+    return arrow::Status::Invalid("expected non-null output array");
   }
-  if (!out.type()->Equals(*arrow::decimal256(/*precision=*/39, /*scale=*/0))) {
-    return arrow::Status::Invalid("unexpected decimal256 output type: ", out.type()->ToString());
+  if (!out->type()->Equals(*arrow::decimal256(/*precision=*/39, /*scale=*/0))) {
+    return arrow::Status::Invalid("unexpected decimal256 output type: ", out->type()->ToString());
   }
 
   ARROW_ASSIGN_OR_RAISE(auto expect, MakeDecimal256Array(/*precision=*/39, /*scale=*/0, {arrow::Decimal256(3)}));
-  if (!expect->Equals(*out.make_array())) {
+  if (!expect->Equals(*out)) {
     return arrow::Status::Invalid("unexpected promoted decimal256 output values");
   }
   return arrow::Status::OK();
@@ -159,7 +175,7 @@ arrow::Status RunDecimalOverflowIsError() {
   ARROW_ASSIGN_OR_RAISE(auto lhs, MakeDecimal256Array(/*precision=*/65, /*scale=*/0, {lhs_val}));
   ARROW_ASSIGN_OR_RAISE(auto rhs, MakeDecimal256Array(/*precision=*/65, /*scale=*/0, {rhs_val}));
 
-  auto out_res = CallAdd(*engine, arrow::Datum(lhs), arrow::Datum(rhs));
+  auto out_res = EvalAdd(*engine, lhs, rhs);
   if (out_res.ok()) {
     return arrow::Status::Invalid("expected overflow error, got OK");
   }
@@ -188,4 +204,3 @@ TEST(TiForthDecimalAddTest, DecimalOverflowIsError) {
 }
 
 }  // namespace tiforth
-

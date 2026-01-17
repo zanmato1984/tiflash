@@ -64,11 +64,6 @@ CollatedCompareOptions::CollatedCompareOptions()
 CollatedCompareOptions::CollatedCompareOptions(int32_t collation_id)
     : arrow::compute::FunctionOptions(&kCollatedCompareOptionsType), collation_id(collation_id) {}
 
-bool IsBinaryLike(arrow::Type::type type_id) {
-  return type_id == arrow::Type::BINARY || type_id == arrow::Type::LARGE_BINARY ||
-         type_id == arrow::Type::STRING || type_id == arrow::Type::LARGE_STRING;
-}
-
 enum class CompareOp {
   kEqual,
   kNotEqual,
@@ -233,46 +228,6 @@ arrow::Status ExecCollatedCompareLargeBinaryLike(arrow::compute::KernelContext* 
   return ExecCollatedCompareDispatchImpl<op, arrow::LargeBinaryArray>(ctx, batch, out);
 }
 
-class TiforthCompareMetaFunction final : public arrow::compute::MetaFunction {
- public:
-  TiforthCompareMetaFunction(std::string name, std::string collated_name,
-                             arrow::compute::FunctionRegistry* fallback_registry)
-      : arrow::compute::MetaFunction(std::move(name), arrow::compute::Arity::Binary(),
-                                     arrow::compute::FunctionDoc::Empty()),
-        collated_name_(std::move(collated_name)),
-        fallback_registry_(fallback_registry) {}
-
- protected:
-  arrow::Result<arrow::Datum> ExecuteImpl(const std::vector<arrow::Datum>& args,
-                                         const arrow::compute::FunctionOptions* options,
-                                         arrow::compute::ExecContext* ctx) const override {
-    if (args.size() != 2) {
-      return arrow::Status::Invalid(name(), " requires 2 args");
-    }
-    if (fallback_registry_ == nullptr) {
-      return arrow::Status::Invalid("fallback function registry must not be null");
-    }
-
-    const auto* lhs_type = args[0].type().get();
-    const auto* rhs_type = args[1].type().get();
-    const bool lhs_binary = lhs_type != nullptr && IsBinaryLike(lhs_type->id());
-    const bool rhs_binary = rhs_type != nullptr && IsBinaryLike(rhs_type->id());
-
-    if (lhs_binary && rhs_binary) {
-      return arrow::compute::CallFunction(collated_name_, args, options, ctx);
-    }
-
-    arrow::compute::ExecContext fallback_ctx(
-        ctx != nullptr ? ctx->memory_pool() : arrow::default_memory_pool(),
-        ctx != nullptr ? ctx->executor() : nullptr, fallback_registry_);
-    return arrow::compute::CallFunction(name(), args, /*options=*/nullptr, &fallback_ctx);
-  }
-
- private:
-  std::string collated_name_;
-  arrow::compute::FunctionRegistry* fallback_registry_ = nullptr;
-};
-
 arrow::compute::ScalarKernel MakeBinaryLikeKernel(arrow::compute::ArrayKernelExec exec) {
   arrow::compute::ScalarKernel kernel(
       {arrow::compute::InputType(arrow::compute::match::BinaryLike()),
@@ -296,7 +251,6 @@ arrow::compute::ScalarKernel MakeLargeBinaryLikeKernel(arrow::compute::ArrayKern
 }
 
 arrow::Status RegisterOneCollatedCompare(arrow::compute::FunctionRegistry* registry,
-                                        arrow::compute::FunctionRegistry* fallback_registry,
                                         std::string_view name, std::string_view collated_name,
                                         arrow::compute::ArrayKernelExec binarylike_exec,
                                         arrow::compute::ArrayKernelExec large_binarylike_exec) {
@@ -308,11 +262,6 @@ arrow::Status RegisterOneCollatedCompare(arrow::compute::FunctionRegistry* regis
   ARROW_RETURN_NOT_OK(func->AddKernel(MakeBinaryLikeKernel(binarylike_exec)));
   ARROW_RETURN_NOT_OK(func->AddKernel(MakeLargeBinaryLikeKernel(large_binarylike_exec)));
   ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(func), /*allow_overwrite=*/true));
-
-  ARROW_RETURN_NOT_OK(registry->AddFunction(
-      std::make_shared<TiforthCompareMetaFunction>(std::string(name), std::string(collated_name),
-                                                   fallback_registry),
-      /*allow_overwrite=*/true));
   return arrow::Status::OK();
 }
 
@@ -335,27 +284,27 @@ arrow::Status RegisterScalarComparisonFunctions(arrow::compute::FunctionRegistry
                                                        /*allow_overwrite=*/true));
 
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
-      registry, fallback_registry, "equal", "tiforth.collated_equal",
+      registry, "equal", "tiforth.collated_equal",
       ExecCollatedCompareBinaryLike<CompareOp::kEqual>,
       ExecCollatedCompareLargeBinaryLike<CompareOp::kEqual>));
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
-      registry, fallback_registry, "not_equal", "tiforth.collated_not_equal",
+      registry, "not_equal", "tiforth.collated_not_equal",
       ExecCollatedCompareBinaryLike<CompareOp::kNotEqual>,
       ExecCollatedCompareLargeBinaryLike<CompareOp::kNotEqual>));
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
-      registry, fallback_registry, "less", "tiforth.collated_less",
+      registry, "less", "tiforth.collated_less",
       ExecCollatedCompareBinaryLike<CompareOp::kLess>,
       ExecCollatedCompareLargeBinaryLike<CompareOp::kLess>));
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
-      registry, fallback_registry, "less_equal", "tiforth.collated_less_equal",
+      registry, "less_equal", "tiforth.collated_less_equal",
       ExecCollatedCompareBinaryLike<CompareOp::kLessEqual>,
       ExecCollatedCompareLargeBinaryLike<CompareOp::kLessEqual>));
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
-      registry, fallback_registry, "greater", "tiforth.collated_greater",
+      registry, "greater", "tiforth.collated_greater",
       ExecCollatedCompareBinaryLike<CompareOp::kGreater>,
       ExecCollatedCompareLargeBinaryLike<CompareOp::kGreater>));
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
-      registry, fallback_registry, "greater_equal", "tiforth.collated_greater_equal",
+      registry, "greater_equal", "tiforth.collated_greater_equal",
       ExecCollatedCompareBinaryLike<CompareOp::kGreaterEqual>,
       ExecCollatedCompareLargeBinaryLike<CompareOp::kGreaterEqual>));
 

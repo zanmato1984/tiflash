@@ -605,52 +605,6 @@ arrow::Status ExecDecimalAdd(arrow::compute::KernelContext* ctx, const arrow::co
   return arrow::Status::Invalid("unsupported decimal256 add signature");
 }
 
-class TiforthAddMetaFunction final : public arrow::compute::MetaFunction {
-public:
-  explicit TiforthAddMetaFunction(arrow::compute::FunctionRegistry* fallback_registry)
-      : arrow::compute::MetaFunction("add", arrow::compute::Arity::Binary(),
-                                     arrow::compute::FunctionDoc::Empty()),
-        fallback_registry_(fallback_registry) {}
-
- protected:
-  arrow::Result<arrow::Datum> ExecuteImpl(const std::vector<arrow::Datum>& args,
-                                         const arrow::compute::FunctionOptions* options,
-                                         arrow::compute::ExecContext* ctx) const override {
-    if (args.size() != 2) {
-      return arrow::Status::Invalid("add requires 2 args");
-    }
-    if (fallback_registry_ == nullptr) {
-      return arrow::Status::Invalid("fallback function registry must not be null");
-    }
-
-    const auto* lhs_type = args[0].type().get();
-    const auto* rhs_type = args[1].type().get();
-    const bool lhs_decimal =
-        lhs_type != nullptr &&
-        (lhs_type->id() == arrow::Type::DECIMAL128 || lhs_type->id() == arrow::Type::DECIMAL256);
-    const bool rhs_decimal =
-        rhs_type != nullptr &&
-        (rhs_type->id() == arrow::Type::DECIMAL128 || rhs_type->id() == arrow::Type::DECIMAL256);
-
-    const bool lhs_integer = lhs_type != nullptr && IsIntegerType(lhs_type->id());
-    const bool rhs_integer = rhs_type != nullptr && IsIntegerType(rhs_type->id());
-    if (lhs_decimal && (rhs_decimal || rhs_integer)) {
-      return arrow::compute::CallFunction("tiforth.decimal_add", args, /*options=*/nullptr, ctx);
-    }
-    if (rhs_decimal && lhs_integer) {
-      return arrow::compute::CallFunction("tiforth.decimal_add", args, /*options=*/nullptr, ctx);
-    }
-
-    arrow::compute::ExecContext fallback_ctx(
-        ctx != nullptr ? ctx->memory_pool() : arrow::default_memory_pool(),
-        ctx != nullptr ? ctx->executor() : nullptr, fallback_registry_);
-    return arrow::compute::CallFunction("add", args, options, &fallback_ctx);
-  }
-
- private:
-  arrow::compute::FunctionRegistry* fallback_registry_ = nullptr;
-};
-
 }  // namespace
 
 arrow::Status RegisterScalarArithmeticFunctions(arrow::compute::FunctionRegistry* registry,
@@ -691,8 +645,6 @@ arrow::Status RegisterScalarArithmeticFunctions(arrow::compute::FunctionRegistry
   }
 
   ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(decimal_add), /*allow_overwrite=*/true));
-  ARROW_RETURN_NOT_OK(registry->AddFunction(std::make_shared<TiforthAddMetaFunction>(fallback_registry),
-                                            /*allow_overwrite=*/true));
   return arrow::Status::OK();
 }
 

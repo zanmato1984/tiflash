@@ -8,6 +8,7 @@
 #include <variant>
 #include <vector>
 
+#include <arrow/compute/exec.h>
 #include <arrow/record_batch.h>
 #include <arrow/result.h>
 
@@ -37,6 +38,7 @@ class HashAggTransformOp final : public TransformOp {
  public:
   HashAggTransformOp(const Engine* engine, std::vector<AggKey> keys, std::vector<AggFunc> aggs,
                      arrow::MemoryPool* memory_pool = nullptr);
+  ~HashAggTransformOp() override;
 
  protected:
   arrow::Result<OperatorStatus> TransformImpl(
@@ -90,6 +92,8 @@ class HashAggTransformOp final : public TransformOp {
 
   uint32_t GetOrAddGroup(const NormalizedKey& key, OutputKey output_key);
 
+  struct Compiled;
+
   const Engine* engine_ = nullptr;
   std::vector<AggKey> keys_;
   std::vector<AggState> aggs_;
@@ -98,6 +102,8 @@ class HashAggTransformOp final : public TransformOp {
   std::vector<std::shared_ptr<arrow::Field>> output_key_fields_;
 
   arrow::MemoryPool* memory_pool_ = nullptr;
+  std::unique_ptr<Compiled> compiled_;
+  arrow::compute::ExecContext exec_context_;
 
   bool finalized_ = false;
   bool eos_forwarded_ = false;
