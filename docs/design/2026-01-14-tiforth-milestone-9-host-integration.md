@@ -29,6 +29,8 @@ The missing integration pieces are:
   - Decimal (128/256)
   - MyDate/MyDateTime packed UInt64
   - String/FixedString as Arrow `binary` with collation metadata
+- Be explicit about **non-zero-copy** conversions at the boundary:
+  - Decimal256 values require conversion from TiFlash `Decimal256` (ClickHouse-native, boost-multiprecision) into Arrow `decimal256` (fixed-width two’s-complement bytes). This is expected in early milestones; a future optimization can materialize Arrow decimal buffers directly from storage where it reduces overhead.
 - Keep everything **guarded by** `TIFLASH_ENABLE_TIFORTH` (build option `ENABLE_TIFORTH`).
 - Keep TiForth independent: no `dbms/` types or headers added to `libs/tiforth/`.
 - Enable rapid validation by adding at least one gtest that runs TiForth end-to-end using **only Block I/O**.

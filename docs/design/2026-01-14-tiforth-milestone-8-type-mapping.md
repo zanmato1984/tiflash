@@ -57,6 +57,7 @@ Notes:
 - `Decimal(P,S)`:
   - Arrow type: `decimal128(P,S)` if `P <= 38`, else `decimal256(P,S)` (TiFlash supports up to 65).
   - Metadata: `tiforth.logical_type=decimal`, and optionally `tiforth.decimal.{precision,scale}` for cross-checking.
+  - Integration note: TiFlash `Decimal256` (ClickHouse-native, boost-multiprecision) is not the same in-memory layout as Arrow `decimal256` (fixed-width 32-byte two’s-complement integer). Initial MS8/MS9 bridging converts per-value when materializing Arrow arrays; follow-up optimization can decode/materialize Arrow decimal buffers directly from storage where it avoids intermediate Decimal256 objects.
 - `MyDate`:
   - Arrow type: `uint64` (TiFlash packed format per `DB::MyTimeBase`).
   - Metadata: `tiforth.logical_type=mydate`.
