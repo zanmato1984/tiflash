@@ -25,7 +25,7 @@ types where:
 - Keep TiForth independent: no `dbms/` headers/types in `libs/tiforth/`.
 - Implement only the **common path** initially:
   - mapping + decode of metadata
-  - collation-aware predicate comparisons for BINARY + padding-BIN collations
+  - collation-aware predicate comparisons for BINARY + padding-BIN + CI/Unicode collations (common TiDB set)
   - key handling for join/agg/sort extended beyond int32 in follow-ups
 
 ## Non-goals (MS8)
@@ -89,8 +89,9 @@ MS8 introduces a TiForth compare hook for predicates:
 - supported collations (initial):
   - `BINARY` (id 63): raw byte compare (no trimming)
   - padding BIN collations (ids 46/83/47/65): right-trim ASCII space before compare
-
-Future: add CI/unicode collations by porting TiFlash LUT-based collators into TiForth.
+  - `*_GENERAL_CI` (ids 33/45): case-insensitive compare with PAD SPACE (TiDB GeneralCI)
+  - `*_UNICODE_CI` (ids 192/224): case-insensitive compare with PAD SPACE (Unicode 0400)
+  - `*_0900_AI_CI` (id 255): case-insensitive compare (Unicode 0900, NO PAD)
 
 ### Decimal arithmetic (MS8F)
 
@@ -149,9 +150,10 @@ Notes (implemented):
 ## Follow-up Completed In This Iteration (MS8D/MS8E)
 
 - TiForth operators: hash join / hash agg / sort keys extended to handle `uint64`, `decimal128/256`, and `binary`
-  strings with collation metadata (BINARY + PAD SPACE BIN). Implementation notes:
+  strings with collation metadata (BINARY + PAD SPACE BIN + GeneralCI + Unicode CI 0400/0900). Implementation notes:
   - join builds a key->row-index map on a concatenated build-side batch and uses Arrow `Take` to materialize output,
     so it naturally supports mixed column types while keeping a deterministic row order.
-  - hash agg keeps an output key value (first seen) while using a normalized key for hashing/equality under PAD SPACE.
+  - hash join/agg normalize string keys via TiDB-compatible sort-key bytes (weight string), so hashing/equality matches
+    TiDB collation semantics without per-element virtual dispatch.
 - TiFlash (guarded) gtest: builds a `DB::Block` containing `Decimal256`, `MyDateTime(6)`, and collated strings,
   converts to Arrow via MS8B, then validates TiForth `HashAgg` and `HashJoin` behavior.

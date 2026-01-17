@@ -88,7 +88,7 @@ std::size_t HashJoinTransformOp::KeyHash::operator()(
                                std::is_same_v<V, Decimal256Bytes>) {
             return HashBytes(v);
           } else if constexpr (std::is_same_v<V, std::string>) {
-            return std::hash<std::string>{}(v);
+            return HashBytes(reinterpret_cast<const uint8_t*>(v.data()), v.size());
           } else {
             return 0;
           }
@@ -124,7 +124,6 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
   }
 
   key_collation_ids_.fill(-1);
-  key_is_padding_binary_.fill(false);
 
   for (uint8_t i = 0; i < key_count_; ++i) {
     if (key_.right[i].empty()) {
@@ -145,12 +144,7 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
         if (collation.kind == CollationKind::kUnsupported) {
           return arrow::Status::NotImplemented("unsupported collation id: ", collation_id);
         }
-        if (collation.kind != CollationKind::kBinary && collation.kind != CollationKind::kPaddingBinary) {
-          return arrow::Status::NotImplemented(
-              "hash join string keys support BINARY and padding BIN collations only: ", collation_id);
-        }
         key_collation_ids_[i] = collation_id;
-        key_is_padding_binary_[i] = (collation.kind == CollationKind::kPaddingBinary);
       }
     }
   }
@@ -190,8 +184,15 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
     }
   }
 
+  std::array<Collation, 2> collations{CollationFromId(63), CollationFromId(63)};
+  for (uint8_t i = 0; i < key_count_; ++i) {
+    if (key_collation_ids_[i] >= 0) {
+      collations[i] = CollationFromId(key_collation_ids_[i]);
+    }
+  }
+
   const auto make_key_part = [&](const arrow::Array& array, int64_t row,
-                                 bool padding_binary) -> arrow::Result<KeyValue> {
+                                 Collation collation) -> arrow::Result<KeyValue> {
     switch (array.type_id()) {
       case arrow::Type::INT32:
         return static_cast<const arrow::Int32Array&>(array).Value(row);
@@ -217,11 +218,7 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
       }
       case arrow::Type::BINARY: {
         const auto& bin = static_cast<const arrow::BinaryArray&>(array);
-        std::string_view view = bin.GetView(row);
-        if (padding_binary) {
-          view = RightTrimAsciiSpace(view);
-        }
-        return std::string(view.data(), view.size());
+        return SortKeyString(collation, bin.GetView(row));
       }
       default:
         break;
@@ -247,7 +244,7 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
     CompositeKey key;
     key.key_count = key_count_;
     for (uint8_t i = 0; i < key_count_; ++i) {
-      ARROW_ASSIGN_OR_RAISE(key.parts[i], make_key_part(*key_arrays[i], row, key_is_padding_binary_[i]));
+      ARROW_ASSIGN_OR_RAISE(key.parts[i], make_key_part(*key_arrays[i], row, collations[i]));
     }
     build_index_[key].push_back(row);
   }
@@ -352,8 +349,15 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
     }
   }
 
+  std::array<Collation, 2> collations{CollationFromId(63), CollationFromId(63)};
+  for (uint8_t i = 0; i < key_count_; ++i) {
+    if (key_collation_ids_[i] >= 0) {
+      collations[i] = CollationFromId(key_collation_ids_[i]);
+    }
+  }
+
   const auto make_key_part = [&](const arrow::Array& array, int64_t row,
-                                 bool padding_binary) -> arrow::Result<KeyValue> {
+                                 Collation collation) -> arrow::Result<KeyValue> {
     switch (array.type_id()) {
       case arrow::Type::INT32:
         return static_cast<const arrow::Int32Array&>(array).Value(row);
@@ -373,11 +377,7 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
       }
       case arrow::Type::BINARY: {
         const auto& bin = static_cast<const arrow::BinaryArray&>(array);
-        std::string_view view = bin.GetView(row);
-        if (padding_binary) {
-          view = RightTrimAsciiSpace(view);
-        }
-        return std::string(view.data(), view.size());
+        return SortKeyString(collation, bin.GetView(row));
       }
       default:
         break;
@@ -406,7 +406,7 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
     key.key_count = key_count_;
     for (uint8_t i = 0; i < key_count_; ++i) {
       ARROW_ASSIGN_OR_RAISE(key.parts[i],
-                            make_key_part(*probe_key_arrays[i], row, key_is_padding_binary_[i]));
+                            make_key_part(*probe_key_arrays[i], row, collations[i]));
     }
     auto it = build_index_.find(key);
     if (it == build_index_.end()) {

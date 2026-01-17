@@ -64,7 +64,7 @@ std::size_t HashAggTransformOp::KeyHash::operator()(const NormalizedKey& key) co
                                std::is_same_v<V, Decimal256Bytes>) {
             return HashBytes(v);
           } else if constexpr (std::is_same_v<V, std::string>) {
-            return std::hash<std::string>{}(v);
+            return HashBytes(reinterpret_cast<const uint8_t*>(v.data()), v.size());
           } else {
             return 0;
           }
@@ -227,10 +227,6 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
     if (collation.kind == CollationKind::kUnsupported) {
       return arrow::Status::NotImplemented("unsupported collation id: ", collation_id);
     }
-    if (collation.kind != CollationKind::kBinary && collation.kind != CollationKind::kPaddingBinary) {
-      return arrow::Status::NotImplemented(
-          "hash agg string keys support BINARY and padding BIN collations only: ", collation_id);
-    }
     collations[i] = collation;
   }
 
@@ -327,10 +323,7 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
           const auto& arr = static_cast<const arrow::BinaryArray&>(*arr_any);
           std::string_view view = arr.GetView(row);
           out_part.value = std::string(view.data(), view.size());
-          if (collations[ki].kind == CollationKind::kPaddingBinary) {
-            view = RightTrimAsciiSpace(view);
-          }
-          norm_part.value = std::string(view.data(), view.size());
+          norm_part.value = SortKeyString(collations[ki], view);
           break;
         }
         default:

@@ -281,6 +281,192 @@ arrow::Status RunHashAggTwoKeySmoke() {
   return arrow::Status::OK();
 }
 
+arrow::Status RunHashAggGeneralCiStringKeySmoke() {
+  ARROW_ASSIGN_OR_RAISE(auto engine, Engine::Create(EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, PipelineBuilder::Create(engine.get()));
+
+  std::vector<AggKey> keys = {{"s", MakeFieldRef("s")}};
+  std::vector<AggFunc> aggs;
+  aggs.push_back({"cnt", "count_all", nullptr});
+  aggs.push_back({"sum_v", "sum_int32", MakeFieldRef("v")});
+
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      [engine_ptr = engine.get(), keys, aggs]() -> arrow::Result<TransformOpPtr> {
+        return std::make_unique<HashAggTransformOp>(engine_ptr, keys, aggs);
+      }));
+
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
+
+  ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
+  if (initial_state != TaskState::kNeedInput) {
+    return arrow::Status::Invalid("expected TaskState::kNeedInput");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto s_field, MakeBinaryFieldWithCollation("s", /*collation_id=*/45));
+  auto schema = arrow::schema({s_field, arrow::field("v", arrow::int32())});
+
+  std::vector<std::optional<std::string>> s_values = {std::string("a"), std::string("A"),
+                                                      std::string("a "), std::string("b")};
+  ARROW_ASSIGN_OR_RAISE(auto s_array, MakeBinaryArray(s_values));
+  ARROW_ASSIGN_OR_RAISE(auto v_array, MakeInt32Array({10, 20, 1, 5}));
+  auto batch = arrow::RecordBatch::Make(schema, static_cast<int64_t>(s_values.size()),
+                                        {s_array, v_array});
+
+  ARROW_RETURN_NOT_OK(task->PushInput(batch));
+  ARROW_RETURN_NOT_OK(task->CloseInput());
+
+  std::vector<std::shared_ptr<arrow::RecordBatch>> outputs;
+  while (true) {
+    ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
+    if (state == TaskState::kFinished) {
+      break;
+    }
+    if (state == TaskState::kNeedInput) {
+      continue;
+    }
+    if (state != TaskState::kHasOutput) {
+      return arrow::Status::Invalid("expected TaskState::kHasOutput/kNeedInput/kFinished");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto out, task->PullOutput());
+    if (out == nullptr) {
+      return arrow::Status::Invalid("expected non-null output batch");
+    }
+    outputs.push_back(std::move(out));
+  }
+  if (outputs.size() != 1) {
+    return arrow::Status::Invalid("expected exactly 1 output batch");
+  }
+
+  const auto& out = outputs[0];
+  if (out->num_columns() != 3 || out->num_rows() != 2) {
+    return arrow::Status::Invalid("unexpected output shape");
+  }
+  if (out->schema()->field(0)->name() != "s" || out->schema()->field(1)->name() != "cnt" ||
+      out->schema()->field(2)->name() != "sum_v") {
+    return arrow::Status::Invalid("unexpected output schema");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(const auto logical_type, GetLogicalType(*out->schema()->field(0)));
+  if (logical_type.id != LogicalTypeId::kString || logical_type.collation_id != 45) {
+    return arrow::Status::Invalid("unexpected output string key metadata");
+  }
+
+  arrow::BinaryBuilder s_expect_builder;
+  ARROW_RETURN_NOT_OK(s_expect_builder.Append(reinterpret_cast<const uint8_t*>("a"), 1));
+  ARROW_RETURN_NOT_OK(s_expect_builder.Append(reinterpret_cast<const uint8_t*>("b"), 1));
+  std::shared_ptr<arrow::Array> s_expect;
+  ARROW_RETURN_NOT_OK(s_expect_builder.Finish(&s_expect));
+
+  arrow::UInt64Builder cnt_builder;
+  ARROW_RETURN_NOT_OK(cnt_builder.AppendValues({3, 1}));
+  std::shared_ptr<arrow::Array> cnt_expect;
+  ARROW_RETURN_NOT_OK(cnt_builder.Finish(&cnt_expect));
+
+  arrow::Int64Builder sum_builder;
+  ARROW_RETURN_NOT_OK(sum_builder.Append(31));
+  ARROW_RETURN_NOT_OK(sum_builder.Append(5));
+  std::shared_ptr<arrow::Array> sum_expect;
+  ARROW_RETURN_NOT_OK(sum_builder.Finish(&sum_expect));
+
+  if (!s_expect->Equals(*out->column(0)) || !cnt_expect->Equals(*out->column(1)) ||
+      !sum_expect->Equals(*out->column(2))) {
+    return arrow::Status::Invalid("unexpected output values");
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status RunHashAggUnicode0900StringKeySmoke() {
+  ARROW_ASSIGN_OR_RAISE(auto engine, Engine::Create(EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, PipelineBuilder::Create(engine.get()));
+
+  std::vector<AggKey> keys = {{"s", MakeFieldRef("s")}};
+  std::vector<AggFunc> aggs;
+  aggs.push_back({"cnt", "count_all", nullptr});
+  aggs.push_back({"sum_v", "sum_int32", MakeFieldRef("v")});
+
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      [engine_ptr = engine.get(), keys, aggs]() -> arrow::Result<TransformOpPtr> {
+        return std::make_unique<HashAggTransformOp>(engine_ptr, keys, aggs);
+      }));
+
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
+
+  ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
+  if (initial_state != TaskState::kNeedInput) {
+    return arrow::Status::Invalid("expected TaskState::kNeedInput");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto s_field, MakeBinaryFieldWithCollation("s", /*collation_id=*/255));
+  auto schema = arrow::schema({s_field, arrow::field("v", arrow::int32())});
+
+  std::vector<std::optional<std::string>> s_values = {std::string("a"), std::string("A"),
+                                                      std::string("a "), std::string("A ")};
+  ARROW_ASSIGN_OR_RAISE(auto s_array, MakeBinaryArray(s_values));
+  ARROW_ASSIGN_OR_RAISE(auto v_array, MakeInt32Array({10, 20, 1, 2}));
+  auto batch = arrow::RecordBatch::Make(schema, static_cast<int64_t>(s_values.size()),
+                                        {s_array, v_array});
+
+  ARROW_RETURN_NOT_OK(task->PushInput(batch));
+  ARROW_RETURN_NOT_OK(task->CloseInput());
+
+  std::vector<std::shared_ptr<arrow::RecordBatch>> outputs;
+  while (true) {
+    ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
+    if (state == TaskState::kFinished) {
+      break;
+    }
+    if (state == TaskState::kNeedInput) {
+      continue;
+    }
+    if (state != TaskState::kHasOutput) {
+      return arrow::Status::Invalid("expected TaskState::kHasOutput/kNeedInput/kFinished");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto out, task->PullOutput());
+    if (out == nullptr) {
+      return arrow::Status::Invalid("expected non-null output batch");
+    }
+    outputs.push_back(std::move(out));
+  }
+  if (outputs.size() != 1) {
+    return arrow::Status::Invalid("expected exactly 1 output batch");
+  }
+
+  const auto& out = outputs[0];
+  if (out->num_columns() != 3 || out->num_rows() != 2) {
+    return arrow::Status::Invalid("unexpected output shape");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(const auto logical_type, GetLogicalType(*out->schema()->field(0)));
+  if (logical_type.id != LogicalTypeId::kString || logical_type.collation_id != 255) {
+    return arrow::Status::Invalid("unexpected output string key metadata");
+  }
+
+  arrow::BinaryBuilder s_expect_builder;
+  ARROW_RETURN_NOT_OK(s_expect_builder.Append(reinterpret_cast<const uint8_t*>("a"), 1));
+  ARROW_RETURN_NOT_OK(s_expect_builder.Append(reinterpret_cast<const uint8_t*>("a "), 2));
+  std::shared_ptr<arrow::Array> s_expect;
+  ARROW_RETURN_NOT_OK(s_expect_builder.Finish(&s_expect));
+
+  arrow::UInt64Builder cnt_builder;
+  ARROW_RETURN_NOT_OK(cnt_builder.AppendValues({2, 2}));
+  std::shared_ptr<arrow::Array> cnt_expect;
+  ARROW_RETURN_NOT_OK(cnt_builder.Finish(&cnt_expect));
+
+  arrow::Int64Builder sum_builder;
+  ARROW_RETURN_NOT_OK(sum_builder.Append(30));
+  ARROW_RETURN_NOT_OK(sum_builder.Append(3));
+  std::shared_ptr<arrow::Array> sum_expect;
+  ARROW_RETURN_NOT_OK(sum_builder.Finish(&sum_expect));
+
+  if (!s_expect->Equals(*out->column(0)) || !cnt_expect->Equals(*out->column(1)) ||
+      !sum_expect->Equals(*out->column(2))) {
+    return arrow::Status::Invalid("unexpected output values");
+  }
+  return arrow::Status::OK();
+}
+
 }  // namespace
 
 TEST(TiForthHashAggTest, CountAllSumInt32) {
@@ -290,6 +476,16 @@ TEST(TiForthHashAggTest, CountAllSumInt32) {
 
 TEST(TiForthHashAggTest, TwoKeyGroupByBinaryAndInt32) {
   auto status = RunHashAggTwoKeySmoke();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthHashAggTest, GeneralCiStringKey) {
+  auto status = RunHashAggGeneralCiStringKeySmoke();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthHashAggTest, Unicode0900StringKey) {
+  auto status = RunHashAggUnicode0900StringKeySmoke();
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 

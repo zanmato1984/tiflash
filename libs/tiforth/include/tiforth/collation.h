@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <string>
 #include <string_view>
 
 #include "tiforth/detail/tidb_collation_lut.h"
@@ -456,6 +457,95 @@ inline int CompareString(CollationKind kind, std::string_view lhs, std::string_v
 // - positive if lhs > rhs
 inline int CompareString(Collation collation, std::string_view lhs, std::string_view rhs) {
   return CompareString(collation.kind, lhs, rhs);
+}
+
+inline void AppendU16BigEndian(std::string& out, uint16_t w) {
+  out.push_back(static_cast<char>(w >> 8));
+  out.push_back(static_cast<char>(w));
+}
+
+inline void AppendPackedWeightsBigEndian(std::string& out, uint64_t w) {
+  while (w != 0) {
+    AppendU16BigEndian(out, static_cast<uint16_t>(w & 0xFFFF));
+    w >>= 16;
+  }
+}
+
+template <CollationKind kind>
+inline std::string SortKeyString(std::string_view value) {
+  if constexpr (kind == CollationKind::kBinary) {
+    return std::string(value.data(), value.size());
+  } else if constexpr (kind == CollationKind::kPaddingBinary) {
+    value = RightTrimAsciiSpace(value);
+    return std::string(value.data(), value.size());
+  } else if constexpr (kind == CollationKind::kGeneralCi) {
+    value = RightTrimAsciiSpace(value);
+    std::string out;
+    out.reserve(value.size() * 2);
+    std::size_t offset = 0;
+    while (offset < value.size()) {
+      const Rune r = DecodeUtf8Char(value, offset);
+      AppendU16BigEndian(out, GeneralCiWeight(r));
+    }
+    return out;
+  } else if constexpr (kind == CollationKind::kUnicodeCi0400) {
+    value = RightTrimAsciiSpace(value);
+    std::string out;
+    out.reserve(value.size() * 16);
+    std::size_t offset = 0;
+    while (offset < value.size()) {
+      const Rune r = DecodeUtf8Char(value, offset);
+      uint64_t first = 0;
+      uint64_t second = 0;
+      const bool ok = tidb::UnicodeCI::Weight0400(first, second, r);
+      if (!ok) {
+        continue;
+      }
+      AppendPackedWeightsBigEndian(out, first);
+      AppendPackedWeightsBigEndian(out, second);
+    }
+    return out;
+  } else if constexpr (kind == CollationKind::kUnicodeCi0900) {
+    std::string out;
+    out.reserve(value.size() * 16);
+    std::size_t offset = 0;
+    while (offset < value.size()) {
+      const Rune r = DecodeUtf8Char(value, offset);
+      uint64_t first = 0;
+      uint64_t second = 0;
+      const bool ok = tidb::UnicodeCI::Weight0900(first, second, r);
+      if (!ok) {
+        continue;
+      }
+      AppendPackedWeightsBigEndian(out, first);
+      AppendPackedWeightsBigEndian(out, second);
+    }
+    return out;
+  } else {
+    return std::string(value.data(), value.size());
+  }
+}
+
+inline std::string SortKeyString(CollationKind kind, std::string_view value) {
+  switch (kind) {
+    case CollationKind::kBinary:
+      return SortKeyString<CollationKind::kBinary>(value);
+    case CollationKind::kPaddingBinary:
+      return SortKeyString<CollationKind::kPaddingBinary>(value);
+    case CollationKind::kGeneralCi:
+      return SortKeyString<CollationKind::kGeneralCi>(value);
+    case CollationKind::kUnicodeCi0400:
+      return SortKeyString<CollationKind::kUnicodeCi0400>(value);
+    case CollationKind::kUnicodeCi0900:
+      return SortKeyString<CollationKind::kUnicodeCi0900>(value);
+    case CollationKind::kUnsupported:
+      break;
+  }
+  return SortKeyString<CollationKind::kBinary>(value);
+}
+
+inline std::string SortKeyString(Collation collation, std::string_view value) {
+  return SortKeyString(collation.kind, value);
 }
 
 }  // namespace tiforth

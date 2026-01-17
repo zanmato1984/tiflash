@@ -78,7 +78,6 @@ class HashJoinTransformOp final : public TransformOp {
   std::array<int, 2> probe_key_indices_ = {-1, -1};
 
   std::array<int32_t, 2> key_collation_ids_ = {-1, -1};
-  std::array<bool, 2> key_is_padding_binary_ = {false, false};
 
   std::unordered_map<CompositeKey, std::vector<int64_t>, KeyHash> build_index_;
   bool index_built_ = false;

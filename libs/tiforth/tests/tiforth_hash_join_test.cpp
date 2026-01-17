@@ -226,6 +226,185 @@ arrow::Status RunHashJoinTwoKeySmoke() {
   return arrow::Status::OK();
 }
 
+arrow::Status RunHashJoinGeneralCiStringKeySmoke() {
+  ARROW_ASSIGN_OR_RAISE(auto build_s_field, MakeBinaryFieldWithCollation("s", /*collation_id=*/45));
+  auto build_schema = arrow::schema({build_s_field, arrow::field("bv", arrow::int32())});
+
+  std::vector<std::optional<std::string>> build_s = {std::string("a"), std::string("b")};
+  ARROW_ASSIGN_OR_RAISE(auto build_s_array, MakeBinaryArray(build_s));
+  ARROW_ASSIGN_OR_RAISE(auto build_bv_array, MakeInt32Array({100, 200}));
+  auto build_batch = arrow::RecordBatch::Make(build_schema, static_cast<int64_t>(build_s.size()),
+                                              {build_s_array, build_bv_array});
+  std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches = {build_batch};
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, Engine::Create(EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, PipelineBuilder::Create(engine.get()));
+
+  JoinKey key{.left = {"s"}, .right = {"s"}};
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([build_batches, key]() -> arrow::Result<TransformOpPtr> {
+    return std::make_unique<HashJoinTransformOp>(build_batches, key);
+  }));
+
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
+
+  ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
+  if (initial_state != TaskState::kNeedInput) {
+    return arrow::Status::Invalid("expected TaskState::kNeedInput");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto probe_s_field, MakeBinaryFieldWithCollation("s", /*collation_id=*/45));
+  auto probe_schema = arrow::schema({probe_s_field, arrow::field("pv", arrow::int32())});
+
+  std::vector<std::optional<std::string>> probe_s = {std::string("A"), std::string("a "),
+                                                     std::string("B"), std::string("c")};
+  ARROW_ASSIGN_OR_RAISE(auto probe_s_array, MakeBinaryArray(probe_s));
+  ARROW_ASSIGN_OR_RAISE(auto probe_pv_array, MakeInt32Array({10, 11, 20, 30}));
+  auto probe_batch = arrow::RecordBatch::Make(probe_schema, static_cast<int64_t>(probe_s.size()),
+                                              {probe_s_array, probe_pv_array});
+
+  ARROW_RETURN_NOT_OK(task->PushInput(probe_batch));
+  ARROW_RETURN_NOT_OK(task->CloseInput());
+
+  ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
+  if (state != TaskState::kHasOutput) {
+    return arrow::Status::Invalid("expected TaskState::kHasOutput");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto out, task->PullOutput());
+  if (out == nullptr) {
+    return arrow::Status::Invalid("expected non-null output batch");
+  }
+  if (out->num_columns() != 4 || out->num_rows() != 3) {
+    return arrow::Status::Invalid("unexpected output shape");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(const auto probe_lt, GetLogicalType(*out->schema()->field(0)));
+  ARROW_ASSIGN_OR_RAISE(const auto build_lt, GetLogicalType(*out->schema()->field(2)));
+  if (probe_lt.id != LogicalTypeId::kString || probe_lt.collation_id != 45 ||
+      build_lt.id != LogicalTypeId::kString || build_lt.collation_id != 45) {
+    return arrow::Status::Invalid("unexpected output string collation metadata");
+  }
+
+  arrow::BinaryBuilder probe_s_builder;
+  ARROW_RETURN_NOT_OK(probe_s_builder.Append(reinterpret_cast<const uint8_t*>("A"), 1));
+  ARROW_RETURN_NOT_OK(probe_s_builder.Append(reinterpret_cast<const uint8_t*>("a "), 2));
+  ARROW_RETURN_NOT_OK(probe_s_builder.Append(reinterpret_cast<const uint8_t*>("B"), 1));
+  std::shared_ptr<arrow::Array> expect_probe_s;
+  ARROW_RETURN_NOT_OK(probe_s_builder.Finish(&expect_probe_s));
+  ARROW_ASSIGN_OR_RAISE(auto expect_probe_pv, MakeInt32Array({10, 11, 20}));
+
+  arrow::BinaryBuilder build_s_builder;
+  ARROW_RETURN_NOT_OK(build_s_builder.Append(reinterpret_cast<const uint8_t*>("a"), 1));
+  ARROW_RETURN_NOT_OK(build_s_builder.Append(reinterpret_cast<const uint8_t*>("a"), 1));
+  ARROW_RETURN_NOT_OK(build_s_builder.Append(reinterpret_cast<const uint8_t*>("b"), 1));
+  std::shared_ptr<arrow::Array> expect_build_s;
+  ARROW_RETURN_NOT_OK(build_s_builder.Finish(&expect_build_s));
+  ARROW_ASSIGN_OR_RAISE(auto expect_build_bv, MakeInt32Array({100, 100, 200}));
+
+  if (!expect_probe_s->Equals(*out->column(0)) || !expect_probe_pv->Equals(*out->column(1)) ||
+      !expect_build_s->Equals(*out->column(2)) || !expect_build_bv->Equals(*out->column(3))) {
+    return arrow::Status::Invalid("unexpected join output values");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto final_state, task->Step());
+  if (final_state != TaskState::kFinished) {
+    return arrow::Status::Invalid("expected TaskState::kFinished");
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status RunHashJoinUnicode0900StringKeySmoke() {
+  ARROW_ASSIGN_OR_RAISE(auto build_s_field, MakeBinaryFieldWithCollation("s", /*collation_id=*/255));
+  auto build_schema = arrow::schema({build_s_field, arrow::field("bv", arrow::int32())});
+
+  std::vector<std::optional<std::string>> build_s = {std::string("a"), std::string("a "),
+                                                     std::string("b")};
+  ARROW_ASSIGN_OR_RAISE(auto build_s_array, MakeBinaryArray(build_s));
+  ARROW_ASSIGN_OR_RAISE(auto build_bv_array, MakeInt32Array({100, 101, 200}));
+  auto build_batch = arrow::RecordBatch::Make(build_schema, static_cast<int64_t>(build_s.size()),
+                                              {build_s_array, build_bv_array});
+  std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches = {build_batch};
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, Engine::Create(EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, PipelineBuilder::Create(engine.get()));
+
+  JoinKey key{.left = {"s"}, .right = {"s"}};
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([build_batches, key]() -> arrow::Result<TransformOpPtr> {
+    return std::make_unique<HashJoinTransformOp>(build_batches, key);
+  }));
+
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
+
+  ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
+  if (initial_state != TaskState::kNeedInput) {
+    return arrow::Status::Invalid("expected TaskState::kNeedInput");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto probe_s_field, MakeBinaryFieldWithCollation("s", /*collation_id=*/255));
+  auto probe_schema = arrow::schema({probe_s_field, arrow::field("pv", arrow::int32())});
+
+  std::vector<std::optional<std::string>> probe_s = {std::string("A"), std::string("a "),
+                                                     std::string("A "), std::string("B")};
+  ARROW_ASSIGN_OR_RAISE(auto probe_s_array, MakeBinaryArray(probe_s));
+  ARROW_ASSIGN_OR_RAISE(auto probe_pv_array, MakeInt32Array({10, 11, 12, 20}));
+  auto probe_batch = arrow::RecordBatch::Make(probe_schema, static_cast<int64_t>(probe_s.size()),
+                                              {probe_s_array, probe_pv_array});
+
+  ARROW_RETURN_NOT_OK(task->PushInput(probe_batch));
+  ARROW_RETURN_NOT_OK(task->CloseInput());
+
+  ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
+  if (state != TaskState::kHasOutput) {
+    return arrow::Status::Invalid("expected TaskState::kHasOutput");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto out, task->PullOutput());
+  if (out == nullptr) {
+    return arrow::Status::Invalid("expected non-null output batch");
+  }
+  if (out->num_columns() != 4 || out->num_rows() != 4) {
+    return arrow::Status::Invalid("unexpected output shape");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(const auto probe_lt, GetLogicalType(*out->schema()->field(0)));
+  ARROW_ASSIGN_OR_RAISE(const auto build_lt, GetLogicalType(*out->schema()->field(2)));
+  if (probe_lt.id != LogicalTypeId::kString || probe_lt.collation_id != 255 ||
+      build_lt.id != LogicalTypeId::kString || build_lt.collation_id != 255) {
+    return arrow::Status::Invalid("unexpected output string collation metadata");
+  }
+
+  arrow::BinaryBuilder probe_s_builder;
+  ARROW_RETURN_NOT_OK(probe_s_builder.Append(reinterpret_cast<const uint8_t*>("A"), 1));
+  ARROW_RETURN_NOT_OK(probe_s_builder.Append(reinterpret_cast<const uint8_t*>("a "), 2));
+  ARROW_RETURN_NOT_OK(probe_s_builder.Append(reinterpret_cast<const uint8_t*>("A "), 2));
+  ARROW_RETURN_NOT_OK(probe_s_builder.Append(reinterpret_cast<const uint8_t*>("B"), 1));
+  std::shared_ptr<arrow::Array> expect_probe_s;
+  ARROW_RETURN_NOT_OK(probe_s_builder.Finish(&expect_probe_s));
+  ARROW_ASSIGN_OR_RAISE(auto expect_probe_pv, MakeInt32Array({10, 11, 12, 20}));
+
+  arrow::BinaryBuilder build_s_builder;
+  ARROW_RETURN_NOT_OK(build_s_builder.Append(reinterpret_cast<const uint8_t*>("a"), 1));
+  ARROW_RETURN_NOT_OK(build_s_builder.Append(reinterpret_cast<const uint8_t*>("a "), 2));
+  ARROW_RETURN_NOT_OK(build_s_builder.Append(reinterpret_cast<const uint8_t*>("a "), 2));
+  ARROW_RETURN_NOT_OK(build_s_builder.Append(reinterpret_cast<const uint8_t*>("b"), 1));
+  std::shared_ptr<arrow::Array> expect_build_s;
+  ARROW_RETURN_NOT_OK(build_s_builder.Finish(&expect_build_s));
+  ARROW_ASSIGN_OR_RAISE(auto expect_build_bv, MakeInt32Array({100, 101, 101, 200}));
+
+  if (!expect_probe_s->Equals(*out->column(0)) || !expect_probe_pv->Equals(*out->column(1)) ||
+      !expect_build_s->Equals(*out->column(2)) || !expect_build_bv->Equals(*out->column(3))) {
+    return arrow::Status::Invalid("unexpected join output values");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto final_state, task->Step());
+  if (final_state != TaskState::kFinished) {
+    return arrow::Status::Invalid("expected TaskState::kFinished");
+  }
+  return arrow::Status::OK();
+}
+
 }  // namespace
 
 TEST(TiForthHashJoinTest, InnerJoinInt32Key) {
@@ -235,6 +414,16 @@ TEST(TiForthHashJoinTest, InnerJoinInt32Key) {
 
 TEST(TiForthHashJoinTest, InnerJoinTwoKeyBinaryAndInt32) {
   auto status = RunHashJoinTwoKeySmoke();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthHashJoinTest, InnerJoinGeneralCiStringKey) {
+  auto status = RunHashJoinGeneralCiStringKeySmoke();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthHashJoinTest, InnerJoinUnicode0900StringKey) {
+  auto status = RunHashJoinUnicode0900StringKeySmoke();
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 

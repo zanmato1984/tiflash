@@ -555,6 +555,97 @@ arrow::Status RunTwoKeyHashAggOnBlocks() {
   return arrow::Status::OK();
 }
 
+arrow::Status RunGeneralCiHashAggOnBlocks() {
+  // Input: group by s where s uses UTF8MB4_GENERAL_CI (PAD SPACE, case-insensitive).
+  auto s_col = ColumnString::create();
+  s_col->insertData("a", 1);
+  s_col->insertData("A", 1);
+  s_col->insertData("a ", 2);
+  s_col->insertData("b", 1);
+  auto s_type = std::make_shared<DataTypeString>();
+
+  auto v_col = ColumnInt32::create();
+  v_col->insert(Field(static_cast<Int64>(10)));
+  v_col->insert(Field(static_cast<Int64>(20)));
+  v_col->insert(Field(static_cast<Int64>(1)));
+  v_col->insert(Field(static_cast<Int64>(5)));
+  auto v_type = std::make_shared<DataTypeInt32>();
+
+  ColumnsWithTypeAndName cols;
+  cols.emplace_back(std::move(s_col), s_type, "s");
+  cols.emplace_back(std::move(v_col), v_type, "v");
+  Block input(std::move(cols));
+
+  std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+  options_by_name.emplace("s", TiForth::ColumnOptions{.collation_id = 45});  // UTF8MB4_GENERAL_CI (PAD SPACE)
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+
+  std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef("s")}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"cnt", "count_all", nullptr});
+  aggs.push_back({"sum_v", "sum_int32", tiforth::MakeFieldRef("v")});
+
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([engine_ptr = engine.get(), keys,
+                                                aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
+    return std::make_unique<tiforth::HashAggTransformOp>(engine_ptr, keys, aggs);
+  }));
+
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(auto outputs,
+                        TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input}, options_by_name,
+                                                            arrow::default_memory_pool()));
+  if (outputs.size() != 1) {
+    return arrow::Status::Invalid("expected exactly 1 hash agg output block");
+  }
+
+  const auto& out = outputs[0];
+  const auto& block = out.block;
+  if (block.columns() != 3 || block.rows() != 2) {
+    return arrow::Status::Invalid("unexpected hash agg output shape");
+  }
+
+  const auto opt_it = out.options_by_name.find("s");
+  if (opt_it == out.options_by_name.end() || !opt_it->second.collation_id.has_value() ||
+      *opt_it->second.collation_id != 45) {
+    return arrow::Status::Invalid("hash agg output collation id mismatch");
+  }
+
+  const auto* s_out = typeid_cast<const ColumnString*>(block.getByPosition(0).column.get());
+  const auto* cnt_out = typeid_cast<const ColumnUInt64*>(block.getByPosition(1).column.get());
+  const auto* sum_nullable = typeid_cast<const ColumnNullable*>(block.getByPosition(2).column.get());
+  if (s_out == nullptr || cnt_out == nullptr || sum_nullable == nullptr) {
+    return arrow::Status::Invalid("unexpected hash agg output column types");
+  }
+  const auto* sum_i64 = typeid_cast<const ColumnInt64*>(&sum_nullable->getNestedColumn());
+  if (sum_i64 == nullptr) {
+    return arrow::Status::Invalid("expected nested ColumnInt64 for sum");
+  }
+
+  // Output order is first-seen groups: "a", "b".
+  const auto s0 = s_out->getDataAt(0);
+  const auto s1 = s_out->getDataAt(1);
+  if (std::string_view(s0.data, s0.size) != "a" || std::string_view(s1.data, s1.size) != "b") {
+    return arrow::Status::Invalid("unexpected hash agg s values");
+  }
+
+  const auto& cnt_data = cnt_out->getData();
+  const auto& sum_data = sum_i64->getData();
+  if (cnt_data.size() != 2 || sum_data.size() != 2) {
+    return arrow::Status::Invalid("unexpected hash agg output sizes");
+  }
+  if (cnt_data[0] != 3 || cnt_data[1] != 1 || sum_data[0] != 31 || sum_data[1] != 5) {
+    return arrow::Status::Invalid("unexpected hash agg cnt/sum values");
+  }
+
+  if (sum_nullable->isNullAt(0) || sum_nullable->isNullAt(1)) {
+    return arrow::Status::Invalid("unexpected null sums");
+  }
+
+  return arrow::Status::OK();
+}
+
 arrow::Status RunTwoKeyHashJoinOnBlocks() {
   // Build side (bs, bd, bt, bv) joined with probe side (s, d, pv) on (s == bs, d == bd).
   const auto d_type = createDecimal(/*prec=*/40, /*scale=*/2);
@@ -716,6 +807,127 @@ arrow::Status RunTwoKeyHashJoinOnBlocks() {
   return arrow::Status::OK();
 }
 
+arrow::Status RunUnicode0900HashJoinOnBlocks() {
+  // Join build (bs, bv) with probe (s, pv) on s == bs (UTF8MB4_0900_AI_CI, no padding).
+  ColumnsWithTypeAndName build_cols;
+  {
+    auto bs = ColumnString::create();
+    bs->insertData("a", 1);
+    bs->insertData("a ", 2);
+    bs->insertData("b", 1);
+    build_cols.emplace_back(std::move(bs), std::make_shared<DataTypeString>(), "bs");
+  }
+  {
+    auto bv = ColumnInt32::create();
+    bv->insert(Field(static_cast<Int64>(100)));
+    bv->insert(Field(static_cast<Int64>(101)));
+    bv->insert(Field(static_cast<Int64>(200)));
+    build_cols.emplace_back(std::move(bv), std::make_shared<DataTypeInt32>(), "bv");
+  }
+  Block build_block(std::move(build_cols));
+
+  ColumnsWithTypeAndName probe_cols;
+  {
+    auto s = ColumnString::create();
+    s->insertData("A", 1);
+    s->insertData("a ", 2);
+    s->insertData("A ", 2);
+    s->insertData("B", 1);
+    probe_cols.emplace_back(std::move(s), std::make_shared<DataTypeString>(), "s");
+  }
+  {
+    auto pv = ColumnInt32::create();
+    pv->insert(Field(static_cast<Int64>(10)));
+    pv->insert(Field(static_cast<Int64>(11)));
+    pv->insert(Field(static_cast<Int64>(12)));
+    pv->insert(Field(static_cast<Int64>(20)));
+    probe_cols.emplace_back(std::move(pv), std::make_shared<DataTypeInt32>(), "pv");
+  }
+  Block probe_block(std::move(probe_cols));
+
+  std::unordered_map<String, TiForth::ColumnOptions> build_options;
+  build_options.emplace("bs", TiForth::ColumnOptions{.collation_id = 255});  // UTF8MB4_0900_AI_CI (NO PAD)
+  std::unordered_map<String, TiForth::ColumnOptions> probe_options;
+  probe_options.emplace("s", TiForth::ColumnOptions{.collation_id = 255});
+
+  ARROW_ASSIGN_OR_RAISE(auto build_batch,
+                        TiForth::toArrowRecordBatch(build_block, build_options,
+                                                    arrow::default_memory_pool()));
+  std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches;
+  build_batches.push_back(std::move(build_batch));
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+
+  tiforth::JoinKey key{.left = {"s"}, .right = {"bs"}};
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([build_batches, key]() -> arrow::Result<tiforth::TransformOpPtr> {
+    return std::make_unique<tiforth::HashJoinTransformOp>(build_batches, key);
+  }));
+
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(
+      auto outputs,
+      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {probe_block}, probe_options,
+                                          arrow::default_memory_pool()));
+  if (outputs.size() != 1) {
+    return arrow::Status::Invalid("expected exactly 1 join output block");
+  }
+
+  const auto& out = outputs[0];
+  const auto& block = out.block;
+  if (block.columns() != 4 || block.rows() != 4) {
+    return arrow::Status::Invalid("unexpected join output shape");
+  }
+
+  const auto s_opt = out.options_by_name.find("s");
+  const auto bs_opt = out.options_by_name.find("bs");
+  if (s_opt == out.options_by_name.end() || bs_opt == out.options_by_name.end()) {
+    return arrow::Status::Invalid("missing string collation options in join output");
+  }
+  if (!s_opt->second.collation_id.has_value() || !bs_opt->second.collation_id.has_value() ||
+      *s_opt->second.collation_id != 255 || *bs_opt->second.collation_id != 255) {
+    return arrow::Status::Invalid("join output collation id mismatch");
+  }
+
+  const auto* out_s = typeid_cast<const ColumnString*>(block.getByPosition(0).column.get());
+  const auto* out_pv = typeid_cast<const ColumnInt32*>(block.getByPosition(1).column.get());
+  const auto* out_bs = typeid_cast<const ColumnString*>(block.getByPosition(2).column.get());
+  const auto* out_bv = typeid_cast<const ColumnInt32*>(block.getByPosition(3).column.get());
+  if (out_s == nullptr || out_pv == nullptr || out_bs == nullptr || out_bv == nullptr) {
+    return arrow::Status::Invalid("unexpected join output column types");
+  }
+
+  const auto s0 = out_s->getDataAt(0);
+  const auto s1 = out_s->getDataAt(1);
+  const auto s2 = out_s->getDataAt(2);
+  const auto s3 = out_s->getDataAt(3);
+  if (std::string_view(s0.data, s0.size) != "A" || std::string_view(s1.data, s1.size) != "a " ||
+      std::string_view(s2.data, s2.size) != "A " || std::string_view(s3.data, s3.size) != "B") {
+    return arrow::Status::Invalid("unexpected probe s values");
+  }
+
+  const auto bs0 = out_bs->getDataAt(0);
+  const auto bs1 = out_bs->getDataAt(1);
+  const auto bs2 = out_bs->getDataAt(2);
+  const auto bs3 = out_bs->getDataAt(3);
+  if (std::string_view(bs0.data, bs0.size) != "a" || std::string_view(bs1.data, bs1.size) != "a " ||
+      std::string_view(bs2.data, bs2.size) != "a " || std::string_view(bs3.data, bs3.size) != "b") {
+    return arrow::Status::Invalid("unexpected build bs values");
+  }
+
+  const auto& pv_data = out_pv->getData();
+  const auto& bv_data = out_bv->getData();
+  if (pv_data.size() != 4 || bv_data.size() != 4) {
+    return arrow::Status::Invalid("unexpected join output sizes");
+  }
+  if (pv_data[0] != 10 || pv_data[1] != 11 || pv_data[2] != 12 || pv_data[3] != 20 ||
+      bv_data[0] != 100 || bv_data[1] != 101 || bv_data[2] != 101 || bv_data[3] != 200) {
+    return arrow::Status::Invalid("unexpected join pv/bv values");
+  }
+
+  return arrow::Status::OK();
+}
+
 }  // namespace
 
 TEST(TiForthBlockRunnerTest, FilterOnBlockWithCollation) {
@@ -743,8 +955,18 @@ TEST(TiForthBlockRunnerTest, TwoKeyHashAgg) {
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 
+TEST(TiForthBlockRunnerTest, GeneralCiHashAgg) {
+  auto status = RunGeneralCiHashAggOnBlocks();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
 TEST(TiForthBlockRunnerTest, TwoKeyHashJoin) {
   auto status = RunTwoKeyHashJoinOnBlocks();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthBlockRunnerTest, Unicode0900HashJoin) {
+  auto status = RunUnicode0900HashJoinOnBlocks();
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 
