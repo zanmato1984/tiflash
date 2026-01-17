@@ -302,8 +302,8 @@ class TiforthAddMetaFunction final : public arrow::compute::MetaFunction {
 
 }  // namespace
 
-arrow::Status RegisterDecimalFunctions(arrow::compute::FunctionRegistry* registry,
-                                       arrow::compute::FunctionRegistry* fallback_registry) {
+arrow::Status RegisterScalarArithmeticFunctions(arrow::compute::FunctionRegistry* registry,
+                                                arrow::compute::FunctionRegistry* fallback_registry) {
   if (registry == nullptr) {
     return arrow::Status::Invalid("function registry must not be null");
   }
@@ -339,4 +339,3 @@ arrow::Status RegisterDecimalFunctions(arrow::compute::FunctionRegistry* registr
 }
 
 }  // namespace tiforth::functions
-

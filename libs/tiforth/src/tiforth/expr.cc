@@ -18,7 +18,8 @@
 
 #include "tiforth/detail/arrow_compute.h"
 #include "tiforth/engine.h"
-#include "tiforth/functions/collated_compare.h"
+#include "tiforth/functions/scalar/comparison/collated_compare.h"
+#include "tiforth/functions/scalar/temporal/mytime.h"
 #include "tiforth/type_metadata.h"
 
 namespace tiforth {
@@ -80,10 +81,35 @@ bool IsCollatedCompareFunction(std::string_view name) {
          name == "greater" || name == "greater_equal";
 }
 
+bool IsMyTimeFunction(std::string_view name) {
+  return name == "toYear" || name == "toMonth" || name == "toDayOfMonth" || name == "toMyDate" ||
+         name == "hour" || name == "minute" || name == "second" || name == "microSecond";
+}
+
 arrow::Result<std::unique_ptr<arrow::compute::FunctionOptions>> MaybeMakeCallOptions(
     std::string_view function_name, const std::vector<TypedValue>& args) {
   if (!IsCollatedCompareFunction(function_name)) {
-    return nullptr;
+    if (!IsMyTimeFunction(function_name)) {
+      return nullptr;
+    }
+
+    std::optional<LogicalType> mytime_type;
+    for (const auto& arg : args) {
+      if (arg.logical_type.id != LogicalTypeId::kMyDate &&
+          arg.logical_type.id != LogicalTypeId::kMyDateTime) {
+        continue;
+      }
+
+      if (mytime_type.has_value() && mytime_type->id != arg.logical_type.id) {
+        return arrow::Status::NotImplemented("mixed MyTime logical types in call");
+      }
+      mytime_type = arg.logical_type;
+    }
+
+    if (!mytime_type.has_value()) {
+      return nullptr;
+    }
+    return functions::MakeMyTimeOptions(mytime_type->id, mytime_type->datetime_fsp);
   }
 
   bool has_string = false;
@@ -166,6 +192,9 @@ arrow::Result<TypedValue> EvalExprTypedImpl(const arrow::RecordBatch& batch, con
                                 arrow::compute::CallFunction(node.function_name, arrow_args,
                                                              options.get(), exec_context));
           ARROW_ASSIGN_OR_RAISE(auto logical_type, InferLogicalType(out, /*field=*/nullptr));
+          if (node.function_name == "toMyDate") {
+            logical_type.id = LogicalTypeId::kMyDate;
+          }
           return TypedValue{std::move(out), /*field=*/nullptr, logical_type};
         } else {
           return arrow::Status::Invalid("unknown Expr variant");

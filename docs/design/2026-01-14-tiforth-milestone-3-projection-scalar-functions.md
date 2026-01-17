@@ -74,6 +74,9 @@ Expression evaluation calls Arrow compute `CallFunction` with an `ExecContext` p
 engine registry. Collation-aware comparisons pass a TiForth `FunctionOptions` (collation id)
 derived from input field metadata.
 
+Current organization: custom kernels live under `libs/tiforth/src/tiforth/functions/scalar/` grouped
+by Arrow compute categories (e.g. arithmetic/comparison/temporal).
+
 ## Implementation Plan
 
 ### 1) Add expression types and evaluation helper

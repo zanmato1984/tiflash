@@ -115,6 +115,13 @@ MS8 does not fully port MySQL datetime functions. It only ensures:
 - packed MyDate/MyDateTime values are preserved across the boundary
 - comparisons on packed representations are well-defined within a fixed type/fsp column
 
+Follow-up implemented (MS2-followup): add initial packed-MyTime (UInt64) scalar extraction kernels
+registered into Arrow compute via the engine registry, driven by TiForth logical type metadata:
+
+- `toYear/toMonth/toDayOfMonth/toMyDate` on `uint64` packed MyDate/MyDateTime
+- intercept `hour/minute/second/microSecond` with Arrow `MetaFunction` only when called with
+  `MyTimeOptions` (so Arrow native timestamp kernels are still used for non-packed inputs)
+
 Future: add explicit TiForth kernels for casts/arithmetic per TiFlash behavior.
 
 ## TiFlash Integration (MS8B)

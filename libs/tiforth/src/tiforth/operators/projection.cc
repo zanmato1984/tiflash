@@ -67,6 +67,13 @@ arrow::Result<std::shared_ptr<arrow::Schema>> ProjectionTransformOp::ComputeOutp
         logical_type.decimal_precision = static_cast<int32_t>(dec.precision());
         logical_type.decimal_scale = static_cast<int32_t>(dec.scale());
       }
+      if (logical_type.id == LogicalTypeId::kUnknown && exprs_[i].expr != nullptr) {
+        if (const auto* call = std::get_if<Call>(&exprs_[i].expr->node); call != nullptr) {
+          if (call->function_name == "toMyDate") {
+            logical_type.id = LogicalTypeId::kMyDate;
+          }
+        }
+      }
 
       if (logical_type.id != LogicalTypeId::kUnknown) {
         ARROW_ASSIGN_OR_RAISE(out_field, WithLogicalTypeMetadata(out_field, logical_type));

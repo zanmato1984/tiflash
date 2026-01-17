@@ -1,4 +1,4 @@
-#include "tiforth/functions/collated_compare.h"
+#include "tiforth/functions/scalar/comparison/collated_compare.h"
 
 #include <cstdint>
 #include <memory>
@@ -282,8 +282,8 @@ std::unique_ptr<arrow::compute::FunctionOptions> MakeCollatedCompareOptions(int3
   return std::make_unique<CollatedCompareOptions>(collation_id);
 }
 
-arrow::Status RegisterCollatedCompareFunctions(arrow::compute::FunctionRegistry* registry,
-                                               arrow::compute::FunctionRegistry* fallback_registry) {
+arrow::Status RegisterScalarComparisonFunctions(arrow::compute::FunctionRegistry* registry,
+                                                arrow::compute::FunctionRegistry* fallback_registry) {
   if (registry == nullptr) {
     return arrow::Status::Invalid("function registry must not be null");
   }
