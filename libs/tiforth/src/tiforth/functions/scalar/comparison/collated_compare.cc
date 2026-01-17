@@ -160,10 +160,16 @@ arrow::Status ExecCollatedCompareImpl(arrow::compute::KernelContext* ctx,
 
   const bool lhs_scalar_valid = lhs_scalar != nullptr && lhs_scalar->is_valid;
   const bool rhs_scalar_valid = rhs_scalar != nullptr && rhs_scalar->is_valid;
-  const std::string_view lhs_scalar_view =
-      lhs_scalar_valid ? lhs_scalar->view() : std::string_view{};
-  const std::string_view rhs_scalar_view =
-      rhs_scalar_valid ? rhs_scalar->view() : std::string_view{};
+  const std::string_view lhs_scalar_view = lhs_scalar_valid ? lhs_scalar->view() : std::string_view{};
+  const std::string_view rhs_scalar_view = rhs_scalar_valid ? rhs_scalar->view() : std::string_view{};
+  const std::string_view lhs_scalar_norm =
+      (lhs_array == nullptr && lhs_scalar_valid && kind == CollationKind::kPaddingBinary)
+          ? RightTrimAsciiSpace(lhs_scalar_view)
+          : lhs_scalar_view;
+  const std::string_view rhs_scalar_norm =
+      (rhs_array == nullptr && rhs_scalar_valid && kind == CollationKind::kPaddingBinary)
+          ? RightTrimAsciiSpace(rhs_scalar_view)
+          : rhs_scalar_view;
 
   for (int64_t i = 0; i < rows; ++i) {
     const bool lhs_null = lhs_array != nullptr ? lhs_array->IsNull(i) : !lhs_scalar_valid;
@@ -173,12 +179,21 @@ arrow::Status ExecCollatedCompareImpl(arrow::compute::KernelContext* ctx,
       continue;
     }
 
-    const std::string_view lhs_view =
-        lhs_array != nullptr ? lhs_array->GetView(i) : lhs_scalar_view;
-    const std::string_view rhs_view =
-        rhs_array != nullptr ? rhs_array->GetView(i) : rhs_scalar_view;
+    std::string_view lhs_view =
+        lhs_array != nullptr ? lhs_array->GetView(i) : lhs_scalar_norm;
+    std::string_view rhs_view =
+        rhs_array != nullptr ? rhs_array->GetView(i) : rhs_scalar_norm;
 
-    const int cmp = CompareString<kind>(lhs_view, rhs_view);
+    if constexpr (kind == CollationKind::kPaddingBinary) {
+      if (lhs_array != nullptr) {
+        lhs_view = RightTrimAsciiSpace(lhs_view);
+      }
+      if (rhs_array != nullptr) {
+        rhs_view = RightTrimAsciiSpace(rhs_view);
+      }
+    }
+
+    const int cmp = CompareBinary(lhs_view, rhs_view);
     out_builder.UnsafeAppend(ApplyCompare<op>(cmp));
   }
 
