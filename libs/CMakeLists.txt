@@ -65,7 +65,21 @@ if (ENABLE_TIFORTH)
             set(TIFORTH_ARROW_LINKAGE "shared" CACHE STRING "Arrow linkage (shared|static)" FORCE)
         endif ()
 
-        FetchContent_Declare(tiforth SOURCE_DIR "${TiFlash_SOURCE_DIR}/libs/tiforth")
+        # Prefer an in-tree TiForth checkout (including a local symlink), but allow
+        # TiForth to live in its own repo when `libs/tiforth` is no longer vendored.
+        set(_tiforth_source_dir "${TiFlash_SOURCE_DIR}/libs/tiforth")
+        if (EXISTS "${_tiforth_source_dir}/CMakeLists.txt")
+            FetchContent_Declare(tiforth SOURCE_DIR "${_tiforth_source_dir}")
+        else ()
+            set(TIFLASH_TIFORTH_GIT_REPOSITORY "https://github.com/zanmato1984/tiforth.git"
+                CACHE STRING "TiForth git repository used when no in-tree TiForth source is present")
+            # Keep this pinned; update when bumping the TiForth dependency.
+            set(TIFLASH_TIFORTH_GIT_TAG "3c68077ade7d0c4ee0677b732ff80e7d02daabe6"
+                CACHE STRING "TiForth git tag/sha used when no in-tree TiForth source is present")
+            FetchContent_Declare(tiforth
+                GIT_REPOSITORY "${TIFLASH_TIFORTH_GIT_REPOSITORY}"
+                GIT_TAG "${TIFLASH_TIFORTH_GIT_TAG}")
+        endif ()
         FetchContent_MakeAvailable(tiforth)
     endif ()
 endif ()
