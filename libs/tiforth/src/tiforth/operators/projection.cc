@@ -7,14 +7,14 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 
-#include "tiforth/detail/expr_compiler.h"
+#include "tiforth/compiled_expr.h"
 #include "tiforth/engine.h"
 #include "tiforth/type_metadata.h"
 
 namespace tiforth {
 
 struct ProjectionTransformOp::Compiled {
-  std::vector<detail::CompiledExpr> exprs;
+  std::vector<CompiledExpr> exprs;
 };
 
 ProjectionTransformOp::~ProjectionTransformOp() = default;
@@ -115,7 +115,7 @@ arrow::Result<OperatorStatus> ProjectionTransformOp::TransformImpl(
         return arrow::Status::Invalid("projection expr must not be null");
       }
       ARROW_ASSIGN_OR_RAISE(auto compiled_expr,
-                            detail::CompileExpr(input.schema(), *expr.expr, engine_, &exec_context_));
+                            CompileExpr(input.schema(), *expr.expr, engine_, &exec_context_));
       compiled->exprs.push_back(std::move(compiled_expr));
     }
     compiled_ = std::move(compiled);
@@ -126,8 +126,7 @@ arrow::Result<OperatorStatus> ProjectionTransformOp::TransformImpl(
   }
 
   for (std::size_t i = 0; i < exprs_.size(); ++i) {
-    ARROW_ASSIGN_OR_RAISE(auto array,
-                          detail::ExecuteExprAsArray(compiled_->exprs[i], input, &exec_context_));
+    ARROW_ASSIGN_OR_RAISE(auto array, ExecuteExprAsArray(compiled_->exprs[i], input, &exec_context_));
     if (array == nullptr) {
       return arrow::Status::Invalid("projection result must not be null");
     }

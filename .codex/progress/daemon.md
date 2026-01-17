@@ -1,10 +1,10 @@
 # Work in Progress
 
-- Public compiled expr API: expose a stable `tiforth::CompiledExpr` (or similar) so callers can bind once and evaluate across batches/tasks without reaching into `detail/*`; migrate internal operators to use it.
+- Collated string sort perf: precompute per-row sort keys (weight strings) and sort by normalized bytes to avoid repeated UTF-8 decode in comparator; keep stable ordering + semantics; add gtests for padding-bin/general-ci/unicode-ci 0900.
 
 # To Do
 
-- Collated string sort perf: precompute per-row sort keys (weight strings) and sort by normalized bytes to avoid repeated UTF-8 decode in comparator; keep stable ordering + semantics; add gtests for padding-bin/general-ci/unicode-ci 0900.
+# (none)
 
 # Completed
 - Core TiForth + TiFlash guarded integration: Arrow-native pipeline framework + operators (Projection/Filter/HashAgg/HashJoin/Sort) plus Block<->Arrow conversion + gtests; functions integrated via Arrow compute registry overlay + MetaFunction overrides; milestone docs kept in `docs/design/2026-01-14-tiforth-milestone-*.md`.
@@ -17,3 +17,4 @@
 - Objectives review: current `docs/design/2026-01-14-tiforth.md` milestones (MS1-9 + MS10 follow-up) are implemented for the “common path”; derived next To Do list focused on docs sync, memory-pool propagation, collated sort perf, and a public compiled-expr API. Files: `.codex/progress/daemon.md`.
 - Docs sync: mark MS1-9 milestone docs as implemented, and add MS10 mention to `docs/design/2026-01-14-tiforth.md`. Files: `.codex/progress/daemon.md`, `docs/design/2026-01-14-tiforth.md`, `docs/design/2026-01-14-tiforth-milestone-{1..9}-*.md`. Builds: `ninja -C libs/tiforth/build-debug && ctest`.
 - Memory pool propagation: require `Engine*` for `SortTransformOp`/`HashJoinTransformOp` and default Arrow `ExecContext` to engine pool/registry (avoid accidental `arrow::default_memory_pool()`); add `TiForthMemoryPoolTest.HashJoinUsesEnginePool`; update TiFlash gtests to pass engine into join op factories. Files: `libs/tiforth/include/tiforth/operators/{sort,hash_join}.h`, `libs/tiforth/src/tiforth/operators/{sort,hash_join}.cc`, `libs/tiforth/tests/tiforth_{memory_pool,sort,hash_join}_test.cpp`, `dbms/src/Flash/tests/gtest_tiforth_{pipeline_translate,type_mapping,block_runner}.cpp`. Builds: `ninja -C libs/tiforth/build-debug && ctest`, `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms && gtests_dbms --gtest_filter=TiForth*`.
+- Public compiled expr API: add public `tiforth::CompiledExpr` + `CompileExpr/ExecuteExpr*` (`tiforth/compiled_expr.h`) and migrate operators/`EvalExpr*` to use it instead of `tiforth/detail/expr_compiler.h`. Keep compiler internals under `detail/*` and expose a stable wrapper. Files: `libs/tiforth/include/tiforth/compiled_expr.h`, `libs/tiforth/src/tiforth/compiled_expr.cc`, `libs/tiforth/src/tiforth/CMakeLists.txt`, `libs/tiforth/src/tiforth/{expr,operators/{filter,projection,hash_agg}}.cc`. Builds: `ninja -C libs/tiforth/build-debug && ctest`, `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms && gtests_dbms --gtest_filter=TiForth*`.

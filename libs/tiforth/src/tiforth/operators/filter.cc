@@ -10,9 +10,9 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 
+#include "tiforth/compiled_expr.h"
 #include "tiforth/engine.h"
 #include "tiforth/detail/arrow_compute.h"
-#include "tiforth/detail/expr_compiler.h"
 
 namespace tiforth {
 
@@ -39,7 +39,7 @@ arrow::Result<std::shared_ptr<arrow::Array>> DatumToArray(const arrow::Datum& da
 }  // namespace
 
 struct FilterTransformOp::Compiled {
-  detail::CompiledExpr predicate;
+  CompiledExpr predicate;
 };
 
 FilterTransformOp::~FilterTransformOp() = default;
@@ -80,12 +80,11 @@ arrow::Result<OperatorStatus> FilterTransformOp::TransformImpl(
       return arrow::Status::Invalid("filter predicate must not be null");
     }
     ARROW_ASSIGN_OR_RAISE(auto compiled_pred,
-                          detail::CompileExpr(output_schema_, *predicate_, engine_, &exec_context_));
+                          CompileExpr(output_schema_, *predicate_, engine_, &exec_context_));
     compiled_ = std::make_unique<Compiled>(Compiled{std::move(compiled_pred)});
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto predicate_array,
-                        detail::ExecuteExprAsArray(compiled_->predicate, input, &exec_context_));
+  ARROW_ASSIGN_OR_RAISE(auto predicate_array, ExecuteExprAsArray(compiled_->predicate, input, &exec_context_));
   if (predicate_array == nullptr) {
     return arrow::Status::Invalid("filter predicate result must not be null");
   }

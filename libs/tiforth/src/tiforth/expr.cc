@@ -9,7 +9,7 @@
 #include <arrow/scalar.h>
 #include <arrow/status.h>
 
-#include "tiforth/detail/expr_compiler.h"
+#include "tiforth/compiled_expr.h"
 #include "tiforth/engine.h"
 
 namespace tiforth {
@@ -46,8 +46,8 @@ arrow::Result<arrow::Datum> EvalExpr(const arrow::RecordBatch& batch, const Expr
       engine != nullptr ? engine->function_registry() : arrow::compute::GetFunctionRegistry());
   auto* ctx = exec_context != nullptr ? exec_context : &local_exec_context;
 
-  ARROW_ASSIGN_OR_RAISE(auto compiled, detail::CompileExpr(batch.schema(), expr, engine, ctx));
-  return detail::ExecuteExpr(compiled, batch, ctx);
+  ARROW_ASSIGN_OR_RAISE(auto compiled, CompileExpr(batch.schema(), expr, engine, ctx));
+  return ExecuteExpr(compiled, batch, ctx);
 }
 
 arrow::Result<std::shared_ptr<arrow::Array>> EvalExprAsArray(
@@ -58,8 +58,8 @@ arrow::Result<std::shared_ptr<arrow::Array>> EvalExprAsArray(
       engine != nullptr ? engine->function_registry() : arrow::compute::GetFunctionRegistry());
   auto* ctx = exec_context != nullptr ? exec_context : &local_exec_context;
 
-  ARROW_ASSIGN_OR_RAISE(auto compiled, detail::CompileExpr(batch.schema(), expr, engine, ctx));
-  return detail::ExecuteExprAsArray(compiled, batch, ctx);
+  ARROW_ASSIGN_OR_RAISE(auto compiled, CompileExpr(batch.schema(), expr, engine, ctx));
+  return ExecuteExprAsArray(compiled, batch, ctx);
 }
 
 }  // namespace tiforth

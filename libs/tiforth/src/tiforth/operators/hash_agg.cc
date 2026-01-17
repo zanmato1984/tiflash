@@ -17,9 +17,9 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 
+#include "tiforth/compiled_expr.h"
 #include "tiforth/engine.h"
 #include "tiforth/collation.h"
-#include "tiforth/detail/expr_compiler.h"
 #include "tiforth/type_metadata.h"
 
 namespace tiforth {
@@ -101,8 +101,8 @@ bool HashAggTransformOp::KeyEq::operator()(const NormalizedKey& lhs,
 }
 
 struct HashAggTransformOp::Compiled {
-  std::vector<detail::CompiledExpr> key_exprs;
-  std::vector<std::optional<detail::CompiledExpr>> sum_arg_exprs;
+  std::vector<CompiledExpr> key_exprs;
+  std::vector<std::optional<CompiledExpr>> sum_arg_exprs;
 };
 
 HashAggTransformOp::~HashAggTransformOp() = default;
@@ -184,7 +184,7 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
     compiled->key_exprs.reserve(key_count);
     for (std::size_t i = 0; i < key_count; ++i) {
       ARROW_ASSIGN_OR_RAISE(auto compiled_key,
-                            detail::CompileExpr(input.schema(), *keys_[i].expr, engine_, &exec_context_));
+                            CompileExpr(input.schema(), *keys_[i].expr, engine_, &exec_context_));
       compiled->key_exprs.push_back(std::move(compiled_key));
     }
 
@@ -198,7 +198,7 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
         return arrow::Status::Invalid("sum_int32 arg must not be null");
       }
       ARROW_ASSIGN_OR_RAISE(auto compiled_arg,
-                            detail::CompileExpr(input.schema(), *agg.arg, engine_, &exec_context_));
+                            CompileExpr(input.schema(), *agg.arg, engine_, &exec_context_));
       compiled->sum_arg_exprs[i] = std::move(compiled_arg);
     }
 
@@ -211,7 +211,7 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
   std::array<std::shared_ptr<arrow::Array>, 2> key_arrays{};
   for (std::size_t i = 0; i < key_count; ++i) {
     ARROW_ASSIGN_OR_RAISE(key_arrays[i],
-                          detail::ExecuteExprAsArray(compiled_->key_exprs[i], input, &exec_context_));
+                          ExecuteExprAsArray(compiled_->key_exprs[i], input, &exec_context_));
     if (key_arrays[i] == nullptr) {
       return arrow::Status::Invalid("group key must not evaluate to null array");
     }
@@ -282,7 +282,7 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
 
     ARROW_ASSIGN_OR_RAISE(
         auto arg_any,
-        detail::ExecuteExprAsArray(*compiled_->sum_arg_exprs[i], input, &exec_context_));
+        ExecuteExprAsArray(*compiled_->sum_arg_exprs[i], input, &exec_context_));
     if (arg_any == nullptr) {
       return arrow::Status::Invalid("sum_int32 arg must not evaluate to null array");
     }
