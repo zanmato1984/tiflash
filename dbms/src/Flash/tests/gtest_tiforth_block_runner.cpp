@@ -809,10 +809,11 @@ arrow::Status RunTwoKeyHashJoinOnBlocks() {
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+  const auto* eng = engine.get();
 
   tiforth::JoinKey key{.left = {"s", "d"}, .right = {"bs", "bd"}};
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([build_batches, key]() -> arrow::Result<tiforth::TransformOpPtr> {
-    return std::make_unique<tiforth::HashJoinTransformOp>(build_batches, key);
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([eng, build_batches, key]() -> arrow::Result<tiforth::TransformOpPtr> {
+    return std::make_unique<tiforth::HashJoinTransformOp>(eng, build_batches, key);
   }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
@@ -939,10 +940,11 @@ arrow::Status RunUnicode0900HashJoinOnBlocks() {
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+  const auto* eng = engine.get();
 
   tiforth::JoinKey key{.left = {"s"}, .right = {"bs"}};
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([build_batches, key]() -> arrow::Result<tiforth::TransformOpPtr> {
-    return std::make_unique<tiforth::HashJoinTransformOp>(build_batches, key);
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([eng, build_batches, key]() -> arrow::Result<tiforth::TransformOpPtr> {
+    return std::make_unique<tiforth::HashJoinTransformOp>(eng, build_batches, key);
   }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());

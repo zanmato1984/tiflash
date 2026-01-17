@@ -83,10 +83,11 @@ arrow::Status RunHashJoinSmoke() {
 
   ARROW_ASSIGN_OR_RAISE(auto engine, Engine::Create(EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, PipelineBuilder::Create(engine.get()));
+  const auto* eng = engine.get();
 
   JoinKey key{.left = {"k"}, .right = {"k"}};
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([build_batches, key]() -> arrow::Result<TransformOpPtr> {
-    return std::make_unique<HashJoinTransformOp>(build_batches, key);
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([eng, build_batches, key]() -> arrow::Result<TransformOpPtr> {
+    return std::make_unique<HashJoinTransformOp>(eng, build_batches, key);
   }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
@@ -151,10 +152,11 @@ arrow::Status RunHashJoinTwoKeySmoke() {
 
   ARROW_ASSIGN_OR_RAISE(auto engine, Engine::Create(EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, PipelineBuilder::Create(engine.get()));
+  const auto* eng = engine.get();
 
   JoinKey key{.left = {"s", "k2"}, .right = {"s", "k2"}};
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([build_batches, key]() -> arrow::Result<TransformOpPtr> {
-    return std::make_unique<HashJoinTransformOp>(build_batches, key);
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([eng, build_batches, key]() -> arrow::Result<TransformOpPtr> {
+    return std::make_unique<HashJoinTransformOp>(eng, build_batches, key);
   }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
@@ -239,10 +241,11 @@ arrow::Status RunHashJoinGeneralCiStringKeySmoke() {
 
   ARROW_ASSIGN_OR_RAISE(auto engine, Engine::Create(EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, PipelineBuilder::Create(engine.get()));
+  const auto* eng = engine.get();
 
   JoinKey key{.left = {"s"}, .right = {"s"}};
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([build_batches, key]() -> arrow::Result<TransformOpPtr> {
-    return std::make_unique<HashJoinTransformOp>(build_batches, key);
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([eng, build_batches, key]() -> arrow::Result<TransformOpPtr> {
+    return std::make_unique<HashJoinTransformOp>(eng, build_batches, key);
   }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
@@ -328,10 +331,11 @@ arrow::Status RunHashJoinUnicode0900StringKeySmoke() {
 
   ARROW_ASSIGN_OR_RAISE(auto engine, Engine::Create(EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, PipelineBuilder::Create(engine.get()));
+  const auto* eng = engine.get();
 
   JoinKey key{.left = {"s"}, .right = {"s"}};
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([build_batches, key]() -> arrow::Result<TransformOpPtr> {
-    return std::make_unique<HashJoinTransformOp>(build_batches, key);
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([eng, build_batches, key]() -> arrow::Result<TransformOpPtr> {
+    return std::make_unique<HashJoinTransformOp>(eng, build_batches, key);
   }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());

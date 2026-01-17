@@ -338,8 +338,8 @@ arrow::Status RunTypeMappingAndOps() {
 
     std::vector<std::function<arrow::Result<tiforth::TransformOpPtr>(const tiforth::Engine*)>>
         transforms;
-    transforms.push_back([build_batches, key](const tiforth::Engine* /*engine*/) -> arrow::Result<tiforth::TransformOpPtr> {
-      return std::make_unique<tiforth::HashJoinTransformOp>(build_batches, key);
+    transforms.push_back([build_batches, key](const tiforth::Engine* engine) -> arrow::Result<tiforth::TransformOpPtr> {
+      return std::make_unique<tiforth::HashJoinTransformOp>(engine, build_batches, key);
     });
 
     ARROW_ASSIGN_OR_RAISE(auto outputs, RunPipeline(probe_batch, std::move(transforms)));

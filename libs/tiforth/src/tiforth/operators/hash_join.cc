@@ -21,17 +21,23 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 
+#include "tiforth/engine.h"
 #include "tiforth/collation.h"
 #include "tiforth/detail/arrow_compute.h"
 #include "tiforth/type_metadata.h"
 
 namespace tiforth {
 
-HashJoinTransformOp::HashJoinTransformOp(std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches,
+HashJoinTransformOp::HashJoinTransformOp(const Engine* engine,
+                                         std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches,
                                          JoinKey key, arrow::MemoryPool* memory_pool)
     : build_batches_(std::move(build_batches)),
       key_(std::move(key)),
-      memory_pool_(memory_pool != nullptr ? memory_pool : arrow::default_memory_pool()) {}
+      memory_pool_(memory_pool != nullptr
+                       ? memory_pool
+                       : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool())),
+      exec_context_(memory_pool_, /*executor=*/nullptr,
+                    engine != nullptr ? engine->function_registry() : nullptr) {}
 
 namespace {
 
@@ -424,7 +430,6 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
   ARROW_RETURN_NOT_OK(build_indices.Finish(&build_indices_array));
 
   ARROW_RETURN_NOT_OK(detail::EnsureArrowComputeInitialized());
-  arrow::compute::ExecContext exec_context(memory_pool_);
   const auto take_options = arrow::compute::TakeOptions::NoBoundsCheck();
 
   std::vector<std::shared_ptr<arrow::Array>> out_arrays;
@@ -434,8 +439,8 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
     ARROW_ASSIGN_OR_RAISE(
         auto taken,
         arrow::compute::Take(arrow::Datum(probe.column(ci)), arrow::Datum(probe_indices_array),
-                             take_options, &exec_context));
-    ARROW_ASSIGN_OR_RAISE(auto out_array, DatumToArray(taken, exec_context.memory_pool()));
+                             take_options, &exec_context_));
+    ARROW_ASSIGN_OR_RAISE(auto out_array, DatumToArray(taken, exec_context_.memory_pool()));
     out_arrays.push_back(std::move(out_array));
   }
 
@@ -443,8 +448,8 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
     ARROW_ASSIGN_OR_RAISE(
         auto taken,
         arrow::compute::Take(arrow::Datum(build_combined_->column(ci)),
-                             arrow::Datum(build_indices_array), take_options, &exec_context));
-    ARROW_ASSIGN_OR_RAISE(auto out_array, DatumToArray(taken, exec_context.memory_pool()));
+                             arrow::Datum(build_indices_array), take_options, &exec_context_));
+    ARROW_ASSIGN_OR_RAISE(auto out_array, DatumToArray(taken, exec_context_.memory_pool()));
     out_arrays.push_back(std::move(out_array));
   }
 

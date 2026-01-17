@@ -14,6 +14,7 @@
 #include <arrow/memory_pool.h>
 #include <arrow/status.h>
 
+#include "tiforth/engine.h"
 #include "tiforth/collation.h"
 #include "tiforth/detail/arrow_compute.h"
 #include "tiforth/type_metadata.h"
@@ -42,9 +43,14 @@ arrow::Result<std::shared_ptr<arrow::Array>> DatumToArray(const arrow::Datum& da
 
 }  // namespace
 
-SortTransformOp::SortTransformOp(std::vector<SortKey> keys, arrow::MemoryPool* memory_pool)
+SortTransformOp::SortTransformOp(const Engine* engine, std::vector<SortKey> keys,
+                                 arrow::MemoryPool* memory_pool)
     : keys_(std::move(keys)),
-      exec_context_(memory_pool != nullptr ? memory_pool : arrow::default_memory_pool()) {}
+      exec_context_(memory_pool != nullptr
+                        ? memory_pool
+                        : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool()),
+                    /*executor=*/nullptr,
+                    engine != nullptr ? engine->function_registry() : nullptr) {}
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> SortTransformOp::SortAll() {
   if (keys_.size() != 1) {

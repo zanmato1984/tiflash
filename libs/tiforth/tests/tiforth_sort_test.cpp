@@ -53,10 +53,11 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeBatch(
 arrow::Status RunSortSmoke() {
   ARROW_ASSIGN_OR_RAISE(auto engine, Engine::Create(EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, PipelineBuilder::Create(engine.get()));
+  const auto* eng = engine.get();
 
   std::vector<SortKey> keys = {SortKey{.name = "x", .ascending = true, .nulls_first = false}};
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([keys]() -> arrow::Result<TransformOpPtr> {
-    return std::make_unique<SortTransformOp>(keys);
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([keys, eng]() -> arrow::Result<TransformOpPtr> {
+    return std::make_unique<SortTransformOp>(eng, keys);
   }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
@@ -155,10 +156,11 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeStringSortBatch(
 arrow::Status RunStringSort(int32_t collation_id, const std::vector<int32_t>& expected_vs) {
   ARROW_ASSIGN_OR_RAISE(auto engine, Engine::Create(EngineOptions{}));
   ARROW_ASSIGN_OR_RAISE(auto builder, PipelineBuilder::Create(engine.get()));
+  const auto* eng = engine.get();
 
   std::vector<SortKey> keys = {SortKey{.name = "s", .ascending = true, .nulls_first = false}};
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([keys]() -> arrow::Result<TransformOpPtr> {
-    return std::make_unique<SortTransformOp>(keys);
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([keys, eng]() -> arrow::Result<TransformOpPtr> {
+    return std::make_unique<SortTransformOp>(eng, keys);
   }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());

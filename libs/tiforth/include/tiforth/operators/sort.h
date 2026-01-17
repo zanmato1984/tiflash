@@ -18,6 +18,8 @@ class Schema;
 
 namespace tiforth {
 
+class Engine;
+
 struct SortKey {
   std::string name;
   bool ascending = true;
@@ -26,7 +28,8 @@ struct SortKey {
 
 class SortTransformOp final : public TransformOp {
  public:
-  explicit SortTransformOp(std::vector<SortKey> keys, arrow::MemoryPool* memory_pool = nullptr);
+  SortTransformOp(const Engine* engine, std::vector<SortKey> keys,
+                  arrow::MemoryPool* memory_pool = nullptr);
 
  protected:
   arrow::Result<OperatorStatus> TransformImpl(

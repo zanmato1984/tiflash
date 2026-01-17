@@ -299,8 +299,8 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag, cons
 
       tiforth::JoinKey key{.left = {"k"}, .right = {"k"}};
       ARROW_RETURN_NOT_OK(builder->AppendTransform(
-          [build_batches, key]() -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::HashJoinTransformOp>(build_batches, key);
+          [engine, build_batches, key]() -> arrow::Result<tiforth::TransformOpPtr> {
+            return std::make_unique<tiforth::HashJoinTransformOp>(engine, build_batches, key);
           }));
       continue;
     }

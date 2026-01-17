@@ -9,6 +9,7 @@
 #include <variant>
 #include <vector>
 
+#include <arrow/compute/exec.h>
 #include <arrow/record_batch.h>
 #include <arrow/result.h>
 
@@ -22,6 +23,8 @@ class Schema;
 
 namespace tiforth {
 
+class Engine;
+
 struct JoinKey {
   std::vector<std::string> left;
   std::vector<std::string> right;
@@ -29,8 +32,8 @@ struct JoinKey {
 
 class HashJoinTransformOp final : public TransformOp {
  public:
-  HashJoinTransformOp(std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches, JoinKey key,
-                      arrow::MemoryPool* memory_pool = nullptr);
+  HashJoinTransformOp(const Engine* engine, std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches,
+                      JoinKey key, arrow::MemoryPool* memory_pool = nullptr);
 
  protected:
   arrow::Result<OperatorStatus> TransformImpl(
@@ -83,6 +86,7 @@ class HashJoinTransformOp final : public TransformOp {
   bool index_built_ = false;
 
   arrow::MemoryPool* memory_pool_ = nullptr;
+  arrow::compute::ExecContext exec_context_;
 };
 
 }  // namespace tiforth
