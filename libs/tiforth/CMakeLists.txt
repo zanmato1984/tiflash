@@ -45,7 +45,11 @@ install(TARGETS tiforth EXPORT tiforthTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+# Install public headers; exclude internal-only headers under `tiforth/detail/` that are not
+# required by the public API surface.
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        PATTERN "arrow_compute.h" EXCLUDE
+        PATTERN "expr_compiler.h" EXCLUDE)
 
 install(EXPORT tiforthTargets
         NAMESPACE tiforth::
