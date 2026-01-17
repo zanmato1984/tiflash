@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -126,18 +127,68 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> SortTransformOp::SortAll() {
 
       const auto sort_with = [&](auto tag) {
         constexpr CollationKind kind = decltype(tag)::value;
+        // For collations with non-trivial semantics, precompute per-row sort keys ("weight strings")
+        // and then sort by normalized bytes. This avoids repeated UTF-8 decode/weighting in the
+        // comparator (std::stable_sort calls it O(N log N) times).
+        const auto row_count = static_cast<std::size_t>(total_rows);
+        std::vector<uint8_t> is_null(row_count, 0);
+        std::vector<std::string_view> key_views(row_count);
+
+        if constexpr (kind == CollationKind::kGeneralCi || kind == CollationKind::kUnicodeCi0400 ||
+                      kind == CollationKind::kUnicodeCi0900) {
+          std::vector<std::string> key_strings(row_count);
+          for (std::size_t i = 0; i < row_count; ++i) {
+            const bool null = bin->IsNull(static_cast<int64_t>(i));
+            is_null[i] = static_cast<uint8_t>(null);
+            if (null) {
+              continue;
+            }
+            const std::string_view view = bin->GetView(static_cast<int64_t>(i));
+            key_strings[i] = SortKeyString<kind>(view);
+            key_views[i] = std::string_view(key_strings[i]);
+          }
+
+          std::stable_sort(idx.begin(), idx.end(), [&](uint64_t lhs, uint64_t rhs) -> bool {
+            const bool lhs_null = is_null[static_cast<std::size_t>(lhs)] != 0;
+            const bool rhs_null = is_null[static_cast<std::size_t>(rhs)] != 0;
+            if (lhs_null != rhs_null) {
+              return rhs_null;  // nulls last
+            }
+            if (lhs_null) {
+              return false;
+            }
+            const std::string_view lhs_key = key_views[static_cast<std::size_t>(lhs)];
+            const std::string_view rhs_key = key_views[static_cast<std::size_t>(rhs)];
+            return CompareBinary(lhs_key, rhs_key) < 0;
+          });
+          return;
+        }
+
+        for (std::size_t i = 0; i < row_count; ++i) {
+          const bool null = bin->IsNull(static_cast<int64_t>(i));
+          is_null[i] = static_cast<uint8_t>(null);
+          if (null) {
+            continue;
+          }
+          std::string_view view = bin->GetView(static_cast<int64_t>(i));
+          if constexpr (kind == CollationKind::kPaddingBinary) {
+            view = RightTrimAsciiSpace(view);
+          }
+          key_views[i] = view;
+        }
+
         std::stable_sort(idx.begin(), idx.end(), [&](uint64_t lhs, uint64_t rhs) -> bool {
-          const bool lhs_null = bin->IsNull(static_cast<int64_t>(lhs));
-          const bool rhs_null = bin->IsNull(static_cast<int64_t>(rhs));
+          const bool lhs_null = is_null[static_cast<std::size_t>(lhs)] != 0;
+          const bool rhs_null = is_null[static_cast<std::size_t>(rhs)] != 0;
           if (lhs_null != rhs_null) {
             return rhs_null;  // nulls last
           }
           if (lhs_null) {
             return false;
           }
-          const std::string_view lhs_view = bin->GetView(static_cast<int64_t>(lhs));
-          const std::string_view rhs_view = bin->GetView(static_cast<int64_t>(rhs));
-          return CompareString<kind>(lhs_view, rhs_view) < 0;
+          const std::string_view lhs_key = key_views[static_cast<std::size_t>(lhs)];
+          const std::string_view rhs_key = key_views[static_cast<std::size_t>(rhs)];
+          return CompareBinary(lhs_key, rhs_key) < 0;
         });
       };
 

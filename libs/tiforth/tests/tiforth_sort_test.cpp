@@ -249,4 +249,16 @@ TEST(TiForthSortTest, SortStringPaddingBinaryCollation) {
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 
+TEST(TiForthSortTest, SortStringGeneralCiCollation) {
+  // General CI uses weight strings with padding semantics (trailing ASCII spaces trimmed).
+  auto status = RunStringSort(/*collation_id=*/45, /*expected_vs=*/{1, 2, 3, 4});
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthSortTest, SortStringUnicode0900Collation) {
+  // Unicode 0900 AI CI is NO PAD: "a" < "a " (space is significant).
+  auto status = RunStringSort(/*collation_id=*/255, /*expected_vs=*/{2, 1, 3, 4});
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
 }  // namespace tiforth
