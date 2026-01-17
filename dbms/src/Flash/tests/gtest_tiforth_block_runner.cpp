@@ -432,6 +432,87 @@ arrow::Status RunProjectionDecimalAddIntOnBlock() {
   return arrow::Status::OK();
 }
 
+arrow::Status RunProjectionTiDBPackedMyTimeScalarsOnBlock() {
+  // Input: t is MyDateTime(6) stored as packed UInt64.
+  const auto t_type = std::make_shared<DataTypeMyDateTime>(6);
+  auto t_col = ColumnUInt64::create();
+  const UInt64 dt0 = MyDateTime(2024, 1, 2, 3, 4, 5, 0).toPackedUInt();
+  const UInt64 dt1 = MyDateTime(1999, 12, 31, 23, 59, 58, 0).toPackedUInt();
+  const UInt64 dt2 = 0;  // invalid (month/day zero)
+  t_col->insert(Field(dt0));
+  t_col->insert(Field(dt1));
+  t_col->insert(Field(dt2));
+
+  ColumnsWithTypeAndName cols;
+  cols.emplace_back(std::move(t_col), t_type, "t");
+  Block input(std::move(cols));
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+
+  std::vector<tiforth::ProjectionExpr> exprs;
+  exprs.push_back({"dow", tiforth::MakeCall("tidbDayOfWeek", {tiforth::MakeFieldRef("t")})});
+  exprs.push_back({"woy", tiforth::MakeCall("tidbWeekOfYear", {tiforth::MakeFieldRef("t")})});
+  exprs.push_back({"yw", tiforth::MakeCall("yearWeek", {tiforth::MakeFieldRef("t")})});
+
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      [engine_ptr = engine.get(), exprs]() -> arrow::Result<tiforth::TransformOpPtr> {
+        return std::make_unique<tiforth::ProjectionTransformOp>(engine_ptr, exprs);
+      }));
+
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(
+      auto outputs,
+      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input},
+                                          /*input_options_by_name=*/{},
+                                          arrow::default_memory_pool()));
+  if (outputs.size() != 1) {
+    return arrow::Status::Invalid("expected exactly 1 output block");
+  }
+
+  const auto& out = outputs[0].block;
+  if (out.columns() != 3 || out.rows() != 3) {
+    return arrow::Status::Invalid("unexpected projection output shape");
+  }
+
+  const auto* dow_nullable = typeid_cast<const ColumnNullable*>(out.getByName("dow").column.get());
+  const auto* woy_nullable = typeid_cast<const ColumnNullable*>(out.getByName("woy").column.get());
+  const auto* yw_nullable = typeid_cast<const ColumnNullable*>(out.getByName("yw").column.get());
+  if (dow_nullable == nullptr || woy_nullable == nullptr || yw_nullable == nullptr) {
+    return arrow::Status::Invalid("expected nullable output columns for TiDB packed time scalars");
+  }
+  const auto* dow = typeid_cast<const ColumnUInt16*>(&dow_nullable->getNestedColumn());
+  const auto* woy = typeid_cast<const ColumnUInt16*>(&woy_nullable->getNestedColumn());
+  const auto* yw = typeid_cast<const ColumnUInt32*>(&yw_nullable->getNestedColumn());
+  if (dow == nullptr || woy == nullptr || yw == nullptr) {
+    return arrow::Status::Invalid("unexpected nested numeric column types");
+  }
+
+  if (dow_nullable->isNullAt(0) || dow_nullable->isNullAt(1) || !dow_nullable->isNullAt(2) ||
+      woy_nullable->isNullAt(0) || woy_nullable->isNullAt(1) || !woy_nullable->isNullAt(2) ||
+      yw_nullable->isNullAt(0) || yw_nullable->isNullAt(1) || !yw_nullable->isNullAt(2)) {
+    return arrow::Status::Invalid("unexpected null map for packed time scalar outputs");
+  }
+
+  const auto& dow_data = dow->getData();
+  const auto& woy_data = woy->getData();
+  const auto& yw_data = yw->getData();
+  if (dow_data.size() != 3 || woy_data.size() != 3 || yw_data.size() != 3) {
+    return arrow::Status::Invalid("unexpected packed time scalar output sizes");
+  }
+  if (dow_data[0] != 3 || dow_data[1] != 6) {
+    return arrow::Status::Invalid("unexpected tidbDayOfWeek values");
+  }
+  if (woy_data[0] != 1 || woy_data[1] != 52) {
+    return arrow::Status::Invalid("unexpected tidbWeekOfYear values");
+  }
+  if (yw_data[0] != 202353 || yw_data[1] != 199952) {
+    return arrow::Status::Invalid("unexpected yearWeek values");
+  }
+
+  return arrow::Status::OK();
+}
+
 arrow::Status RunTwoKeyHashAggOnBlocks() {
   // Input: group by (s, k2) where s uses padding BIN collation ("a" == "a ").
   auto s_col = ColumnString::create();
@@ -947,6 +1028,11 @@ TEST(TiForthBlockRunnerTest, ProjectionDecimalAdd) {
 
 TEST(TiForthBlockRunnerTest, ProjectionDecimalAddInt) {
   auto status = RunProjectionDecimalAddIntOnBlock();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthBlockRunnerTest, ProjectionTiDBPackedMyTimeScalars) {
+  auto status = RunProjectionTiDBPackedMyTimeScalarsOnBlock();
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 

@@ -91,9 +91,12 @@ arrow::Status RunPackedMyTimeExtractSmoke() {
   exprs.push_back({"date", MakeCall("toMyDate", {MakeFieldRef("t")})});
   exprs.push_back({"date_year",
                    MakeCall("toYear", {MakeCall("toMyDate", {MakeFieldRef("t")})})});
+  exprs.push_back({"tidb_dow", MakeCall("tidbDayOfWeek", {MakeFieldRef("t")})});
+  exprs.push_back({"tidb_weekofyear", MakeCall("tidbWeekOfYear", {MakeFieldRef("t")})});
+  exprs.push_back({"yearweek_func", MakeCall("yearWeek", {MakeFieldRef("t")})});
 
   ARROW_ASSIGN_OR_RAISE(auto out, RunProjection(std::move(input), std::move(exprs)));
-  if (out->num_columns() != 12 || out->num_rows() != 3) {
+  if (out->num_columns() != 15 || out->num_rows() != 3) {
     return arrow::Status::Invalid("unexpected output shape");
   }
 
@@ -211,6 +214,39 @@ arrow::Status RunPackedMyTimeExtractSmoke() {
     ARROW_RETURN_NOT_OK(builder.Finish(&expect));
     if (!expect->Equals(*out->column(11))) {
       return arrow::Status::Invalid("nested toYear(toMyDate) mismatch");
+    }
+  }
+  {
+    arrow::UInt16Builder builder;
+    ARROW_RETURN_NOT_OK(builder.Append(3));
+    ARROW_RETURN_NOT_OK(builder.Append(6));
+    ARROW_RETURN_NOT_OK(builder.AppendNull());
+    std::shared_ptr<arrow::Array> expect;
+    ARROW_RETURN_NOT_OK(builder.Finish(&expect));
+    if (!expect->Equals(*out->column(12))) {
+      return arrow::Status::Invalid("tidbDayOfWeek mismatch");
+    }
+  }
+  {
+    arrow::UInt16Builder builder;
+    ARROW_RETURN_NOT_OK(builder.Append(1));
+    ARROW_RETURN_NOT_OK(builder.Append(52));
+    ARROW_RETURN_NOT_OK(builder.AppendNull());
+    std::shared_ptr<arrow::Array> expect;
+    ARROW_RETURN_NOT_OK(builder.Finish(&expect));
+    if (!expect->Equals(*out->column(13))) {
+      return arrow::Status::Invalid("tidbWeekOfYear mismatch");
+    }
+  }
+  {
+    arrow::UInt32Builder builder;
+    ARROW_RETURN_NOT_OK(builder.Append(202353));
+    ARROW_RETURN_NOT_OK(builder.Append(199952));
+    ARROW_RETURN_NOT_OK(builder.AppendNull());
+    std::shared_ptr<arrow::Array> expect;
+    ARROW_RETURN_NOT_OK(builder.Finish(&expect));
+    if (!expect->Equals(*out->column(14))) {
+      return arrow::Status::Invalid("yearWeek mismatch");
     }
   }
 

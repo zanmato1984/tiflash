@@ -313,6 +313,55 @@ arrow::Status ExecPackedUnary(arrow::compute::KernelContext* ctx, const arrow::c
   return arrow::Status::OK();
 }
 
+template <typename BuilderT, typename OutputT, typename Fn>
+arrow::Status ExecPackedUnaryNullable(arrow::compute::KernelContext* ctx,
+                                      const arrow::compute::ExecSpan& batch,
+                                      arrow::compute::ExecResult* out, Fn&& fn) {
+  if (ctx == nullptr || out == nullptr) {
+    return arrow::Status::Invalid("kernel context/result must not be null");
+  }
+  const auto* state = GetMyTimeState(ctx);
+  if (state == nullptr) {
+    return arrow::Status::Invalid("MyTimeState must not be null");
+  }
+  (void)state;
+
+  std::shared_ptr<arrow::Array> in_array;
+  const arrow::UInt64Scalar* in_scalar = nullptr;
+  ARROW_RETURN_NOT_OK(GetPackedInput(batch, &in_array, &in_scalar));
+
+  const int64_t rows = batch.length;
+  BuilderT builder(ctx->memory_pool());
+  ARROW_RETURN_NOT_OK(builder.Reserve(rows));
+
+  const bool scalar_valid = in_scalar != nullptr && in_scalar->is_valid;
+  const uint64_t scalar_value = scalar_valid ? in_scalar->value : uint64_t{0};
+
+  const arrow::UInt64Array* u64_arr =
+      in_array != nullptr ? static_cast<const arrow::UInt64Array*>(in_array.get()) : nullptr;
+
+  for (int64_t i = 0; i < rows; ++i) {
+    const bool is_null = u64_arr != nullptr ? u64_arr->IsNull(i) : !scalar_valid;
+    if (is_null) {
+      builder.UnsafeAppendNull();
+      continue;
+    }
+
+    const uint64_t packed = u64_arr != nullptr ? u64_arr->Value(i) : scalar_value;
+    OutputT v{};
+    if (!fn(packed, &v)) {
+      builder.UnsafeAppendNull();
+      continue;
+    }
+    builder.UnsafeAppend(v);
+  }
+
+  std::shared_ptr<arrow::Array> out_array;
+  ARROW_RETURN_NOT_OK(builder.Finish(&out_array));
+  out->value = out_array->data();
+  return arrow::Status::OK();
+}
+
 arrow::Status ExecToYear(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch,
                          arrow::compute::ExecResult* out) {
   return ExecPackedUnary<arrow::UInt16Builder, uint16_t>(ctx, batch, out, ExtractYear);
@@ -350,6 +399,43 @@ arrow::Status ExecToYearWeek(arrow::compute::KernelContext* ctx, const arrow::co
   // TiDB/MySQL YEARWEEK semantics: use mode=2 (week number in range 1-53) by default.
   const auto fn = [](uint64_t packed) -> uint32_t { return ExtractYearWeek(packed, /*mode=*/2); };
   return ExecPackedUnary<arrow::UInt32Builder, uint32_t>(ctx, batch, out, fn);
+}
+
+arrow::Status ExecTiDBDayOfWeek(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch,
+                                arrow::compute::ExecResult* out) {
+  const auto fn = [](uint64_t packed, uint16_t* v) -> bool {
+    if (ExtractMonth(packed) == 0 || ExtractDayOfMonth(packed) == 0) {
+      return false;
+    }
+    *v = static_cast<uint16_t>(ExtractDayOfWeek(packed));
+    return true;
+  };
+  return ExecPackedUnaryNullable<arrow::UInt16Builder, uint16_t>(ctx, batch, out, fn);
+}
+
+arrow::Status ExecTiDBWeekOfYear(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch,
+                                 arrow::compute::ExecResult* out) {
+  const auto fn = [](uint64_t packed, uint16_t* v) -> bool {
+    if (ExtractMonth(packed) == 0 || ExtractDayOfMonth(packed) == 0) {
+      return false;
+    }
+    *v = static_cast<uint16_t>(ExtractWeek(packed, /*mode=*/3));
+    return true;
+  };
+  return ExecPackedUnaryNullable<arrow::UInt16Builder, uint16_t>(ctx, batch, out, fn);
+}
+
+arrow::Status ExecYearWeek(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch,
+                           arrow::compute::ExecResult* out) {
+  // YEARWEEK(date) in TiDB/MySQL defaults to mode=0 but forces WEEK_BEHAVIOR_YEAR (=> 2).
+  const auto fn = [](uint64_t packed, uint32_t* v) -> bool {
+    if (ExtractMonth(packed) == 0 || ExtractDayOfMonth(packed) == 0) {
+      return false;
+    }
+    *v = ExtractYearWeek(packed, /*mode=*/2);
+    return true;
+  };
+  return ExecPackedUnaryNullable<arrow::UInt32Builder, uint32_t>(ctx, batch, out, fn);
 }
 
 arrow::Status ExecHour(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch,
@@ -480,6 +566,24 @@ arrow::Status RegisterScalarTemporalFunctions(arrow::compute::FunctionRegistry* 
     auto func = std::make_shared<arrow::compute::ScalarFunction>(
         "toYearWeek", arrow::compute::Arity::Unary(), arrow::compute::FunctionDoc::Empty());
     ARROW_RETURN_NOT_OK(func->AddKernel(MakePackedKernel(arrow::uint32(), ExecToYearWeek)));
+    ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(func), /*allow_overwrite=*/true));
+  }
+  {
+    auto func = std::make_shared<arrow::compute::ScalarFunction>(
+        "tidbDayOfWeek", arrow::compute::Arity::Unary(), arrow::compute::FunctionDoc::Empty());
+    ARROW_RETURN_NOT_OK(func->AddKernel(MakePackedKernel(arrow::uint16(), ExecTiDBDayOfWeek)));
+    ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(func), /*allow_overwrite=*/true));
+  }
+  {
+    auto func = std::make_shared<arrow::compute::ScalarFunction>(
+        "tidbWeekOfYear", arrow::compute::Arity::Unary(), arrow::compute::FunctionDoc::Empty());
+    ARROW_RETURN_NOT_OK(func->AddKernel(MakePackedKernel(arrow::uint16(), ExecTiDBWeekOfYear)));
+    ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(func), /*allow_overwrite=*/true));
+  }
+  {
+    auto func = std::make_shared<arrow::compute::ScalarFunction>(
+        "yearWeek", arrow::compute::Arity::Unary(), arrow::compute::FunctionDoc::Empty());
+    ARROW_RETURN_NOT_OK(func->AddKernel(MakePackedKernel(arrow::uint32(), ExecYearWeek)));
     ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(func), /*allow_overwrite=*/true));
   }
 
