@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-// MS7C: C ABI skeleton (no implementation yet).
+// MS7+: TiForth C ABI surface (implemented in `tiforth_capi`).
 //
 // Versioning notes:
 // - This header defines the *C ABI* version, not the TiForth library version.

@@ -34,12 +34,17 @@ This has two problems:
   - builds an Arrow `Expression` from `tiforth::Expr`
   - derives `FunctionOptions` from Arrow field metadata (`tiforth.*` metadata keys)
   - binds against the engine-owned registry overlay
+- Public wrapper `tiforth/compiled_expr.{h,cc}`:
+  - exposes a stable `tiforth::CompiledExpr` API for "bind once, execute many"
+  - avoids requiring callers to include `tiforth/detail/*`
 - Operators cache bound expressions per input schema:
   - `ProjectionTransformOp`, `FilterTransformOp`, `HashAggTransformOp`.
 
 ## Files
 
+- `libs/tiforth/include/tiforth/compiled_expr.h`
 - `libs/tiforth/include/tiforth/detail/expr_compiler.h`
+- `libs/tiforth/src/tiforth/compiled_expr.cc`
 - `libs/tiforth/src/tiforth/detail/expr_compiler.cc`
 - `libs/tiforth/src/tiforth/expr.cc`
 - `libs/tiforth/src/tiforth/operators/{projection,filter,hash_agg}.cc`
@@ -49,4 +54,3 @@ This has two problems:
 
 - `ninja -C libs/tiforth/build-debug && ctest --test-dir libs/tiforth/build-debug`
 - `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms && gtests_dbms --gtest_filter=TiForth*`
-

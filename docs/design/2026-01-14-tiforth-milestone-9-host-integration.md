@@ -97,10 +97,10 @@ This part is deliberately deferred until the Block bridge is validated.
   - validates output `DB::Block` values match expectations
   - current coverage includes: collated string filter; 2-key hash agg (collated string + int32); 2-key hash join (collated strings + Decimal256, with MyDateTime carried through output)
 
-## Files / Modules (Planned)
+## Files / Modules (Implemented)
 
-- `dbms/src/Flash/TiForth/ArrowTypeMapping.{h,cpp}` (exists; extend if needed)
-- `dbms/src/Flash/TiForth/ArrowBlockConversion.{h,cpp}` (new; RecordBatch <-> Block)
-- `dbms/src/Flash/TiForth/BlockPipelineRunner.{h,cpp}` (new; test-only runner initially)
-- `dbms/src/Flash/tests/gtest_tiforth_block_roundtrip.cpp` (new)
-- `dbms/src/Flash/tests/gtest_tiforth_block_runner.cpp` (new)
+- `dbms/src/Flash/TiForth/ArrowTypeMapping.{h,cpp}`
+- `dbms/src/Flash/TiForth/ArrowBlockConversion.{h,cpp}`
+- `dbms/src/Flash/TiForth/BlockPipelineRunner.{h,cpp}`
+- `dbms/src/Flash/tests/gtest_tiforth_block_roundtrip.cpp`
+- `dbms/src/Flash/tests/gtest_tiforth_block_runner.cpp`

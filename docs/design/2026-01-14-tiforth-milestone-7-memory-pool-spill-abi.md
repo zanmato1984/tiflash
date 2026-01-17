@@ -46,15 +46,16 @@ This milestone is about “host integration hardening”:
 
 ### Propagation strategy
 
-Operators that allocate should accept a pool (or exec context) explicitly:
+Operators that allocate default to the Engine pool, with an explicit escape hatch:
 
-- `ProjectionTransformOp`, `FilterTransformOp`, `SortTransformOp`:
-  - add optional constructor param `arrow::MemoryPool*`
-  - initialize their internal `arrow::compute::ExecContext` with that pool
-- Expression evaluation helpers:
-  - ensure `EvalExpr*` uses the caller-provided `ExecContext` when present
+- `ProjectionTransformOp`, `FilterTransformOp`, `HashAggTransformOp`, `HashJoinTransformOp`, `SortTransformOp`:
+  - accept `const Engine*` plus optional `arrow::MemoryPool*`
+  - when the pool is null, use `engine->memory_pool()` for Arrow builders and the internal `arrow::compute::ExecContext`
+- Expression evaluation/compilation:
+  - support executing with a caller-provided `ExecContext`
+  - `EvalExpr*` / `CompiledExpr` create a local `ExecContext` from the Engine when one is not provided
 
-Pipeline builders/tests can remain unchanged by default (use Arrow default pool), while TiFlash integration can pass an accounting pool.
+Tests validate non-default pool usage via `arrow::ProxyMemoryPool`.
 
 ## Spill Hooks (Skeleton)
 
@@ -79,8 +80,8 @@ Initial MS7 implementation may provide:
 Add `libs/tiforth/include/tiforth_c/tiforth.h` (new namespace) with:
 
 - opaque handles: `tiforth_engine_t`, `tiforth_pipeline_t`, `tiforth_task_t`
-- engine create/destroy with optional memory pool callbacks
-- task push/pull/step (Arrow stays C++-only; C ABI can move to Arrow C Data Interface later)
+- engine/pipeline/task lifecycle + minimal pipeline builder
+- task step/push/pull using Arrow C Data Interface (`ArrowSchema` + `ArrowArray`) and Arrow C Stream Interface (`ArrowArrayStream`)
 
 MS7 focuses on:
 
@@ -90,17 +91,18 @@ MS7 focuses on:
 
 MS7C implementation status:
 
-- Added header skeleton at `libs/tiforth/include/tiforth_c/tiforth.h`:
-  - declares opaque handles + lifecycle APIs (not implemented yet)
-  - defines `TIFORTH_C_ABI_VERSION` and a `tiforth_status_t` convention
-  - reserves option struct fields for forward-compatible extension
+- Header `libs/tiforth/include/tiforth_c/tiforth.h` defines C ABI v1:
+  - opaque handles + lifecycle APIs
+  - expression builder subset
+  - Arrow C Data/Stream push/pull helpers
+  - ownership rules for Arrow C structs (moved-in vs exported)
 
 MS7D implementation status:
 
-- Added buildable `tiforth_capi` library target with stub implementations:
-  - symbols match the header, but return `TIFORTH_STATUS_NOT_IMPLEMENTED` for now
-  - basic validation for `abi_version` and reserved option fields
-  - `tiforth_free` implemented via `free(3)` for `tiforth_status_t.message`
+- `tiforth_capi` library implements the header surface:
+  - engine/pipeline/task + filter/projection operators (common path)
+  - Arrow C Data Interface import/export and ArrowArrayStream input/output
+  - negative/misuse tests cover error mapping + ownership rules
 
 ### Go/Rust bindings
 
@@ -111,5 +113,5 @@ Plan only:
 
 ## Definition of Done
 
-- MS7 design doc committed.
-- Follow-up MS7 implementation tasks created in `.codex/progress/daemon.md`.
+- MS7 design doc updated to match implementation.
+- TiForth builds/tests pass (`ninja -C libs/tiforth/build-debug && ctest`).
