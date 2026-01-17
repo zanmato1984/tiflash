@@ -6,9 +6,6 @@
 #include <utility>
 
 #include <arrow/array.h>
-#include <arrow/array/concatenate.h>
-#include <arrow/array/util.h>
-#include <arrow/chunked_array.h>
 #include <arrow/compute/exec.h>
 #include <arrow/memory_pool.h>
 #include <arrow/record_batch.h>
@@ -277,28 +274,6 @@ arrow::Result<TypedExpr> CompileTypedExprImpl(const arrow::Schema& schema, const
         }
       },
       expr.node);
-}
-
-arrow::Result<std::shared_ptr<arrow::Array>> DatumToArray(const arrow::Datum& datum,
-                                                          int64_t length,
-                                                          arrow::MemoryPool* pool) {
-  if (datum.is_array()) {
-    return datum.make_array();
-  }
-  if (datum.is_chunked_array()) {
-    auto chunked = datum.chunked_array();
-    if (chunked == nullptr) {
-      return arrow::Status::Invalid("expected non-null chunked array datum");
-    }
-    if (chunked->num_chunks() == 1) {
-      return chunked->chunk(0);
-    }
-    return arrow::Concatenate(chunked->chunks(), pool);
-  }
-  if (datum.is_scalar()) {
-    return arrow::MakeArrayFromScalar(*datum.scalar(), length, pool);
-  }
-  return arrow::Status::Invalid("unsupported datum kind for scalar expression result");
 }
 
 }  // namespace

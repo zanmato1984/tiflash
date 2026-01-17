@@ -10,7 +10,6 @@
 
 #include <arrow/array/concatenate.h>
 #include <arrow/builder.h>
-#include <arrow/chunked_array.h>
 #include <arrow/compute/api_vector.h>
 #include <arrow/memory_pool.h>
 #include <arrow/status.h>
@@ -23,24 +22,6 @@
 namespace tiforth {
 
 namespace {
-
-arrow::Result<std::shared_ptr<arrow::Array>> DatumToArray(const arrow::Datum& datum,
-                                                         arrow::MemoryPool* pool) {
-  if (datum.is_array()) {
-    return datum.make_array();
-  }
-  if (datum.is_chunked_array()) {
-    auto chunked = datum.chunked_array();
-    if (chunked == nullptr) {
-      return arrow::Status::Invalid("expected non-null chunked array datum");
-    }
-    if (chunked->num_chunks() == 1) {
-      return chunked->chunk(0);
-    }
-    return arrow::Concatenate(chunked->chunks(), pool);
-  }
-  return arrow::Status::Invalid("expected array or chunked array result");
-}
 
 }  // namespace
 
@@ -233,7 +214,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> SortTransformOp::SortAll() {
     ARROW_ASSIGN_OR_RAISE(
         auto taken,
         arrow::compute::Take(arrow::Datum(col), arrow::Datum(indices), take_options, &exec_context_));
-    ARROW_ASSIGN_OR_RAISE(auto out_array, DatumToArray(taken, exec_context_.memory_pool()));
+    ARROW_ASSIGN_OR_RAISE(auto out_array, detail::DatumToArray(taken, exec_context_.memory_pool()));
     sorted_columns.push_back(std::move(out_array));
   }
 

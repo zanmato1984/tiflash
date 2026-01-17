@@ -56,24 +56,6 @@ std::size_t HashBytes(const std::array<uint8_t, N>& bytes) noexcept {
   return HashBytes(bytes.data(), bytes.size());
 }
 
-arrow::Result<std::shared_ptr<arrow::Array>> DatumToArray(const arrow::Datum& datum,
-                                                         arrow::MemoryPool* pool) {
-  if (datum.is_array()) {
-    return datum.make_array();
-  }
-  if (datum.is_chunked_array()) {
-    auto chunked = datum.chunked_array();
-    if (chunked == nullptr) {
-      return arrow::Status::Invalid("expected non-null chunked array datum");
-    }
-    if (chunked->num_chunks() == 1) {
-      return chunked->chunk(0);
-    }
-    return arrow::Concatenate(chunked->chunks(), pool);
-  }
-  return arrow::Status::Invalid("expected array or chunked array result");
-}
-
 }  // namespace
 
 std::size_t HashJoinTransformOp::KeyHash::operator()(
@@ -440,7 +422,8 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
         auto taken,
         arrow::compute::Take(arrow::Datum(probe.column(ci)), arrow::Datum(probe_indices_array),
                              take_options, &exec_context_));
-    ARROW_ASSIGN_OR_RAISE(auto out_array, DatumToArray(taken, exec_context_.memory_pool()));
+    ARROW_ASSIGN_OR_RAISE(auto out_array,
+                          detail::DatumToArray(taken, exec_context_.memory_pool()));
     out_arrays.push_back(std::move(out_array));
   }
 
@@ -449,7 +432,8 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
         auto taken,
         arrow::compute::Take(arrow::Datum(build_combined_->column(ci)),
                              arrow::Datum(build_indices_array), take_options, &exec_context_));
-    ARROW_ASSIGN_OR_RAISE(auto out_array, DatumToArray(taken, exec_context_.memory_pool()));
+    ARROW_ASSIGN_OR_RAISE(auto out_array,
+                          detail::DatumToArray(taken, exec_context_.memory_pool()));
     out_arrays.push_back(std::move(out_array));
   }
 

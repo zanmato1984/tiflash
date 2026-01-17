@@ -3,8 +3,6 @@
 #include <utility>
 #include <vector>
 
-#include <arrow/array/concatenate.h>
-#include <arrow/chunked_array.h>
 #include <arrow/compute/api_vector.h>
 #include <arrow/memory_pool.h>
 #include <arrow/status.h>
@@ -17,24 +15,6 @@
 namespace tiforth {
 
 namespace {
-
-arrow::Result<std::shared_ptr<arrow::Array>> DatumToArray(const arrow::Datum& datum,
-                                                         arrow::MemoryPool* pool) {
-  if (datum.is_array()) {
-    return datum.make_array();
-  }
-  if (datum.is_chunked_array()) {
-    auto chunked = datum.chunked_array();
-    if (chunked == nullptr) {
-      return arrow::Status::Invalid("expected non-null chunked array datum");
-    }
-    if (chunked->num_chunks() == 1) {
-      return chunked->chunk(0);
-    }
-    return arrow::Concatenate(chunked->chunks(), pool);
-  }
-  return arrow::Status::Invalid("expected array or chunked array result");
-}
 
 }  // namespace
 
@@ -104,7 +84,8 @@ arrow::Result<OperatorStatus> FilterTransformOp::TransformImpl(
                           arrow::compute::Filter(arrow::Datum(input.column(i)),
                                                  arrow::Datum(predicate_array), options,
                                                  &exec_context_));
-    ARROW_ASSIGN_OR_RAISE(auto out_array, DatumToArray(filtered, exec_context_.memory_pool()));
+    ARROW_ASSIGN_OR_RAISE(auto out_array,
+                          detail::DatumToArray(filtered, exec_context_.memory_pool()));
     out_columns.push_back(std::move(out_array));
   }
 
@@ -117,7 +98,7 @@ arrow::Result<OperatorStatus> FilterTransformOp::TransformImpl(
                                                  arrow::Datum(predicate_array), options,
                                                  &exec_context_));
     ARROW_ASSIGN_OR_RAISE(auto filtered_pred_array,
-                          DatumToArray(filtered_pred, exec_context_.memory_pool()));
+                          detail::DatumToArray(filtered_pred, exec_context_.memory_pool()));
     out_rows = filtered_pred_array->length();
   }
 
