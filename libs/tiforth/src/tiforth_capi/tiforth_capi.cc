@@ -68,6 +68,24 @@ bool IsZeroedOptions(const tiforth_engine_options_t& options) {
   return true;
 }
 
+void ReleaseArrowSchema(struct ArrowSchema* schema) {
+  if (schema != nullptr && schema->release != nullptr) {
+    schema->release(schema);
+  }
+}
+
+void ReleaseArrowArray(struct ArrowArray* array) {
+  if (array != nullptr && array->release != nullptr) {
+    array->release(array);
+  }
+}
+
+void ReleaseArrowArrayStream(struct ArrowArrayStream* stream) {
+  if (stream != nullptr && stream->release != nullptr) {
+    stream->release(stream);
+  }
+}
+
 }  // namespace
 
 struct tiforth_engine_t {
@@ -350,21 +368,34 @@ tiforth_status_t tiforth_task_close_input(tiforth_task_t* task) {
 tiforth_status_t tiforth_task_push_input_batch(tiforth_task_t* task,
                                                struct ArrowSchema* schema,
                                                struct ArrowArray* array) {
-  if (task == nullptr) {
-    return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT, "task must not be null");
-  }
   if (schema == nullptr || array == nullptr) {
     return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT, "schema/array must not be null");
   }
+
+  // Arrow import moves ownership eagerly; always consume the inputs to avoid leaks and make
+  // ownership deterministic for the caller.
+  auto cleanup = [&]() {
+    ReleaseArrowSchema(schema);
+    ReleaseArrowArray(array);
+  };
+
+  if (task == nullptr) {
+    cleanup();
+    return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT, "task must not be null");
+  }
   if (task->task == nullptr) {
+    cleanup();
     return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT, "task handle is not initialized");
   }
 
   auto batch_res = arrow::ImportRecordBatch(array, schema);
   if (!batch_res.ok()) {
+    cleanup();
     return MakeStatusFromArrow(batch_res.status());
   }
-  return MakeStatusFromArrow(task->task->PushInput(std::move(*batch_res)));
+  const auto st = task->task->PushInput(std::move(*batch_res));
+  cleanup();
+  return MakeStatusFromArrow(st);
 }
 
 tiforth_status_t tiforth_task_pull_output_batch(tiforth_task_t* task,
@@ -388,6 +419,87 @@ tiforth_status_t tiforth_task_pull_output_batch(tiforth_task_t* task,
     return MakeStatus(TIFORTH_STATUS_INTERNAL_ERROR, "expected non-null output batch");
   }
   return MakeStatusFromArrow(arrow::ExportRecordBatch(**batch_res, out_array, out_schema));
+}
+
+// ArrowArrayStream helpers.
+tiforth_status_t tiforth_task_set_input_stream(tiforth_task_t* task,
+                                               struct ArrowArrayStream* stream) {
+  if (stream == nullptr) {
+    return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT, "stream must not be null");
+  }
+  auto cleanup = [&]() { ReleaseArrowArrayStream(stream); };
+
+  if (task == nullptr) {
+    cleanup();
+    return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT, "task must not be null");
+  }
+  if (task->task == nullptr) {
+    cleanup();
+    return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT, "task handle is not initialized");
+  }
+
+  auto reader_res = arrow::ImportRecordBatchReader(stream);
+  if (!reader_res.ok()) {
+    cleanup();
+    return MakeStatusFromArrow(reader_res.status());
+  }
+  const auto st = task->task->SetInputReader(std::move(*reader_res));
+  cleanup();
+  return MakeStatusFromArrow(st);
+}
+
+tiforth_status_t tiforth_task_export_output_stream(tiforth_task_t* task,
+                                                   struct ArrowArrayStream* out_stream) {
+  if (out_stream == nullptr) {
+    return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT, "out_stream must not be null");
+  }
+  if (out_stream->release != nullptr) {
+    return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT, "out_stream must be released/uninitialized");
+  }
+  if (task == nullptr) {
+    return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT, "task must not be null");
+  }
+  if (task->task == nullptr) {
+    return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT, "task handle is not initialized");
+  }
+
+  arrow::RecordBatchVector batches;
+  while (true) {
+    auto state_res = task->task->Step();
+    if (!state_res.ok()) {
+      return MakeStatusFromArrow(state_res.status());
+    }
+    switch (*state_res) {
+      case tiforth::TaskState::kNeedInput:
+        return MakeStatus(TIFORTH_STATUS_INVALID_ARGUMENT,
+                          "task needs input; close input or set input stream before exporting output");
+      case tiforth::TaskState::kBlocked:
+        return MakeStatus(TIFORTH_STATUS_NOT_IMPLEMENTED, "task is blocked");
+      case tiforth::TaskState::kFinished:
+        goto done;
+      case tiforth::TaskState::kHasOutput:
+        break;
+    }
+
+    auto out_res = task->task->PullOutput();
+    if (!out_res.ok()) {
+      return MakeStatusFromArrow(out_res.status());
+    }
+    if (*out_res == nullptr) {
+      return MakeStatus(TIFORTH_STATUS_INTERNAL_ERROR, "expected non-null output batch");
+    }
+    batches.push_back(std::move(*out_res));
+  }
+
+done:
+  if (batches.empty()) {
+    return MakeStatus(TIFORTH_STATUS_INTERNAL_ERROR, "no output batches available to export");
+  }
+  auto reader_res = arrow::RecordBatchReader::Make(std::move(batches));
+  if (!reader_res.ok()) {
+    return MakeStatusFromArrow(reader_res.status());
+  }
+  return MakeStatusFromArrow(arrow::ExportRecordBatchReader(std::move(*reader_res), out_stream));
 }
 
 }  // extern "C"

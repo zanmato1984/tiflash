@@ -122,7 +122,8 @@ TIFORTH_CAPI tiforth_status_t tiforth_task_close_input(tiforth_task_t* task);
 //
 // Ownership rules (current):
 // - `tiforth_task_push_input_batch` consumes (`moves`) the provided `schema` and `array` (record batch as a
-//   struct array). Callers must not call `schema->release` / `array->release` after a successful call.
+//   struct array). Callers must not call `schema->release` / `array->release` after the call returns
+//   (success or error), as Arrow import moves ownership eagerly.
 // - `tiforth_task_pull_output_batch` produces an owned (`exported`) record batch. Callers must eventually call
 //   `out_schema->release(out_schema)` and `out_array->release(out_array)` when done (if non-null).
 TIFORTH_CAPI tiforth_status_t tiforth_task_push_input_batch(tiforth_task_t* task,
@@ -131,6 +132,18 @@ TIFORTH_CAPI tiforth_status_t tiforth_task_push_input_batch(tiforth_task_t* task
 TIFORTH_CAPI tiforth_status_t tiforth_task_pull_output_batch(tiforth_task_t* task,
                                                              struct ArrowSchema* out_schema,
                                                              struct ArrowArray* out_array);
+
+// Streaming I/O (Arrow C Stream Interface).
+//
+// Ownership rules:
+// - `tiforth_task_set_input_stream` consumes (`moves`) `stream`. Callers must not call `stream->release`
+//   after the call returns (success or error).
+// - `tiforth_task_export_output_stream` produces an owned `out_stream`. Callers must eventually call
+//   `out_stream->release(out_stream)` when done.
+TIFORTH_CAPI tiforth_status_t tiforth_task_set_input_stream(tiforth_task_t* task,
+                                                            struct ArrowArrayStream* stream);
+TIFORTH_CAPI tiforth_status_t tiforth_task_export_output_stream(tiforth_task_t* task,
+                                                                struct ArrowArrayStream* out_stream);
 
 #ifdef __cplusplus
 }  // extern "C"
