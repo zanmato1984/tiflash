@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <memory_resource>
+#include <new>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -56,6 +58,35 @@ std::size_t HashBytes(const std::array<uint8_t, N>& bytes) noexcept {
   return HashBytes(bytes.data(), bytes.size());
 }
 
+class ArrowMemoryPoolResource final : public std::pmr::memory_resource {
+ public:
+  explicit ArrowMemoryPoolResource(arrow::MemoryPool* pool)
+      : pool_(pool != nullptr ? pool : arrow::default_memory_pool()) {}
+
+ private:
+  void* do_allocate(std::size_t bytes, std::size_t /*alignment*/) override {
+    uint8_t* out = nullptr;
+    const auto st = pool_->Allocate(static_cast<int64_t>(bytes), &out);
+    if (!st.ok()) {
+      throw std::bad_alloc();
+    }
+    return out;
+  }
+
+  void do_deallocate(void* p, std::size_t bytes, std::size_t /*alignment*/) override {
+    if (p == nullptr) {
+      return;
+    }
+    pool_->Free(reinterpret_cast<uint8_t*>(p), static_cast<int64_t>(bytes));
+  }
+
+  bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
+    return this == &other;
+  }
+
+  arrow::MemoryPool* pool_;
+};
+
 }  // namespace
 
 std::size_t HashJoinTransformOp::KeyHash::operator()(
@@ -75,7 +106,7 @@ std::size_t HashJoinTransformOp::KeyHash::operator()(
           } else if constexpr (std::is_same_v<V, Decimal128Bytes> ||
                                std::is_same_v<V, Decimal256Bytes>) {
             return HashBytes(v);
-          } else if constexpr (std::is_same_v<V, std::string>) {
+          } else if constexpr (std::is_same_v<V, std::pmr::string>) {
             return HashBytes(reinterpret_cast<const uint8_t*>(v.data()), v.size());
           } else {
             return 0;
@@ -90,6 +121,9 @@ std::size_t HashJoinTransformOp::KeyHash::operator()(
 }
 
 arrow::Status HashJoinTransformOp::BuildIndex() {
+  if (pmr_resource_ == nullptr) {
+    pmr_resource_ = std::make_unique<ArrowMemoryPoolResource>(memory_pool_);
+  }
   if (index_built_) {
     return arrow::Status::OK();
   }
@@ -206,7 +240,9 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
       }
       case arrow::Type::BINARY: {
         const auto& bin = static_cast<const arrow::BinaryArray&>(array);
-        return SortKeyString(collation, bin.GetView(row));
+        std::pmr::string out(pmr_resource_.get());
+        SortKeyStringTo(collation, bin.GetView(row), &out);
+        return out;
       }
       default:
         break;
@@ -234,7 +270,7 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
     for (uint8_t i = 0; i < key_count_; ++i) {
       ARROW_ASSIGN_OR_RAISE(key.parts[i], make_key_part(*key_arrays[i], row, collations[i]));
     }
-    build_index_[key].push_back(row);
+    build_index_[std::move(key)].push_back(row);
   }
 
   index_built_ = true;
@@ -365,7 +401,9 @@ arrow::Result<OperatorStatus> HashJoinTransformOp::TransformImpl(
       }
       case arrow::Type::BINARY: {
         const auto& bin = static_cast<const arrow::BinaryArray&>(array);
-        return SortKeyString(collation, bin.GetView(row));
+        std::pmr::string out(pmr_resource_.get());
+        SortKeyStringTo(collation, bin.GetView(row), &out);
+        return out;
       }
       default:
         break;

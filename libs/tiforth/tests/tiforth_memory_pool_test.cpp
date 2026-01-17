@@ -18,6 +18,7 @@
 #include "tiforth/operators/sort.h"
 #include "tiforth/pipeline.h"
 #include "tiforth/task.h"
+#include "tiforth/type_metadata.h"
 
 namespace tiforth {
 
@@ -57,6 +58,34 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeBatch2(std::string a_name
   ARROW_ASSIGN_OR_RAISE(auto a_array, MakeInt32Array(a));
   ARROW_ASSIGN_OR_RAISE(auto b_array, MakeInt32Array(b));
   return arrow::RecordBatch::Make(schema, static_cast<int64_t>(a.size()), {a_array, b_array});
+}
+
+arrow::Result<std::shared_ptr<arrow::Array>> MakeBinaryArray(
+    const std::vector<std::optional<std::string>>& values) {
+  arrow::BinaryBuilder builder;
+  for (const auto& value : values) {
+    if (value.has_value()) {
+      ARROW_RETURN_NOT_OK(builder.Append(*value));
+    } else {
+      ARROW_RETURN_NOT_OK(builder.AppendNull());
+    }
+  }
+  std::shared_ptr<arrow::Array> out;
+  ARROW_RETURN_NOT_OK(builder.Finish(&out));
+  return out;
+}
+
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeBinaryBatch(
+    int32_t collation_id, const std::vector<std::optional<std::string>>& xs) {
+  auto field = arrow::field("x", arrow::binary());
+  LogicalType logical;
+  logical.id = LogicalTypeId::kString;
+  logical.collation_id = collation_id;
+  ARROW_ASSIGN_OR_RAISE(field, WithLogicalTypeMetadata(field, logical));
+  auto schema = arrow::schema({field});
+
+  ARROW_ASSIGN_OR_RAISE(auto x_array, MakeBinaryArray(xs));
+  return arrow::RecordBatch::Make(schema, static_cast<int64_t>(xs.size()), {x_array});
 }
 
 arrow::Status RunMemoryPoolSmoke() {
@@ -106,6 +135,55 @@ arrow::Status RunMemoryPoolSmoke() {
     return arrow::Status::Invalid("expected allocations to go through the provided memory pool");
   }
   return arrow::Status::OK();
+}
+
+arrow::Result<int64_t> RunCollatedSortBytesAllocated(int32_t collation_id) {
+  arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
+
+  EngineOptions options;
+  options.memory_pool = &pool;
+  ARROW_ASSIGN_OR_RAISE(auto engine, Engine::Create(options));
+  ARROW_ASSIGN_OR_RAISE(auto builder, PipelineBuilder::Create(engine.get()));
+  const auto* eng = engine.get();
+
+  std::vector<SortKey> keys = {SortKey{.name = "x", .ascending = true, .nulls_first = false}};
+  ARROW_RETURN_NOT_OK(builder->AppendTransform([keys, eng]() -> arrow::Result<TransformOpPtr> {
+    return std::make_unique<SortTransformOp>(eng, keys);
+  }));
+
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
+
+  ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
+  if (initial_state != TaskState::kNeedInput) {
+    return arrow::Status::Invalid("expected TaskState::kNeedInput");
+  }
+
+  std::vector<std::optional<std::string>> values;
+  values.reserve(128);
+  for (int i = 0; i < 128; ++i) {
+    values.push_back(std::string(64, static_cast<char>('a' + (i % 26))));
+  }
+  ARROW_ASSIGN_OR_RAISE(auto batch, MakeBinaryBatch(collation_id, values));
+  ARROW_RETURN_NOT_OK(task->PushInput(batch));
+  ARROW_RETURN_NOT_OK(task->CloseInput());
+
+  while (true) {
+    ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
+    if (state == TaskState::kFinished) {
+      break;
+    }
+    if (state == TaskState::kNeedInput) {
+      continue;
+    }
+    if (state != TaskState::kHasOutput) {
+      return arrow::Status::Invalid("unexpected task state");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto out, task->PullOutput());
+    (void)out;
+  }
+
+  return pool.total_bytes_allocated();
 }
 
 arrow::Status RunHashJoinMemoryPoolSmoke() {
@@ -164,6 +242,17 @@ arrow::Status RunHashJoinMemoryPoolSmoke() {
 TEST(TiForthMemoryPoolTest, SortUsesEnginePool) {
   auto status = RunMemoryPoolSmoke();
   ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthMemoryPoolTest, CollatedSortUsesEnginePoolForSortKeys) {
+  auto bytes_binary = RunCollatedSortBytesAllocated(/*collation_id=*/63);
+  ASSERT_TRUE(bytes_binary.ok()) << bytes_binary.status().ToString();
+
+  auto bytes_general_ci = RunCollatedSortBytesAllocated(/*collation_id=*/33);
+  ASSERT_TRUE(bytes_general_ci.ok()) << bytes_general_ci.status().ToString();
+
+  ASSERT_GT(*bytes_general_ci, *bytes_binary + 8192)
+      << "expected collated sort to allocate additional sort-key memory through the engine pool";
 }
 
 TEST(TiForthMemoryPoolTest, HashJoinUsesEnginePool) {

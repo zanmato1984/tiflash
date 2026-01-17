@@ -459,39 +459,43 @@ inline int CompareString(Collation collation, std::string_view lhs, std::string_
   return CompareString(collation.kind, lhs, rhs);
 }
 
-inline void AppendU16BigEndian(std::string& out, uint16_t w) {
+template <typename StringT>
+inline void AppendU16BigEndian(StringT& out, uint16_t w) {
   out.push_back(static_cast<char>(w >> 8));
   out.push_back(static_cast<char>(w));
 }
 
-inline void AppendPackedWeightsBigEndian(std::string& out, uint64_t w) {
+template <typename StringT>
+inline void AppendPackedWeightsBigEndian(StringT& out, uint64_t w) {
   while (w != 0) {
     AppendU16BigEndian(out, static_cast<uint16_t>(w & 0xFFFF));
     w >>= 16;
   }
 }
 
-template <CollationKind kind>
-inline std::string SortKeyString(std::string_view value) {
+template <CollationKind kind, typename StringT>
+inline void SortKeyStringTo(std::string_view value, StringT* out) {
+  if (out == nullptr) {
+    return;
+  }
+  out->clear();
+
   if constexpr (kind == CollationKind::kBinary) {
-    return std::string(value.data(), value.size());
+    out->assign(value.data(), value.size());
   } else if constexpr (kind == CollationKind::kPaddingBinary) {
     value = RightTrimAsciiSpace(value);
-    return std::string(value.data(), value.size());
+    out->assign(value.data(), value.size());
   } else if constexpr (kind == CollationKind::kGeneralCi) {
     value = RightTrimAsciiSpace(value);
-    std::string out;
-    out.reserve(value.size() * 2);
+    out->reserve(value.size() * 2);
     std::size_t offset = 0;
     while (offset < value.size()) {
       const Rune r = DecodeUtf8Char(value, offset);
-      AppendU16BigEndian(out, GeneralCiWeight(r));
+      AppendU16BigEndian(*out, GeneralCiWeight(r));
     }
-    return out;
   } else if constexpr (kind == CollationKind::kUnicodeCi0400) {
     value = RightTrimAsciiSpace(value);
-    std::string out;
-    out.reserve(value.size() * 16);
+    out->reserve(value.size() * 16);
     std::size_t offset = 0;
     while (offset < value.size()) {
       const Rune r = DecodeUtf8Char(value, offset);
@@ -501,13 +505,11 @@ inline std::string SortKeyString(std::string_view value) {
       if (!ok) {
         continue;
       }
-      AppendPackedWeightsBigEndian(out, first);
-      AppendPackedWeightsBigEndian(out, second);
+      AppendPackedWeightsBigEndian(*out, first);
+      AppendPackedWeightsBigEndian(*out, second);
     }
-    return out;
   } else if constexpr (kind == CollationKind::kUnicodeCi0900) {
-    std::string out;
-    out.reserve(value.size() * 16);
+    out->reserve(value.size() * 16);
     std::size_t offset = 0;
     while (offset < value.size()) {
       const Rune r = DecodeUtf8Char(value, offset);
@@ -517,13 +519,43 @@ inline std::string SortKeyString(std::string_view value) {
       if (!ok) {
         continue;
       }
-      AppendPackedWeightsBigEndian(out, first);
-      AppendPackedWeightsBigEndian(out, second);
+      AppendPackedWeightsBigEndian(*out, first);
+      AppendPackedWeightsBigEndian(*out, second);
     }
-    return out;
   } else {
-    return std::string(value.data(), value.size());
+    out->assign(value.data(), value.size());
   }
+}
+
+template <typename StringT>
+inline void SortKeyStringTo(CollationKind kind, std::string_view value, StringT* out) {
+  switch (kind) {
+    case CollationKind::kBinary:
+      return SortKeyStringTo<CollationKind::kBinary>(value, out);
+    case CollationKind::kPaddingBinary:
+      return SortKeyStringTo<CollationKind::kPaddingBinary>(value, out);
+    case CollationKind::kGeneralCi:
+      return SortKeyStringTo<CollationKind::kGeneralCi>(value, out);
+    case CollationKind::kUnicodeCi0400:
+      return SortKeyStringTo<CollationKind::kUnicodeCi0400>(value, out);
+    case CollationKind::kUnicodeCi0900:
+      return SortKeyStringTo<CollationKind::kUnicodeCi0900>(value, out);
+    case CollationKind::kUnsupported:
+      break;
+  }
+  return SortKeyStringTo<CollationKind::kBinary>(value, out);
+}
+
+template <typename StringT>
+inline void SortKeyStringTo(Collation collation, std::string_view value, StringT* out) {
+  return SortKeyStringTo(collation.kind, value, out);
+}
+
+template <CollationKind kind>
+inline std::string SortKeyString(std::string_view value) {
+  std::string out;
+  SortKeyStringTo<kind>(value, &out);
+  return out;
 }
 
 inline std::string SortKeyString(CollationKind kind, std::string_view value) {

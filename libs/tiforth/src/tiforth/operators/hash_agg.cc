@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <memory_resource>
+#include <new>
 #include <optional>
 #include <string_view>
 #include <type_traits>
@@ -40,6 +42,35 @@ std::size_t HashBytes(const std::array<uint8_t, N>& bytes) noexcept {
   return HashBytes(bytes.data(), bytes.size());
 }
 
+class ArrowMemoryPoolResource final : public std::pmr::memory_resource {
+ public:
+  explicit ArrowMemoryPoolResource(arrow::MemoryPool* pool)
+      : pool_(pool != nullptr ? pool : arrow::default_memory_pool()) {}
+
+ private:
+  void* do_allocate(std::size_t bytes, std::size_t /*alignment*/) override {
+    uint8_t* out = nullptr;
+    const auto st = pool_->Allocate(static_cast<int64_t>(bytes), &out);
+    if (!st.ok()) {
+      throw std::bad_alloc();
+    }
+    return out;
+  }
+
+  void do_deallocate(void* p, std::size_t bytes, std::size_t /*alignment*/) override {
+    if (p == nullptr) {
+      return;
+    }
+    pool_->Free(reinterpret_cast<uint8_t*>(p), static_cast<int64_t>(bytes));
+  }
+
+  bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
+    return this == &other;
+  }
+
+  arrow::MemoryPool* pool_;
+};
+
 }  // namespace
 
 std::size_t HashAggTransformOp::KeyHash::operator()(const NormalizedKey& key) const noexcept {
@@ -65,7 +96,7 @@ std::size_t HashAggTransformOp::KeyHash::operator()(const NormalizedKey& key) co
           } else if constexpr (std::is_same_v<V, Decimal128Bytes> ||
                                std::is_same_v<V, Decimal256Bytes>) {
             return HashBytes(v);
-          } else if constexpr (std::is_same_v<V, std::string>) {
+          } else if constexpr (std::is_same_v<V, std::pmr::string>) {
             return HashBytes(reinterpret_cast<const uint8_t*>(v.data()), v.size());
           } else {
             return 0;
@@ -116,6 +147,8 @@ HashAggTransformOp::HashAggTransformOp(const Engine* engine, std::vector<AggKey>
                        : (engine != nullptr ? engine->memory_pool() : arrow::default_memory_pool())),
       exec_context_(memory_pool_, /*executor=*/nullptr,
                    engine != nullptr ? engine->function_registry() : nullptr) {
+  pmr_resource_ = std::make_unique<ArrowMemoryPoolResource>(memory_pool_);
+
   aggs_.reserve(aggs.size());
   for (auto& agg : aggs) {
     if (agg.func == "count_all") {
@@ -137,14 +170,14 @@ HashAggTransformOp::HashAggTransformOp(const Engine* engine, std::vector<AggKey>
   }
 }
 
-uint32_t HashAggTransformOp::GetOrAddGroup(const NormalizedKey& key, OutputKey output_key) {
+uint32_t HashAggTransformOp::GetOrAddGroup(NormalizedKey key, OutputKey output_key) {
   auto it = key_to_group_id_.find(key);
   if (it != key_to_group_id_.end()) {
     return it->second;
   }
 
   const uint32_t group_id = static_cast<uint32_t>(group_keys_.size());
-  key_to_group_id_.emplace(key, group_id);
+  key_to_group_id_.emplace(std::move(key), group_id);
   group_keys_.push_back(std::move(output_key));
   for (auto& agg : aggs_) {
     switch (agg.kind) {
@@ -360,8 +393,16 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
         case arrow::Type::BINARY: {
           const auto& arr = static_cast<const arrow::BinaryArray&>(*arr_any);
           std::string_view view = arr.GetView(row);
-          out_part.value = std::string(view.data(), view.size());
-          norm_part.value = SortKeyString(collations[ki], view);
+          if (pmr_resource_ == nullptr) {
+            return arrow::Status::Invalid("internal error: pmr resource must not be null");
+          }
+          std::pmr::string out_value(pmr_resource_.get());
+          out_value.assign(view.data(), view.size());
+          out_part.value = std::move(out_value);
+
+          std::pmr::string norm_value(pmr_resource_.get());
+          SortKeyStringTo(collations[ki], view, &norm_value);
+          norm_part.value = std::move(norm_value);
           break;
         }
         default:
@@ -370,7 +411,7 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
       }
     }
 
-    const uint32_t group_id = GetOrAddGroup(norm_key, std::move(out_key));
+    const uint32_t group_id = GetOrAddGroup(std::move(norm_key), std::move(out_key));
 
     for (std::size_t i = 0; i < aggs_.size(); ++i) {
       auto& agg = aggs_[i];
@@ -537,7 +578,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> HashAggTransformOp::FinalizeO
           if (part.is_null) {
             ARROW_RETURN_NOT_OK(builder.AppendNull());
           } else {
-            const auto& bytes = std::get<std::string>(part.value);
+            const auto& bytes = std::get<std::pmr::string>(part.value);
             ARROW_RETURN_NOT_OK(builder.Append(reinterpret_cast<const uint8_t*>(bytes.data()),
                                                static_cast<int32_t>(bytes.size())));
           }

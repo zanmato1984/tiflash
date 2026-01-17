@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory_resource>
+#include <new>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -22,6 +24,35 @@
 namespace tiforth {
 
 namespace {
+
+class ArrowMemoryPoolResource final : public std::pmr::memory_resource {
+ public:
+  explicit ArrowMemoryPoolResource(arrow::MemoryPool* pool)
+      : pool_(pool != nullptr ? pool : arrow::default_memory_pool()) {}
+
+ private:
+  void* do_allocate(std::size_t bytes, std::size_t /*alignment*/) override {
+    uint8_t* out = nullptr;
+    const auto st = pool_->Allocate(static_cast<int64_t>(bytes), &out);
+    if (!st.ok()) {
+      throw std::bad_alloc();
+    }
+    return out;
+  }
+
+  void do_deallocate(void* p, std::size_t bytes, std::size_t /*alignment*/) override {
+    if (p == nullptr) {
+      return;
+    }
+    pool_->Free(reinterpret_cast<uint8_t*>(p), static_cast<int64_t>(bytes));
+  }
+
+  bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
+    return this == &other;
+  }
+
+  arrow::MemoryPool* pool_;
+};
 
 }  // namespace
 
@@ -117,7 +148,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> SortTransformOp::SortAll() {
 
         if constexpr (kind == CollationKind::kGeneralCi || kind == CollationKind::kUnicodeCi0400 ||
                       kind == CollationKind::kUnicodeCi0900) {
-          std::vector<std::string> key_strings(row_count);
+          ArrowMemoryPoolResource key_resource(exec_context_.memory_pool());
+          std::pmr::vector<std::pmr::string> key_strings(&key_resource);
+          key_strings.resize(row_count, std::pmr::string(&key_resource));
           for (std::size_t i = 0; i < row_count; ++i) {
             const bool null = bin->IsNull(static_cast<int64_t>(i));
             is_null[i] = static_cast<uint8_t>(null);
@@ -125,8 +158,8 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> SortTransformOp::SortAll() {
               continue;
             }
             const std::string_view view = bin->GetView(static_cast<int64_t>(i));
-            key_strings[i] = SortKeyString<kind>(view);
-            key_views[i] = std::string_view(key_strings[i]);
+            SortKeyStringTo<kind>(view, &key_strings[i]);
+            key_views[i] = std::string_view(key_strings[i].data(), key_strings[i].size());
           }
 
           std::stable_sort(idx.begin(), idx.end(), [&](uint64_t lhs, uint64_t rhs) -> bool {

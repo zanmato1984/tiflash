@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <memory_resource>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -42,7 +43,8 @@ class HashJoinTransformOp final : public TransformOp {
  private:
   using Decimal128Bytes = std::array<uint8_t, 16>;
   using Decimal256Bytes = std::array<uint8_t, 32>;
-  using KeyValue = std::variant<int32_t, uint64_t, Decimal128Bytes, Decimal256Bytes, std::string>;
+  using KeyValue =
+      std::variant<int32_t, uint64_t, Decimal128Bytes, Decimal256Bytes, std::pmr::string>;
 
   struct CompositeKey {
     uint8_t key_count = 0;
@@ -82,10 +84,13 @@ class HashJoinTransformOp final : public TransformOp {
 
   std::array<int32_t, 2> key_collation_ids_ = {-1, -1};
 
+  arrow::MemoryPool* memory_pool_ = nullptr;
+  // Owns the memory_resource used by pmr keys (normalized string keys) so the allocator stays
+  // valid for the lifetime of the hash index.
+  std::unique_ptr<std::pmr::memory_resource> pmr_resource_;
+
   std::unordered_map<CompositeKey, std::vector<int64_t>, KeyHash> build_index_;
   bool index_built_ = false;
-
-  arrow::MemoryPool* memory_pool_ = nullptr;
   arrow::compute::ExecContext exec_context_;
 };
 

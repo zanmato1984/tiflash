@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <memory_resource>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -47,7 +48,8 @@ class HashAggTransformOp final : public TransformOp {
  private:
   using Decimal128Bytes = std::array<uint8_t, 16>;
   using Decimal256Bytes = std::array<uint8_t, 32>;
-  using KeyValue = std::variant<int32_t, uint64_t, Decimal128Bytes, Decimal256Bytes, std::string>;
+  using KeyValue =
+      std::variant<int32_t, uint64_t, Decimal128Bytes, Decimal256Bytes, std::pmr::string>;
 
   struct KeyPart {
     bool is_null = false;
@@ -90,7 +92,7 @@ class HashAggTransformOp final : public TransformOp {
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> FinalizeOutput();
   arrow::Result<std::shared_ptr<arrow::Schema>> BuildOutputSchema() const;
 
-  uint32_t GetOrAddGroup(const NormalizedKey& key, OutputKey output_key);
+  uint32_t GetOrAddGroup(NormalizedKey key, OutputKey output_key);
 
   struct Compiled;
 
@@ -102,6 +104,9 @@ class HashAggTransformOp final : public TransformOp {
   std::vector<std::shared_ptr<arrow::Field>> output_key_fields_;
 
   arrow::MemoryPool* memory_pool_ = nullptr;
+  // Owns the memory_resource used by pmr group keys (normalized/original string keys) so the
+  // allocator stays valid for the lifetime of the hash table and group key storage.
+  std::unique_ptr<std::pmr::memory_resource> pmr_resource_;
   std::unique_ptr<Compiled> compiled_;
   arrow::compute::ExecContext exec_context_;
 
