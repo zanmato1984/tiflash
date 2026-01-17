@@ -117,19 +117,35 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> SortTransformOp::SortAll() {
         idx.push_back(i);
       }
 
-      std::stable_sort(idx.begin(), idx.end(), [&](uint64_t lhs, uint64_t rhs) -> bool {
-        const bool lhs_null = bin->IsNull(static_cast<int64_t>(lhs));
-        const bool rhs_null = bin->IsNull(static_cast<int64_t>(rhs));
-        if (lhs_null != rhs_null) {
-          return rhs_null;  // nulls last
-        }
-        if (lhs_null) {
-          return false;
-        }
-        const std::string_view lhs_view = bin->GetView(static_cast<int64_t>(lhs));
-        const std::string_view rhs_view = bin->GetView(static_cast<int64_t>(rhs));
-        return CompareString(collation, lhs_view, rhs_view) < 0;
-      });
+      if (collation.kind == CollationKind::kBinary) {
+        std::stable_sort(idx.begin(), idx.end(), [&](uint64_t lhs, uint64_t rhs) -> bool {
+          const bool lhs_null = bin->IsNull(static_cast<int64_t>(lhs));
+          const bool rhs_null = bin->IsNull(static_cast<int64_t>(rhs));
+          if (lhs_null != rhs_null) {
+            return rhs_null;  // nulls last
+          }
+          if (lhs_null) {
+            return false;
+          }
+          const std::string_view lhs_view = bin->GetView(static_cast<int64_t>(lhs));
+          const std::string_view rhs_view = bin->GetView(static_cast<int64_t>(rhs));
+          return CompareString<CollationKind::kBinary>(lhs_view, rhs_view) < 0;
+        });
+      } else {
+        std::stable_sort(idx.begin(), idx.end(), [&](uint64_t lhs, uint64_t rhs) -> bool {
+          const bool lhs_null = bin->IsNull(static_cast<int64_t>(lhs));
+          const bool rhs_null = bin->IsNull(static_cast<int64_t>(rhs));
+          if (lhs_null != rhs_null) {
+            return rhs_null;  // nulls last
+          }
+          if (lhs_null) {
+            return false;
+          }
+          const std::string_view lhs_view = bin->GetView(static_cast<int64_t>(lhs));
+          const std::string_view rhs_view = bin->GetView(static_cast<int64_t>(rhs));
+          return CompareString<CollationKind::kPaddingBinary>(lhs_view, rhs_view) < 0;
+        });
+      }
 
       arrow::UInt64Builder idx_builder(exec_context_.memory_pool());
       ARROW_RETURN_NOT_OK(idx_builder.AppendValues(idx));

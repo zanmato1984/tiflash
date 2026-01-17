@@ -69,18 +69,6 @@ bool IsBinaryLike(arrow::Type::type type_id) {
          type_id == arrow::Type::STRING || type_id == arrow::Type::LARGE_STRING;
 }
 
-std::string_view GetBinaryViewAt(const arrow::Array& array, int64_t i) {
-  const auto type_id = array.type_id();
-  if (type_id == arrow::Type::LARGE_BINARY || type_id == arrow::Type::LARGE_STRING) {
-    const auto& bin =
-        static_cast<const arrow::BaseBinaryArray<arrow::LargeBinaryType>&>(array);
-    return bin.GetView(i);
-  }
-  const auto& bin =
-      static_cast<const arrow::BaseBinaryArray<arrow::BinaryType>&>(array);
-  return bin.GetView(i);
-}
-
 enum class CompareOp {
   kEqual,
   kNotEqual,
@@ -90,22 +78,23 @@ enum class CompareOp {
   kGreaterEqual,
 };
 
-arrow::Result<bool> ApplyCompare(CompareOp op, int cmp) {
-  switch (op) {
-    case CompareOp::kEqual:
-      return cmp == 0;
-    case CompareOp::kNotEqual:
-      return cmp != 0;
-    case CompareOp::kLess:
-      return cmp < 0;
-    case CompareOp::kLessEqual:
-      return cmp <= 0;
-    case CompareOp::kGreater:
-      return cmp > 0;
-    case CompareOp::kGreaterEqual:
-      return cmp >= 0;
+template <CompareOp op>
+bool ApplyCompare(int cmp) {
+  if constexpr (op == CompareOp::kEqual) {
+    return cmp == 0;
+  } else if constexpr (op == CompareOp::kNotEqual) {
+    return cmp != 0;
+  } else if constexpr (op == CompareOp::kLess) {
+    return cmp < 0;
+  } else if constexpr (op == CompareOp::kLessEqual) {
+    return cmp <= 0;
+  } else if constexpr (op == CompareOp::kGreater) {
+    return cmp > 0;
+  } else if constexpr (op == CompareOp::kGreaterEqual) {
+    return cmp >= 0;
+  } else {
+    return false;
   }
-  return arrow::Status::Invalid("unexpected compare op");
 }
 
 struct CollatedCompareState final : public arrow::compute::KernelState {
@@ -130,10 +119,10 @@ arrow::Result<std::unique_ptr<arrow::compute::KernelState>> InitCollatedCompareS
   return std::make_unique<CollatedCompareState>(collation);
 }
 
-template <CompareOp op>
-arrow::Status ExecCollatedCompare(arrow::compute::KernelContext* ctx,
-                                  const arrow::compute::ExecSpan& batch,
-                                  arrow::compute::ExecResult* out) {
+template <CompareOp op, CollationKind kind, typename BinaryArrayT>
+arrow::Status ExecCollatedCompareImpl(arrow::compute::KernelContext* ctx,
+                                      const arrow::compute::ExecSpan& batch,
+                                      arrow::compute::ExecResult* out) {
   if (ctx == nullptr || out == nullptr) {
     return arrow::Status::Invalid("kernel context/result must not be null");
   }
@@ -141,22 +130,29 @@ arrow::Status ExecCollatedCompare(arrow::compute::KernelContext* ctx,
     return arrow::Status::Invalid("string compare requires 2 args");
   }
 
-  const auto* state = static_cast<const CollatedCompareState*>(ctx->state());
-  const Collation collation = state != nullptr ? state->collation : CollationFromId(63);
-
-  std::shared_ptr<arrow::Array> lhs_array;
-  std::shared_ptr<arrow::Array> rhs_array;
+  std::shared_ptr<arrow::Array> lhs_any;
+  std::shared_ptr<arrow::Array> rhs_any;
+  const BinaryArrayT* lhs_array = nullptr;
+  const BinaryArrayT* rhs_array = nullptr;
   if (batch[0].is_array()) {
-    lhs_array = arrow::MakeArray(batch[0].array.ToArrayData());
+    lhs_any = arrow::MakeArray(batch[0].array.ToArrayData());
+    lhs_array = lhs_any != nullptr ? static_cast<const BinaryArrayT*>(lhs_any.get()) : nullptr;
   }
   if (batch[1].is_array()) {
-    rhs_array = arrow::MakeArray(batch[1].array.ToArrayData());
+    rhs_any = arrow::MakeArray(batch[1].array.ToArrayData());
+    rhs_array = rhs_any != nullptr ? static_cast<const BinaryArrayT*>(rhs_any.get()) : nullptr;
   }
 
   const auto* lhs_scalar =
       batch[0].is_scalar() ? dynamic_cast<const arrow::BaseBinaryScalar*>(batch[0].scalar) : nullptr;
   const auto* rhs_scalar =
       batch[1].is_scalar() ? dynamic_cast<const arrow::BaseBinaryScalar*>(batch[1].scalar) : nullptr;
+  if (batch[0].is_scalar() && lhs_scalar == nullptr) {
+    return arrow::Status::Invalid("expected binary-like scalar input (lhs)");
+  }
+  if (batch[1].is_scalar() && rhs_scalar == nullptr) {
+    return arrow::Status::Invalid("expected binary-like scalar input (rhs)");
+  }
 
   const int64_t rows = batch.length;
   arrow::BooleanBuilder out_builder(ctx->memory_pool());
@@ -178,19 +174,50 @@ arrow::Status ExecCollatedCompare(arrow::compute::KernelContext* ctx,
     }
 
     const std::string_view lhs_view =
-        lhs_array != nullptr ? GetBinaryViewAt(*lhs_array, i) : lhs_scalar_view;
+        lhs_array != nullptr ? lhs_array->GetView(i) : lhs_scalar_view;
     const std::string_view rhs_view =
-        rhs_array != nullptr ? GetBinaryViewAt(*rhs_array, i) : rhs_scalar_view;
+        rhs_array != nullptr ? rhs_array->GetView(i) : rhs_scalar_view;
 
-    const int cmp = CompareString(collation, lhs_view, rhs_view);
-    ARROW_ASSIGN_OR_RAISE(const bool keep, ApplyCompare(op, cmp));
-    out_builder.UnsafeAppend(keep);
+    const int cmp = CompareString<kind>(lhs_view, rhs_view);
+    out_builder.UnsafeAppend(ApplyCompare<op>(cmp));
   }
 
   std::shared_ptr<arrow::Array> out_array;
   ARROW_RETURN_NOT_OK(out_builder.Finish(&out_array));
   out->value = out_array->data();
   return arrow::Status::OK();
+}
+
+template <CompareOp op, typename BinaryArrayT>
+arrow::Status ExecCollatedCompareDispatchImpl(arrow::compute::KernelContext* ctx,
+                                              const arrow::compute::ExecSpan& batch,
+                                              arrow::compute::ExecResult* out) {
+  const auto* state = static_cast<const CollatedCompareState*>(ctx != nullptr ? ctx->state() : nullptr);
+  const CollationKind collation_kind =
+      state != nullptr ? state->collation.kind : CollationKind::kBinary;
+  switch (collation_kind) {
+    case CollationKind::kBinary:
+      return ExecCollatedCompareImpl<op, CollationKind::kBinary, BinaryArrayT>(ctx, batch, out);
+    case CollationKind::kPaddingBinary:
+      return ExecCollatedCompareImpl<op, CollationKind::kPaddingBinary, BinaryArrayT>(ctx, batch, out);
+    case CollationKind::kUnsupported:
+      break;
+  }
+  return arrow::Status::Invalid("unexpected unsupported collation kind in kernel state");
+}
+
+template <CompareOp op>
+arrow::Status ExecCollatedCompareBinaryLike(arrow::compute::KernelContext* ctx,
+                                            const arrow::compute::ExecSpan& batch,
+                                            arrow::compute::ExecResult* out) {
+  return ExecCollatedCompareDispatchImpl<op, arrow::BinaryArray>(ctx, batch, out);
+}
+
+template <CompareOp op>
+arrow::Status ExecCollatedCompareLargeBinaryLike(arrow::compute::KernelContext* ctx,
+                                                 const arrow::compute::ExecSpan& batch,
+                                                 arrow::compute::ExecResult* out) {
+  return ExecCollatedCompareDispatchImpl<op, arrow::LargeBinaryArray>(ctx, batch, out);
 }
 
 class TiforthCompareMetaFunction final : public arrow::compute::MetaFunction {
@@ -296,22 +323,28 @@ arrow::Status RegisterScalarComparisonFunctions(arrow::compute::FunctionRegistry
 
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
       registry, fallback_registry, "equal", "tiforth.collated_equal",
-      ExecCollatedCompare<CompareOp::kEqual>, ExecCollatedCompare<CompareOp::kEqual>));
+      ExecCollatedCompareBinaryLike<CompareOp::kEqual>,
+      ExecCollatedCompareLargeBinaryLike<CompareOp::kEqual>));
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
       registry, fallback_registry, "not_equal", "tiforth.collated_not_equal",
-      ExecCollatedCompare<CompareOp::kNotEqual>, ExecCollatedCompare<CompareOp::kNotEqual>));
+      ExecCollatedCompareBinaryLike<CompareOp::kNotEqual>,
+      ExecCollatedCompareLargeBinaryLike<CompareOp::kNotEqual>));
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
       registry, fallback_registry, "less", "tiforth.collated_less",
-      ExecCollatedCompare<CompareOp::kLess>, ExecCollatedCompare<CompareOp::kLess>));
+      ExecCollatedCompareBinaryLike<CompareOp::kLess>,
+      ExecCollatedCompareLargeBinaryLike<CompareOp::kLess>));
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
       registry, fallback_registry, "less_equal", "tiforth.collated_less_equal",
-      ExecCollatedCompare<CompareOp::kLessEqual>, ExecCollatedCompare<CompareOp::kLessEqual>));
+      ExecCollatedCompareBinaryLike<CompareOp::kLessEqual>,
+      ExecCollatedCompareLargeBinaryLike<CompareOp::kLessEqual>));
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
       registry, fallback_registry, "greater", "tiforth.collated_greater",
-      ExecCollatedCompare<CompareOp::kGreater>, ExecCollatedCompare<CompareOp::kGreater>));
+      ExecCollatedCompareBinaryLike<CompareOp::kGreater>,
+      ExecCollatedCompareLargeBinaryLike<CompareOp::kGreater>));
   ARROW_RETURN_NOT_OK(RegisterOneCollatedCompare(
       registry, fallback_registry, "greater_equal", "tiforth.collated_greater_equal",
-      ExecCollatedCompare<CompareOp::kGreaterEqual>, ExecCollatedCompare<CompareOp::kGreaterEqual>));
+      ExecCollatedCompareBinaryLike<CompareOp::kGreaterEqual>,
+      ExecCollatedCompareLargeBinaryLike<CompareOp::kGreaterEqual>));
 
   return arrow::Status::OK();
 }
