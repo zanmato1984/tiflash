@@ -1,8 +1,8 @@
 # TiForth Milestone 1: C++ Library Skeleton (Detailed Steps)
 
 - Author(s): TBD
-- Last Updated: 2026-01-14
-- Status: Draft
+- Last Updated: 2026-01-17
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Discussion PR: TBD
 - Tracking Issue: TBD

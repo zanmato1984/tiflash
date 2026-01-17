@@ -1,8 +1,8 @@
 # TiForth Milestone 2: Arrow RecordBatch Plumbing + Pass-Through Pipeline (Detailed Steps)
 
 - Author(s): TBD
-- Last Updated: 2026-01-15
-- Status: Draft
+- Last Updated: 2026-01-17
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-1-skeleton.md`
 - Discussion PR: TBD
@@ -101,4 +101,3 @@ In `libs/tiforth/src/tiforth/`:
 - TiFlash integration:
   - TiFlash config/build with `ENABLE_TIFORTH=ON` succeeds
   - integration smoke test compiles and passes
-

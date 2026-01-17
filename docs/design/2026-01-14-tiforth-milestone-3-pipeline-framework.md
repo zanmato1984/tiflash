@@ -1,8 +1,8 @@
 # TiForth Milestone 3 (Part A): Pipeline Framework Port (TiFlash Shape, Arrow Batches)
 
 - Author(s): TBD
-- Last Updated: 2026-01-16
-- Status: Draft
+- Last Updated: 2026-01-17
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-2-recordbatch-plumbing.md`
 
@@ -108,4 +108,3 @@ The test is a shape/interop validation: it does not attempt to validate TiFlash 
 - TiForth builds + tests pass standalone (`TIFORTH_BUILD_TESTS=ON`).
 - TiFlash `gtests_dbms` builds with `ENABLE_TIFORTH=ON`.
 - New TiFlash translation test passes (guarded by `TIFLASH_ENABLE_TIFORTH`).
-

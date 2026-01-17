@@ -1,8 +1,8 @@
 # TiForth Milestone 6: Hash Join + Sort (Minimal Coverage Plan)
 
 - Author(s): TBD
-- Last Updated: 2026-01-16
-- Status: Draft
+- Last Updated: 2026-01-17
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS2-5 (pipeline/task + expr/projection/filter + hash agg)
 
@@ -109,4 +109,3 @@ TiFlash smoke:
 - `ninja -C libs/tiforth/build-debug` + `ctest --test-dir libs/tiforth/build-debug`
 - `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms`
 - `gtests_dbms --gtest_filter=TiForthPipelineTranslateTest.*`
-

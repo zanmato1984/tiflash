@@ -1,8 +1,8 @@
 # TiForth Milestone 4: Filter + Predicate Expression Evaluation (Plan + Tests)
 
 - Author(s): TBD
-- Last Updated: 2026-01-16
-- Status: Draft
+- Last Updated: 2026-01-17
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: `docs/design/2026-01-14-tiforth-milestone-3-pipeline-framework.md`, `docs/design/2026-01-14-tiforth-milestone-3-projection-scalar-functions.md`
 
@@ -94,4 +94,3 @@ TiFlash integration tests (guarded by `TIFLASH_ENABLE_TIFORTH`):
   - `ninja -C libs/tiforth/build-debug`
   - `ctest --test-dir libs/tiforth/build-debug`
 - TiFlash test(s) added/updated under `TIFLASH_ENABLE_TIFORTH` and pass in a TiFlash build with `ENABLE_TIFORTH=ON`.
-

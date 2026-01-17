@@ -1,8 +1,8 @@
 # TiForth Milestone 5: Hash Aggregation (Common Path) + Minimal Aggregate Functions
 
 - Author(s): TBD
-- Last Updated: 2026-01-16
-- Status: Draft
+- Last Updated: 2026-01-17
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS2-4 (pipeline/task + projection + filter)
 
@@ -118,4 +118,3 @@ TiFlash gtest (guarded by `TIFLASH_ENABLE_TIFORTH`):
 - TiFlash:
   - `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms`
   - `gtests_dbms --gtest_filter=TiForthPipelineTranslateTest.*`
-

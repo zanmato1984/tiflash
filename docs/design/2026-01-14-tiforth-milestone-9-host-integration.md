@@ -1,8 +1,8 @@
 # TiForth Milestone 9: Host Integration Beyond GTests (TiFlash First)
 
 - Author(s): TBD
-- Last Updated: 2026-01-16
-- Status: Draft
+- Last Updated: 2026-01-17
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS1-8 (TiForth pipeline/operators + Arrow type mapping contract + TiFlash Block->Arrow)
 

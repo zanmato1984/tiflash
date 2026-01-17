@@ -2,7 +2,7 @@
 
 - Author(s): TBD
 - Last Updated: 2026-01-17
-- Status: Draft
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS1-7 (pipeline/task framework + basic operators)
 

@@ -1,10 +1,11 @@
 # Work in Progress
 
-- Review overall objectives vs current implementation; if anything missing, break into actionable tasks and add to this list; otherwise derive next quality/readability/testability To Do list.
+- Memory pool propagation: ensure all TiForth operators default to Engine memory pool (esp. `HashJoinTransformOp`, `SortTransformOp`) and add a small test proving non-default pool usage.
 
 # To Do
 
-# (none)
+- Collated string sort perf: precompute per-row sort keys (weight strings) and sort by normalized bytes to avoid repeated UTF-8 decode in comparator; keep stable ordering + semantics; add gtests for padding-bin/general-ci/unicode-ci 0900.
+- Public compiled expr API: expose a stable `tiforth::CompiledExpr` (or similar) so callers can bind once and evaluate across batches/tasks without reaching into `detail/*`; migrate internal operators to use it.
 
 # Completed
 - Core TiForth + TiFlash guarded integration: Arrow-native pipeline framework + operators (Projection/Filter/HashAgg/HashJoin/Sort) plus Block<->Arrow conversion + gtests; functions integrated via Arrow compute registry overlay + MetaFunction overrides; milestone docs kept in `docs/design/2026-01-14-tiforth-milestone-*.md`.
@@ -14,3 +15,5 @@
 - Packed MyTime TiDB scalars: add Arrow scalar funcs `tidbDayOfWeek`/`tidbWeekOfYear`/`yearWeek` for packed MyDate/MyDateTime (UInt64 + `MyTimeOptions`), return null on invalid (month/day zero) and match TiFlash week modes (`week(3)` / `yearWeek(mode=2)`); wire `tiforth::Expr` options for these names; tests (TiForth: `libs/tiforth/tests/tiforth_mytime_temporal_test.cpp`; TiFlash: `dbms/src/Flash/tests/gtest_tiforth_block_runner.cpp`).
 - C ABI follow-ups: refine `tiforth_capi` ownership rules (Arrow C structs treated as moved-in), add ArrowArrayStream input/output helpers, and add negative/misuse tests for error mapping/ownership (`libs/tiforth/include/tiforth_c/tiforth.h`, `libs/tiforth/src/tiforth_capi/tiforth_capi.cc`, `libs/tiforth/tests/tiforth_capi_smoke_test.cpp`).
 - MS10 Expr compilation: remove Arrow `MetaFunction` overrides (can’t bind in Arrow `Expression`), add `tiforth/detail/expr_compiler` to compile `tiforth::Expr` into bound Arrow compute `Expression` with compile-time dispatch (`add`->`tiforth.decimal_add`, `equal/less/...`->`tiforth.collated_*`, packed MyTime hour/minute/second via `tiforth.mytime_*` + options), execute via `ExecuteScalarExpression`, and cache bound expressions in Projection/Filter/HashAgg; updated docs/tests; builds: `ninja -C libs/tiforth/build-debug && ctest`, `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms && gtests_dbms --gtest_filter=TiForth*`. Files: `libs/tiforth/include/tiforth/detail/expr_compiler.h`, `libs/tiforth/src/tiforth/detail/expr_compiler.cc`, `libs/tiforth/src/tiforth/expr.cc`, `libs/tiforth/src/tiforth/operators/{projection,filter,hash_agg}.cc`, `libs/tiforth/src/tiforth/functions/scalar/{arithmetic/add,comparison/collated_compare,temporal/mytime}.cc`, `libs/tiforth/tests/tiforth_decimal_add_test.cpp`, docs in `docs/design/2026-01-14-tiforth-milestone-{3,8,10}-*.md`.
+- Objectives review: current `docs/design/2026-01-14-tiforth.md` milestones (MS1-9 + MS10 follow-up) are implemented for the “common path”; derived next To Do list focused on docs sync, memory-pool propagation, collated sort perf, and a public compiled-expr API. Files: `.codex/progress/daemon.md`.
+- Docs sync: mark MS1-9 milestone docs as implemented, and add MS10 mention to `docs/design/2026-01-14-tiforth.md`. Files: `.codex/progress/daemon.md`, `docs/design/2026-01-14-tiforth.md`, `docs/design/2026-01-14-tiforth-milestone-{1..9}-*.md`. Builds: `ninja -C libs/tiforth/build-debug && ctest`.

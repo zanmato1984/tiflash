@@ -1,8 +1,8 @@
 # TiForth Milestone 7: Memory Pool + Spill Hooks + ABI/Binder Stabilization (Plan)
 
 - Author(s): TBD
-- Last Updated: 2026-01-16
-- Status: Draft
+- Last Updated: 2026-01-17
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS1-6
 
