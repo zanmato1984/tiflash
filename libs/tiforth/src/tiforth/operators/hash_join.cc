@@ -145,6 +145,10 @@ arrow::Status HashJoinTransformOp::BuildIndex() {
         if (collation.kind == CollationKind::kUnsupported) {
           return arrow::Status::NotImplemented("unsupported collation id: ", collation_id);
         }
+        if (collation.kind != CollationKind::kBinary && collation.kind != CollationKind::kPaddingBinary) {
+          return arrow::Status::NotImplemented(
+              "hash join string keys support BINARY and padding BIN collations only: ", collation_id);
+        }
         key_collation_ids_[i] = collation_id;
         key_is_padding_binary_[i] = (collation.kind == CollationKind::kPaddingBinary);
       }

@@ -123,6 +123,91 @@ arrow::Status RunFilterOnBlockWithCollation() {
   return arrow::Status::OK();
 }
 
+arrow::Status RunFilterOnBlockWithMixedCollation() {
+  // Input: s_bin uses BINARY collation, s_pad uses padding BIN collation.
+  auto s_bin_col = ColumnString::create();
+  auto s_pad_col = ColumnString::create();
+
+  const auto append = [&](ColumnString & col, std::string_view v) {
+    col.insertData(v.data(), v.size());
+  };
+
+  append(*s_bin_col, "a ");
+  append(*s_pad_col, "a");
+  append(*s_bin_col, "a");
+  append(*s_pad_col, "a");
+  append(*s_bin_col, "a ");
+  append(*s_pad_col, "a ");
+  append(*s_bin_col, "b");
+  append(*s_pad_col, "b ");
+
+  auto s_type = std::make_shared<DataTypeString>();
+  ColumnsWithTypeAndName cols;
+  cols.emplace_back(std::move(s_bin_col), s_type, "s_bin");
+  cols.emplace_back(std::move(s_pad_col), s_type, "s_pad");
+  Block input(std::move(cols));
+
+  std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+  options_by_name.emplace("s_bin", TiForth::ColumnOptions{.collation_id = 63});  // BINARY
+  options_by_name.emplace("s_pad", TiForth::ColumnOptions{.collation_id = 46});  // UTF8MB4_BIN (PAD SPACE)
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+
+  auto predicate = tiforth::MakeCall("equal", {tiforth::MakeFieldRef("s_bin"), tiforth::MakeFieldRef("s_pad")});
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      [engine_ptr = engine.get(), predicate]() -> arrow::Result<tiforth::TransformOpPtr> {
+        return std::make_unique<tiforth::FilterTransformOp>(engine_ptr, predicate);
+      }));
+
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+
+  ARROW_ASSIGN_OR_RAISE(
+      auto outputs,
+      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input}, options_by_name,
+                                          arrow::default_memory_pool()));
+
+  if (outputs.size() != 1) {
+    return arrow::Status::Invalid("expected exactly 1 output block");
+  }
+  const auto & out = outputs[0];
+  const auto & block = out.block;
+  if (block.columns() != 2 || block.rows() != 2) {
+    return arrow::Status::Invalid("unexpected output block shape");
+  }
+
+  const auto s_bin_it = out.options_by_name.find("s_bin");
+  const auto s_pad_it = out.options_by_name.find("s_pad");
+  if (s_bin_it == out.options_by_name.end() || s_pad_it == out.options_by_name.end()) {
+    return arrow::Status::Invalid("missing string collation options in output");
+  }
+  if (!s_bin_it->second.collation_id.has_value() || !s_pad_it->second.collation_id.has_value()
+      || *s_bin_it->second.collation_id != 63 || *s_pad_it->second.collation_id != 46) {
+    return arrow::Status::Invalid("output collation id mismatch");
+  }
+
+  const auto & s_bin_elem = block.getByName("s_bin");
+  const auto & s_pad_elem = block.getByName("s_pad");
+  const auto * s_bin = typeid_cast<const ColumnString *>(s_bin_elem.column.get());
+  const auto * s_pad = typeid_cast<const ColumnString *>(s_pad_elem.column.get());
+  if (s_bin == nullptr || s_pad == nullptr) {
+    return arrow::Status::Invalid("expected ColumnString output columns");
+  }
+
+  const auto v0_bin = s_bin->getDataAt(0);
+  const auto v0_pad = s_pad->getDataAt(0);
+  const auto v1_bin = s_bin->getDataAt(1);
+  const auto v1_pad = s_pad->getDataAt(1);
+  if (std::string_view(v0_bin.data, v0_bin.size) != "a" || std::string_view(v0_pad.data, v0_pad.size) != "a") {
+    return arrow::Status::Invalid("unexpected row0 output values");
+  }
+  if (std::string_view(v1_bin.data, v1_bin.size) != "a " || std::string_view(v1_pad.data, v1_pad.size) != "a ") {
+    return arrow::Status::Invalid("unexpected row1 output values");
+  }
+
+  return arrow::Status::OK();
+}
+
 arrow::Status RunProjectionDecimalAddOnBlock() {
   // Input: a is Nullable(Decimal(38,2)), b is Nullable(Decimal(38,3)).
   const auto a_nested_type = createDecimal(/*prec=*/38, /*scale=*/2);
@@ -535,6 +620,11 @@ arrow::Status RunTwoKeyHashJoinOnBlocks() {
 
 TEST(TiForthBlockRunnerTest, FilterOnBlockWithCollation) {
   auto status = RunFilterOnBlockWithCollation();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthBlockRunnerTest, FilterMixedStringCollationCoercibility) {
+  auto status = RunFilterOnBlockWithMixedCollation();
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 

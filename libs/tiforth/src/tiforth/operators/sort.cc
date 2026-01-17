@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -117,7 +118,8 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> SortTransformOp::SortAll() {
         idx.push_back(i);
       }
 
-      if (collation.kind == CollationKind::kBinary) {
+      const auto sort_with = [&](auto tag) {
+        constexpr CollationKind kind = decltype(tag)::value;
         std::stable_sort(idx.begin(), idx.end(), [&](uint64_t lhs, uint64_t rhs) -> bool {
           const bool lhs_null = bin->IsNull(static_cast<int64_t>(lhs));
           const bool rhs_null = bin->IsNull(static_cast<int64_t>(rhs));
@@ -129,22 +131,28 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> SortTransformOp::SortAll() {
           }
           const std::string_view lhs_view = bin->GetView(static_cast<int64_t>(lhs));
           const std::string_view rhs_view = bin->GetView(static_cast<int64_t>(rhs));
-          return CompareString<CollationKind::kBinary>(lhs_view, rhs_view) < 0;
+          return CompareString<kind>(lhs_view, rhs_view) < 0;
         });
-      } else {
-        std::stable_sort(idx.begin(), idx.end(), [&](uint64_t lhs, uint64_t rhs) -> bool {
-          const bool lhs_null = bin->IsNull(static_cast<int64_t>(lhs));
-          const bool rhs_null = bin->IsNull(static_cast<int64_t>(rhs));
-          if (lhs_null != rhs_null) {
-            return rhs_null;  // nulls last
-          }
-          if (lhs_null) {
-            return false;
-          }
-          const std::string_view lhs_view = bin->GetView(static_cast<int64_t>(lhs));
-          const std::string_view rhs_view = bin->GetView(static_cast<int64_t>(rhs));
-          return CompareString<CollationKind::kPaddingBinary>(lhs_view, rhs_view) < 0;
-        });
+      };
+
+      switch (collation.kind) {
+        case CollationKind::kBinary:
+          sort_with(std::integral_constant<CollationKind, CollationKind::kBinary>{});
+          break;
+        case CollationKind::kPaddingBinary:
+          sort_with(std::integral_constant<CollationKind, CollationKind::kPaddingBinary>{});
+          break;
+        case CollationKind::kGeneralCi:
+          sort_with(std::integral_constant<CollationKind, CollationKind::kGeneralCi>{});
+          break;
+        case CollationKind::kUnicodeCi0400:
+          sort_with(std::integral_constant<CollationKind, CollationKind::kUnicodeCi0400>{});
+          break;
+        case CollationKind::kUnicodeCi0900:
+          sort_with(std::integral_constant<CollationKind, CollationKind::kUnicodeCi0900>{});
+          break;
+        case CollationKind::kUnsupported:
+          return arrow::Status::NotImplemented("unsupported collation id: ", collation_id);
       }
 
       arrow::UInt64Builder idx_builder(exec_context_.memory_pool());

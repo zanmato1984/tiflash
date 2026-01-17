@@ -227,6 +227,10 @@ arrow::Status HashAggTransformOp::ConsumeBatch(const arrow::RecordBatch& input) 
     if (collation.kind == CollationKind::kUnsupported) {
       return arrow::Status::NotImplemented("unsupported collation id: ", collation_id);
     }
+    if (collation.kind != CollationKind::kBinary && collation.kind != CollationKind::kPaddingBinary) {
+      return arrow::Status::NotImplemented(
+          "hash agg string keys support BINARY and padding BIN collations only: ", collation_id);
+    }
     collations[i] = collation;
   }
 

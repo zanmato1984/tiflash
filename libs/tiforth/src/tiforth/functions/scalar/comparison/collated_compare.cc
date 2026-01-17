@@ -162,14 +162,15 @@ arrow::Status ExecCollatedCompareImpl(arrow::compute::KernelContext* ctx,
   const bool rhs_scalar_valid = rhs_scalar != nullptr && rhs_scalar->is_valid;
   const std::string_view lhs_scalar_view = lhs_scalar_valid ? lhs_scalar->view() : std::string_view{};
   const std::string_view rhs_scalar_view = rhs_scalar_valid ? rhs_scalar->view() : std::string_view{};
+  constexpr bool kTrimScalar =
+      (kind == CollationKind::kPaddingBinary || kind == CollationKind::kGeneralCi ||
+       kind == CollationKind::kUnicodeCi0400);
   const std::string_view lhs_scalar_norm =
-      (lhs_array == nullptr && lhs_scalar_valid && kind == CollationKind::kPaddingBinary)
-          ? RightTrimAsciiSpace(lhs_scalar_view)
-          : lhs_scalar_view;
+      (lhs_array == nullptr && lhs_scalar_valid && kTrimScalar) ? RightTrimAsciiSpace(lhs_scalar_view)
+                                                                : lhs_scalar_view;
   const std::string_view rhs_scalar_norm =
-      (rhs_array == nullptr && rhs_scalar_valid && kind == CollationKind::kPaddingBinary)
-          ? RightTrimAsciiSpace(rhs_scalar_view)
-          : rhs_scalar_view;
+      (rhs_array == nullptr && rhs_scalar_valid && kTrimScalar) ? RightTrimAsciiSpace(rhs_scalar_view)
+                                                                : rhs_scalar_view;
 
   for (int64_t i = 0; i < rows; ++i) {
     const bool lhs_null = lhs_array != nullptr ? lhs_array->IsNull(i) : !lhs_scalar_valid;
@@ -184,16 +185,7 @@ arrow::Status ExecCollatedCompareImpl(arrow::compute::KernelContext* ctx,
     std::string_view rhs_view =
         rhs_array != nullptr ? rhs_array->GetView(i) : rhs_scalar_norm;
 
-    if constexpr (kind == CollationKind::kPaddingBinary) {
-      if (lhs_array != nullptr) {
-        lhs_view = RightTrimAsciiSpace(lhs_view);
-      }
-      if (rhs_array != nullptr) {
-        rhs_view = RightTrimAsciiSpace(rhs_view);
-      }
-    }
-
-    const int cmp = CompareBinary(lhs_view, rhs_view);
+    const int cmp = CompareString<kind>(lhs_view, rhs_view);
     out_builder.UnsafeAppend(ApplyCompare<op>(cmp));
   }
 
@@ -215,6 +207,12 @@ arrow::Status ExecCollatedCompareDispatchImpl(arrow::compute::KernelContext* ctx
       return ExecCollatedCompareImpl<op, CollationKind::kBinary, BinaryArrayT>(ctx, batch, out);
     case CollationKind::kPaddingBinary:
       return ExecCollatedCompareImpl<op, CollationKind::kPaddingBinary, BinaryArrayT>(ctx, batch, out);
+    case CollationKind::kGeneralCi:
+      return ExecCollatedCompareImpl<op, CollationKind::kGeneralCi, BinaryArrayT>(ctx, batch, out);
+    case CollationKind::kUnicodeCi0400:
+      return ExecCollatedCompareImpl<op, CollationKind::kUnicodeCi0400, BinaryArrayT>(ctx, batch, out);
+    case CollationKind::kUnicodeCi0900:
+      return ExecCollatedCompareImpl<op, CollationKind::kUnicodeCi0900, BinaryArrayT>(ctx, batch, out);
     case CollationKind::kUnsupported:
       break;
   }

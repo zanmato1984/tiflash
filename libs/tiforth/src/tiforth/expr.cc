@@ -16,6 +16,7 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 
+#include "tiforth/collation.h"
 #include "tiforth/detail/arrow_compute.h"
 #include "tiforth/engine.h"
 #include "tiforth/functions/scalar/comparison/collated_compare.h"
@@ -62,18 +63,58 @@ struct TypedValue {
 };
 
 arrow::Result<int32_t> ResolveStringCollationId(const std::vector<TypedValue>& args) {
-  std::optional<int32_t> collation_id;
+  const auto canonical_id_for_kind = [](CollationKind kind) -> int32_t {
+    switch (kind) {
+      case CollationKind::kBinary:
+        return 63;
+      case CollationKind::kPaddingBinary:
+        return 46;
+      case CollationKind::kGeneralCi:
+        return 33;
+      case CollationKind::kUnicodeCi0400:
+        return 192;
+      case CollationKind::kUnicodeCi0900:
+        return 255;
+      case CollationKind::kUnsupported:
+        break;
+    }
+    return 63;
+  };
+
+  std::optional<CollationKind> resolved_kind;
   for (const auto& arg : args) {
     if (arg.logical_type.id != LogicalTypeId::kString) {
       continue;
     }
     const int32_t id = arg.logical_type.collation_id >= 0 ? arg.logical_type.collation_id : 63;
-    if (collation_id.has_value() && *collation_id != id) {
-      return arrow::Status::NotImplemented("collation mismatch: ", *collation_id, " vs ", id);
+    const auto collation = CollationFromId(id);
+    if (collation.kind == CollationKind::kUnsupported) {
+      return arrow::Status::NotImplemented("unsupported collation id: ", id);
     }
-    collation_id = id;
+
+    if (!resolved_kind.has_value()) {
+      resolved_kind = collation.kind;
+      continue;
+    }
+
+    if (collation.kind == *resolved_kind) {
+      continue;
+    }
+
+    // Minimal coercion (common path): mixing BINARY and padding-BIN should fall back to BINARY
+    // semantics (no trailing-space trimming).
+    const bool binary_mix =
+        (collation.kind == CollationKind::kBinary && *resolved_kind == CollationKind::kPaddingBinary) ||
+        (collation.kind == CollationKind::kPaddingBinary && *resolved_kind == CollationKind::kBinary);
+    if (binary_mix) {
+      resolved_kind = CollationKind::kBinary;
+      continue;
+    }
+
+    return arrow::Status::NotImplemented("collation mismatch in call");
   }
-  return collation_id.value_or(63);
+
+  return canonical_id_for_kind(resolved_kind.value_or(CollationKind::kBinary));
 }
 
 bool IsCollatedCompareFunction(std::string_view name) {
