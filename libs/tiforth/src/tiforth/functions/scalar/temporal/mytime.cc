@@ -138,6 +138,137 @@ int64_t ExtractMicroSecond(uint64_t packed) {
   return static_cast<int64_t>(packed & ((uint64_t{1} << 24) - 1));
 }
 
+// The following date/weekday/week-number algorithms are ports of TiFlash's
+// `Common/MyTime.cpp` (which in turn follows TiDB behavior). Keep these helpers
+// TiForth-local to avoid any TiFlash symbol dependencies.
+
+constexpr uint32_t kWeekBehaviorMondayFirst = 1;
+constexpr uint32_t kWeekBehaviorYear = 2;
+constexpr uint32_t kWeekBehaviorFirstWeekday = 4;
+
+int CalcDayNum(int year, int month, int day) {
+  // the implementation is the same as TiDB
+  if (year == 0 && month == 0) {
+    return 0;
+  }
+  int delsum = 365 * year + 31 * (month - 1) + day;
+  if (month <= 2) {
+    year--;
+  } else {
+    delsum -= (month * 4 + 23) / 10;
+  }
+  int temp = ((year / 100 + 1) * 3) / 4;
+  return delsum + year / 4 - temp;
+}
+
+int WeekDay(int year, int month, int day) {
+  const int current_abs_day_num = CalcDayNum(year, month, day);
+  // 1986-01-05 is sunday
+  const int reference_abs_day_num = CalcDayNum(1986, 1, 5);
+  int diff = current_abs_day_num - reference_abs_day_num;
+  if (diff < 0) {
+    diff += (-diff / 7 + 1) * 7;
+  }
+  diff = diff % 7;
+  return diff;
+}
+
+uint8_t ExtractDayOfWeek(uint64_t packed) {
+  return static_cast<uint8_t>(
+      WeekDay(ExtractYear(packed), ExtractMonth(packed), ExtractDayOfMonth(packed)) + 1);
+}
+
+uint32_t AdjustWeekMode(uint32_t mode) {
+  mode &= 7u;
+  if (!(mode & kWeekBehaviorMondayFirst)) {
+    mode ^= kWeekBehaviorFirstWeekday;
+  }
+  return mode;
+}
+
+// calcWeekday calculates weekday from daynr, returns 0 for Monday, 1 for Tuesday ...
+int CalcWeekday(int day_num, bool sunday_first_day_of_week) {
+  // the implementation is the same as TiDB
+  day_num += 5;
+  if (sunday_first_day_of_week) {
+    day_num++;
+  }
+  return day_num % 7;
+}
+
+int CalcDaysInYear(int year) {
+  // the implementation is the same as TiDB
+  if ((year & 3u) == 0 && (year % 100 != 0 || (year % 400 == 0 && (year != 0)))) {
+    return 366;
+  }
+  return 365;
+}
+
+std::pair<int, int> CalcWeek(int year, int month, int day, uint32_t mode) {
+  int days = 0;
+  int ret_year = year;
+  int ret_week = 0;
+  int day_num = CalcDayNum(year, month, day);
+  int first_day_num = CalcDayNum(year, 1, 1);
+  bool monday_first = mode & kWeekBehaviorMondayFirst;
+  bool week_year = mode & kWeekBehaviorYear;
+  bool first_week_day = mode & kWeekBehaviorFirstWeekday;
+
+  int week_day = CalcWeekday(first_day_num, !monday_first);
+
+  if (month == 1 && day <= 7 - week_day) {
+    if (!week_year && ((first_week_day && week_day != 0) || (!first_week_day && week_day >= 4))) {
+      ret_week = 0;
+      return {ret_year, ret_week};
+    }
+    week_year = true;
+    ret_year--;
+    days = CalcDaysInYear(ret_year);
+    first_day_num -= days;
+    week_day = (week_day + 53 * 7 - days) % 7;
+  }
+
+  if ((first_week_day && week_day != 0) || (!first_week_day && week_day >= 4)) {
+    days = day_num - (first_day_num + 7 - week_day);
+  } else {
+    days = day_num - (first_day_num - week_day);
+  }
+
+  if (week_year && days >= 52 * 7) {
+    week_day = (week_day + CalcDaysInYear(ret_year)) % 7;
+    if ((!first_week_day && week_day < 4) || (first_week_day && week_day == 0)) {
+      ret_year++;
+      ret_week = 1;
+      return {ret_year, ret_week};
+    }
+  }
+  ret_week = days / 7 + 1;
+  return {ret_year, ret_week};
+}
+
+uint8_t ExtractWeek(uint64_t packed, uint32_t mode) {
+  const auto month = ExtractMonth(packed);
+  const auto day = ExtractDayOfMonth(packed);
+  if (month == 0 || day == 0) {
+    return 0;
+  }
+  const auto adjusted = AdjustWeekMode(mode);
+  const auto [week_year, week] = CalcWeek(ExtractYear(packed), month, day, adjusted);
+  (void)week_year;
+  return static_cast<uint8_t>(week);
+}
+
+uint32_t ExtractYearWeek(uint64_t packed, uint32_t mode) {
+  const auto month = ExtractMonth(packed);
+  const auto day = ExtractDayOfMonth(packed);
+  if (month == 0 || day == 0) {
+    return 0;
+  }
+  const auto adjusted = AdjustWeekMode(mode);
+  const auto [week_year, week] = CalcWeek(ExtractYear(packed), month, day, adjusted);
+  return static_cast<uint32_t>(week_year * 100 + week);
+}
+
 template <typename BuilderT, typename OutputT, typename Fn>
 arrow::Status ExecPackedUnary(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch,
                               arrow::compute::ExecResult* out, Fn&& fn) {
@@ -201,6 +332,24 @@ arrow::Status ExecToMyDate(arrow::compute::KernelContext* ctx, const arrow::comp
                            arrow::compute::ExecResult* out) {
   const auto mask_fn = [](uint64_t packed) -> uint64_t { return packed & kYmdMask; };
   return ExecPackedUnary<arrow::UInt64Builder, uint64_t>(ctx, batch, out, mask_fn);
+}
+
+arrow::Status ExecToDayOfWeek(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch,
+                              arrow::compute::ExecResult* out) {
+  return ExecPackedUnary<arrow::UInt8Builder, uint8_t>(ctx, batch, out, ExtractDayOfWeek);
+}
+
+arrow::Status ExecToWeek(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch,
+                         arrow::compute::ExecResult* out) {
+  const auto fn = [](uint64_t packed) -> uint8_t { return ExtractWeek(packed, /*mode=*/0); };
+  return ExecPackedUnary<arrow::UInt8Builder, uint8_t>(ctx, batch, out, fn);
+}
+
+arrow::Status ExecToYearWeek(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch,
+                             arrow::compute::ExecResult* out) {
+  // TiDB/MySQL YEARWEEK semantics: use mode=2 (week number in range 1-53) by default.
+  const auto fn = [](uint64_t packed) -> uint32_t { return ExtractYearWeek(packed, /*mode=*/2); };
+  return ExecPackedUnary<arrow::UInt32Builder, uint32_t>(ctx, batch, out, fn);
 }
 
 arrow::Status ExecHour(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch,
@@ -313,6 +462,24 @@ arrow::Status RegisterScalarTemporalFunctions(arrow::compute::FunctionRegistry* 
     auto func = std::make_shared<arrow::compute::ScalarFunction>(
         "toMyDate", arrow::compute::Arity::Unary(), arrow::compute::FunctionDoc::Empty());
     ARROW_RETURN_NOT_OK(func->AddKernel(MakePackedKernel(arrow::uint64(), ExecToMyDate)));
+    ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(func), /*allow_overwrite=*/true));
+  }
+  {
+    auto func = std::make_shared<arrow::compute::ScalarFunction>(
+        "toDayOfWeek", arrow::compute::Arity::Unary(), arrow::compute::FunctionDoc::Empty());
+    ARROW_RETURN_NOT_OK(func->AddKernel(MakePackedKernel(arrow::uint8(), ExecToDayOfWeek)));
+    ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(func), /*allow_overwrite=*/true));
+  }
+  {
+    auto func = std::make_shared<arrow::compute::ScalarFunction>(
+        "toWeek", arrow::compute::Arity::Unary(), arrow::compute::FunctionDoc::Empty());
+    ARROW_RETURN_NOT_OK(func->AddKernel(MakePackedKernel(arrow::uint8(), ExecToWeek)));
+    ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(func), /*allow_overwrite=*/true));
+  }
+  {
+    auto func = std::make_shared<arrow::compute::ScalarFunction>(
+        "toYearWeek", arrow::compute::Arity::Unary(), arrow::compute::FunctionDoc::Empty());
+    ARROW_RETURN_NOT_OK(func->AddKernel(MakePackedKernel(arrow::uint32(), ExecToYearWeek)));
     ARROW_RETURN_NOT_OK(registry->AddFunction(std::move(func), /*allow_overwrite=*/true));
   }
 

@@ -124,7 +124,8 @@ bool IsCollatedCompareFunction(std::string_view name) {
 
 bool IsMyTimeFunction(std::string_view name) {
   return name == "toYear" || name == "toMonth" || name == "toDayOfMonth" || name == "toMyDate" ||
-         name == "hour" || name == "minute" || name == "second" || name == "microSecond";
+         name == "toDayOfWeek" || name == "toWeek" || name == "toYearWeek" || name == "hour" ||
+         name == "minute" || name == "second" || name == "microSecond";
 }
 
 arrow::Result<std::unique_ptr<arrow::compute::FunctionOptions>> MaybeMakeCallOptions(

@@ -81,6 +81,9 @@ arrow::Status RunPackedMyTimeExtractSmoke() {
   exprs.push_back({"year", MakeCall("toYear", {MakeFieldRef("t")})});
   exprs.push_back({"month", MakeCall("toMonth", {MakeFieldRef("t")})});
   exprs.push_back({"day", MakeCall("toDayOfMonth", {MakeFieldRef("t")})});
+  exprs.push_back({"dow", MakeCall("toDayOfWeek", {MakeFieldRef("t")})});
+  exprs.push_back({"week", MakeCall("toWeek", {MakeFieldRef("t")})});
+  exprs.push_back({"yearweek", MakeCall("toYearWeek", {MakeFieldRef("t")})});
   exprs.push_back({"hour", MakeCall("hour", {MakeFieldRef("t")})});
   exprs.push_back({"minute", MakeCall("minute", {MakeFieldRef("t")})});
   exprs.push_back({"second", MakeCall("second", {MakeFieldRef("t")})});
@@ -90,7 +93,7 @@ arrow::Status RunPackedMyTimeExtractSmoke() {
                    MakeCall("toYear", {MakeCall("toMyDate", {MakeFieldRef("t")})})});
 
   ARROW_ASSIGN_OR_RAISE(auto out, RunProjection(std::move(input), std::move(exprs)));
-  if (out->num_columns() != 9 || out->num_rows() != 3) {
+  if (out->num_columns() != 12 || out->num_rows() != 3) {
     return arrow::Status::Invalid("unexpected output shape");
   }
 
@@ -122,11 +125,38 @@ arrow::Status RunPackedMyTimeExtractSmoke() {
     }
   }
   {
+    arrow::UInt8Builder builder;
+    ARROW_RETURN_NOT_OK(builder.AppendValues({3, 6, 7}));
+    std::shared_ptr<arrow::Array> expect;
+    ARROW_RETURN_NOT_OK(builder.Finish(&expect));
+    if (!expect->Equals(*out->column(3))) {
+      return arrow::Status::Invalid("toDayOfWeek mismatch");
+    }
+  }
+  {
+    arrow::UInt8Builder builder;
+    ARROW_RETURN_NOT_OK(builder.AppendValues({0, 52, 0}));
+    std::shared_ptr<arrow::Array> expect;
+    ARROW_RETURN_NOT_OK(builder.Finish(&expect));
+    if (!expect->Equals(*out->column(4))) {
+      return arrow::Status::Invalid("toWeek mismatch");
+    }
+  }
+  {
+    arrow::UInt32Builder builder;
+    ARROW_RETURN_NOT_OK(builder.AppendValues({202353, 199952, 0}));
+    std::shared_ptr<arrow::Array> expect;
+    ARROW_RETURN_NOT_OK(builder.Finish(&expect));
+    if (!expect->Equals(*out->column(5))) {
+      return arrow::Status::Invalid("toYearWeek mismatch");
+    }
+  }
+  {
     arrow::Int64Builder builder;
     ARROW_RETURN_NOT_OK(builder.AppendValues({3, 23, 0}));
     std::shared_ptr<arrow::Array> expect;
     ARROW_RETURN_NOT_OK(builder.Finish(&expect));
-    if (!expect->Equals(*out->column(3))) {
+    if (!expect->Equals(*out->column(6))) {
       return arrow::Status::Invalid("hour mismatch");
     }
   }
@@ -135,7 +165,7 @@ arrow::Status RunPackedMyTimeExtractSmoke() {
     ARROW_RETURN_NOT_OK(builder.AppendValues({4, 59, 0}));
     std::shared_ptr<arrow::Array> expect;
     ARROW_RETURN_NOT_OK(builder.Finish(&expect));
-    if (!expect->Equals(*out->column(4))) {
+    if (!expect->Equals(*out->column(7))) {
       return arrow::Status::Invalid("minute mismatch");
     }
   }
@@ -144,7 +174,7 @@ arrow::Status RunPackedMyTimeExtractSmoke() {
     ARROW_RETURN_NOT_OK(builder.AppendValues({5, 58, 0}));
     std::shared_ptr<arrow::Array> expect;
     ARROW_RETURN_NOT_OK(builder.Finish(&expect));
-    if (!expect->Equals(*out->column(5))) {
+    if (!expect->Equals(*out->column(8))) {
       return arrow::Status::Invalid("second mismatch");
     }
   }
@@ -153,7 +183,7 @@ arrow::Status RunPackedMyTimeExtractSmoke() {
     ARROW_RETURN_NOT_OK(builder.AppendValues({6, 123456, 0}));
     std::shared_ptr<arrow::Array> expect;
     ARROW_RETURN_NOT_OK(builder.Finish(&expect));
-    if (!expect->Equals(*out->column(6))) {
+    if (!expect->Equals(*out->column(9))) {
       return arrow::Status::Invalid("microSecond mismatch");
     }
   }
@@ -165,11 +195,11 @@ arrow::Status RunPackedMyTimeExtractSmoke() {
     ARROW_RETURN_NOT_OK(builder.Append(dt2 & ymd_mask));
     std::shared_ptr<arrow::Array> expect;
     ARROW_RETURN_NOT_OK(builder.Finish(&expect));
-    if (!expect->Equals(*out->column(7))) {
+    if (!expect->Equals(*out->column(10))) {
       return arrow::Status::Invalid("toMyDate mismatch");
     }
 
-    ARROW_ASSIGN_OR_RAISE(const auto logical_type, GetLogicalType(*out->schema()->field(7)));
+    ARROW_ASSIGN_OR_RAISE(const auto logical_type, GetLogicalType(*out->schema()->field(10)));
     if (logical_type.id != LogicalTypeId::kMyDate) {
       return arrow::Status::Invalid("toMyDate output logical type mismatch");
     }
@@ -179,7 +209,7 @@ arrow::Status RunPackedMyTimeExtractSmoke() {
     ARROW_RETURN_NOT_OK(builder.AppendValues({2024, 1999, 0}));
     std::shared_ptr<arrow::Array> expect;
     ARROW_RETURN_NOT_OK(builder.Finish(&expect));
-    if (!expect->Equals(*out->column(8))) {
+    if (!expect->Equals(*out->column(11))) {
       return arrow::Status::Invalid("nested toYear(toMyDate) mismatch");
     }
   }
@@ -195,4 +225,3 @@ TEST(TiForthMyTimeTest, PackedExtract) {
 }
 
 }  // namespace tiforth
-
