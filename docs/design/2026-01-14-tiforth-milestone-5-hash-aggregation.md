@@ -1,8 +1,8 @@
 # TiForth Milestone 5: Hash Aggregation (Common Path) + Minimal Aggregate Functions
 
 - Author(s): TBD
-- Last Updated: 2026-01-18
-- Status: Implemented
+- Last Updated: 2026-01-19
+- Status: Implemented (common path + arena-backed key hash table)
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS2-4 (pipeline/task + projection + filter)
 
@@ -51,6 +51,8 @@ Follow-up milestone:
 
 - TiFlash “true pipeline breaker” form (AggregationBuild sink + AggregationConvergent source in distinct pipelines) is
   planned in `docs/design/2026-01-14-tiforth-milestone-11-pipeline-breaker-hash-aggregation.md`.
+- TiFlash/ClickHouse-style hash table + arena key storage refactor is documented in
+  `docs/design/2026-01-14-tiforth-milestone-5-hash-aggregation-hash-table.md`.
 
 ## Proposed Public API
 
@@ -85,7 +87,7 @@ Notes:
 
 Maintain:
 
-- `std::unordered_map<NormalizedKey, uint32_t> key_to_group_id_`
+- a TiFlash-shaped open-addressing hash table mapping normalized group keys to `group_id`
 - `std::vector<OutputKey> group_keys_` (index by group id, preserves insertion order)
 - per-aggregate state vectors (index by group id):
   - `count_all : std::vector<uint64_t>`
@@ -95,20 +97,22 @@ Maintain:
 
 Key representation:
 
-- `NormalizedKey` stores a small fixed array of key parts (up to 8) used for hashing/equality:
+- normalized group keys are encoded into a byte slice (arena-owned) for hashing/equality:
   - numeric keys: widened to `int64_t` / `uint64_t`
   - float keys: store canonicalized IEEE bits in `uint64_t`
   - decimal keys: store raw bytes (`Decimal128`/`Decimal256`)
-  - string keys: store collation sort key in a `std::pmr::string`
-- `OutputKey` stores the first-seen raw key values for output materialization (e.g. original strings).
+  - string keys: store collation sort key bytes (arena-owned) with length prefixing
+- `OutputKey` stores the first-seen raw key values for output materialization (e.g. original strings); output key values
+  are stored only on group insertion (lookup-before-copy).
 
 ### 2) Batch consumption
 
 - Lazily compile key/arg expressions on the first input batch.
 - Evaluate key/arg expressions to arrays per batch.
 - Iterate rows:
-  - build `NormalizedKey` / `OutputKey`
-  - find/insert group id
+  - encode normalized key bytes into a scratch buffer + compute hash
+  - probe `KeyHashTable` (lookup-before-copy)
+  - on miss: materialize `OutputKey` (first-seen raw key) and insert a new group id
   - update aggregate state:
     - `count_all`: +1
     - `count`: +1 if arg non-null
