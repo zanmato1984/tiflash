@@ -1,8 +1,8 @@
 # TiForth Milestone 6: Hash Join + Sort (Minimal Coverage Plan)
 
 - Author(s): TBD
-- Last Updated: 2026-01-17
-- Status: Implemented
+- Last Updated: 2026-01-18
+- Status: Implemented (hash join key table now uses arena + open addressing)
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS2-5 (pipeline/task + expr/projection/filter + hash agg)
 
@@ -22,7 +22,8 @@ This milestone intentionally prioritizes a small, testable surface over full TiF
   - uses Arrow `RecordBatch` input/output
 - `HashJoinTransformOp` (minimal):
   - inner join only
-  - single int32 join key
+  - 1-2 join keys
+  - key types: `int32`, `uint64`, `decimal128/decimal256` (fixed-size binary), `binary` (collations via sort-key)
   - probe side is the pipeline input stream
   - build side is provided as a pre-materialized set of Arrow batches at operator construction time (keeps MS6 compatible with the current single-input pipeline framework)
 - Add unit tests for both operators.
@@ -32,7 +33,7 @@ This milestone intentionally prioritizes a small, testable surface over full TiF
 
 - Multi-input pipeline scheduling (real join build/probe pipelines).
 - Outer/semi/anti joins.
-- Multiple join keys / complex key types / join filters.
+- Join filters / non-equality joins.
 - Spill / partitioned hash join.
 - Full TiFlash ordering/collation semantics.
 
@@ -48,13 +49,13 @@ MS6 restriction: exactly one key, `ascending=true`, `nulls_first=false`.
 
 ### Hash Join (minimal single-input form)
 
-- `struct JoinKey { std::string left; std::string right; }`
+- `struct JoinKey { std::vector<std::string> left; std::vector<std::string> right; }`
 - `class HashJoinTransformOp final : public TransformOp`
-  - `HashJoinTransformOp(std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches, JoinKey key)`
+  - `HashJoinTransformOp(const Engine* engine, std::vector<std::shared_ptr<arrow::RecordBatch>> build_batches, JoinKey key, arrow::MemoryPool* pool = nullptr)`
 
 MS6 restriction:
 
-- key type must be int32 on both sides
+- 1-2 keys only; key types limited to the set above
 - output schema = left fields + right fields (name conflicts deferred)
 
 ## Operator Semantics / State Machines
@@ -84,10 +85,12 @@ MS6 restriction:
   - `Take` each column with the computed indices
 - Output as one `RecordBatch`.
 
-### 2) Hash join (minimal int32 key)
+### 2) Hash join (minimal common path)
 
 - Build side:
-  - materialize a map `key -> vector<row_index>` (or key -> vector of row ids)
+  - concatenate build batches once (`build_combined_`) for stable row ids
+  - build an arena-backed, open-addressing hash table mapping normalized key bytes -> `key_id`
+  - maintain `key_id -> build row list` (stable order) for duplicates
   - store build columns for output materialization
 - Probe:
   - for each probe row, lookup key and emit joined rows (nested loop over matches)

@@ -74,7 +74,7 @@ if (ENABLE_TIFORTH)
             set(TIFLASH_TIFORTH_GIT_REPOSITORY "https://github.com/zanmato1984/tiforth.git"
                 CACHE STRING "TiForth git repository used when no in-tree TiForth source is present")
             # Keep this pinned; update when bumping the TiForth dependency.
-            set(TIFLASH_TIFORTH_GIT_TAG "ff5da889ef440d521aca7b253d58c7b3ee2958da"
+            set(TIFLASH_TIFORTH_GIT_TAG "3a8428aab8bff7aa03edfa707b40497bc5952472"
                 CACHE STRING "TiForth git tag/sha used when no in-tree TiForth source is present")
             FetchContent_Declare(tiforth
                 GIT_REPOSITORY "${TIFLASH_TIFORTH_GIT_REPOSITORY}"
