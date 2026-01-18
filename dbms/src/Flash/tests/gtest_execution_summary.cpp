@@ -57,10 +57,11 @@ public:
 
 #define WRAP_FOR_EXCUTION_SUMMARY_TEST_BEGIN                                      \
     std::vector<DAGRequestType> type{DAGRequestType::tree, DAGRequestType::list}; \
-    std::vector<bool> pipeline_bools{false, true};                                \
-    for (auto enable_pipeline : pipeline_bools)                                   \
-    {                                                                             \
-        enablePipeline(enable_pipeline);                                          \
+    for (auto executor_mode                                                                                                          \
+         : {ExecutorTest::ExecutorMode::Dag, ExecutorTest::ExecutorMode::Pipeline, ExecutorTest::ExecutorMode::TiForth})             \
+    {                                                                                                                                \
+        enablePipeline(executor_mode);                                                                                                \
+        [[maybe_unused]] const bool enable_pipeline = (executor_mode == ExecutorTest::ExecutorMode::Pipeline);                       \
         for (const auto t : type)                                                 \
         {
 #define WRAP_FOR_EXCUTION_SUMMARY_TEST_END \

@@ -3128,9 +3128,10 @@ try
     for (size_t i = 0; i < block_sizes.size(); ++i)
     {
         context.context->setSetting("max_block_size", Field(static_cast<UInt64>(block_sizes[i])));
-        for (auto enable_pipeline : {false, true})
+        for (auto executor_mode
+             : {ExecutorTest::ExecutorMode::Dag, ExecutorTest::ExecutorMode::Pipeline, ExecutorTest::ExecutorMode::TiForth})
         {
-            enablePipeline(enable_pipeline);
+            enablePipeline(executor_mode);
             auto blocks = getExecuteStreamsReturnBlocks(request);
             ASSERT_EQ(expect[i].size(), blocks.size());
             for (size_t j = 0; j < blocks.size(); ++j)
@@ -3228,9 +3229,10 @@ try
         for (size_t i = 0; i < block_sizes.size(); ++i)
         {
             context.context->setSetting("max_block_size", Field(static_cast<UInt64>(block_sizes[i])));
-            for (auto enable_pipeline : {false, true})
+            for (auto executor_mode
+                 : {ExecutorTest::ExecutorMode::Dag, ExecutorTest::ExecutorMode::Pipeline, ExecutorTest::ExecutorMode::TiForth})
             {
-                enablePipeline(enable_pipeline);
+                enablePipeline(executor_mode);
                 auto blocks = getExecuteStreamsReturnBlocks(request);
                 ASSERT_EQ(expect[i].size(), blocks.size());
                 for (size_t j = 0; j < blocks.size(); ++j)

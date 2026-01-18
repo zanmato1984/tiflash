@@ -36,11 +36,12 @@ public:
     }
 };
 
-#define WRAP_FOR_SPILL_TEST_BEGIN                  \
-    std::vector<bool> pipeline_bools{false, true}; \
-    for (auto enable_pipeline : pipeline_bools)    \
-    {                                              \
-        enablePipeline(enable_pipeline);
+#define WRAP_FOR_SPILL_TEST_BEGIN                                                                                                    \
+    for (auto executor_mode                                                                                                          \
+         : {ExecutorTest::ExecutorMode::Dag, ExecutorTest::ExecutorMode::Pipeline, ExecutorTest::ExecutorMode::TiForth})             \
+    {                                                                                                                                \
+        enablePipeline(executor_mode);                                                                                                \
+        [[maybe_unused]] const bool enable_pipeline = (executor_mode == ExecutorTest::ExecutorMode::Pipeline);
 
 #define WRAP_FOR_SPILL_TEST_END }
 

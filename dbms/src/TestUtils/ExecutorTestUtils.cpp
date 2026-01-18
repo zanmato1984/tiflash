@@ -154,7 +154,7 @@ namespace
 {
 String testInfoMsg(
     const std::shared_ptr<tipb::DAGRequest> & request,
-    bool enable_pipeline,
+    ExecutorTest::ExecutorMode executor_mode,
     size_t concurrency,
     size_t block_size)
 {
@@ -166,7 +166,7 @@ String testInfoMsg(
         "    line: {}\n"
         "    test_case_name: {}\n"
         "    test_func_name: {}\n"
-        "    enable_pipeline: {}\n"
+        "    executor_mode: {}\n"
         "    concurrency: {}\n"
         "    block_size: {}\n"
         "    dag_request: \n{}",
@@ -174,10 +174,19 @@ String testInfoMsg(
         test_info->line(),
         test_info->test_case_name(),
         test_info->name(),
-        enable_pipeline,
+        ExecutorTest::toString(executor_mode),
         concurrency,
         block_size,
         ExecutorSerializer().serialize(request.get()));
+}
+
+ExecutorTest::ExecutorMode inferExecutorMode(const Settings & settings)
+{
+    if (settings.enable_tiforth_executor)
+        return ExecutorTest::ExecutorMode::TiForth;
+    if (settings.enable_resource_control)
+        return ExecutorTest::ExecutorMode::Pipeline;
+    return ExecutorTest::ExecutorMode::Dag;
 }
 } // namespace
 
@@ -195,7 +204,7 @@ void ExecutorTest::executeExecutor(
             auto res = executeStreams(request, concurrency);
             ASSERT_TRUE(assert_func(res)) << testInfoMsg(
                 request,
-                context.context->getSettingsRef().enable_resource_control,
+                inferExecutorMode(context.context->getSettingsRef()),
                 concurrency,
                 block_size);
         }
@@ -229,11 +238,11 @@ void ExecutorTest::checkBlockSorted(
 
                 for (auto & block : return_blocks)
                     ASSERT_TRUE(isAlreadySorted(block, sort_desc))
-                        << testInfoMsg(request, enable_pipeline, concurrency, block_size);
+                        << testInfoMsg(request, executor_mode, concurrency, block_size);
 
                 auto res = vstackBlocks(std::move(return_blocks)).getColumnsWithTypeAndName();
                 ASSERT_TRUE(assert_func(expected_res, res))
-                    << testInfoMsg(request, enable_pipeline, concurrency, block_size);
+                    << testInfoMsg(request, executor_mode, concurrency, block_size);
             }
         };
     }
@@ -304,9 +313,28 @@ DB::ColumnsWithTypeAndName readBlocks(std::vector<BlockInputStreamPtr> streams)
     return vstackBlocks(std::move(actual_blocks)).getColumnsWithTypeAndName();
 }
 
+void ExecutorTest::enablePipeline(ExecutorMode mode) const
+{
+    switch (mode)
+    {
+    case ExecutorMode::Dag:
+        context.context->setSetting("enable_resource_control", "false");
+        context.context->setSetting("enable_tiforth_executor", "false");
+        return;
+    case ExecutorMode::Pipeline:
+        context.context->setSetting("enable_resource_control", "true");
+        context.context->setSetting("enable_tiforth_executor", "false");
+        return;
+    case ExecutorMode::TiForth:
+        context.context->setSetting("enable_resource_control", "false");
+        context.context->setSetting("enable_tiforth_executor", "true");
+        return;
+    }
+}
+
 void ExecutorTest::enablePipeline(bool is_enable) const
 {
-    context.context->setSetting("enable_resource_control", is_enable ? "true" : "false");
+    enablePipeline(is_enable ? ExecutorMode::Pipeline : ExecutorMode::Dag);
 }
 
 // ywq todo rename
@@ -365,26 +393,26 @@ void ExecutorTest::testForExecutionSummary(
     statistics_collector.setLocalRUConsumption(
         RUConsumption{.cpu_ru = 0.0, .cpu_time_ns = 0, .read_ru = 0.0, .read_bytes = 0});
     auto summaries = statistics_collector.genExecutionSummaryResponse().execution_summaries();
-    bool enable_pipeline = context.context->getSettingsRef().enable_resource_control;
+    const auto executor_mode = inferExecutorMode(context.context->getSettingsRef());
     ASSERT_EQ(summaries.size(), expect.size())
         << "\n"
-        << testInfoMsg(request, enable_pipeline, concurrency, DEFAULT_BLOCK_SIZE);
+        << testInfoMsg(request, executor_mode, concurrency, DEFAULT_BLOCK_SIZE);
     for (const auto & summary : summaries)
     {
         ASSERT_TRUE(summary.has_executor_id())
             << "\n"
-            << testInfoMsg(request, enable_pipeline, concurrency, DEFAULT_BLOCK_SIZE);
+            << testInfoMsg(request, executor_mode, concurrency, DEFAULT_BLOCK_SIZE);
         auto it = expect.find(summary.executor_id());
         ASSERT_TRUE(it != expect.end()) << fmt::format("unknown executor_id: {}", summary.executor_id()) << "\n"
-                                        << testInfoMsg(request, enable_pipeline, concurrency, DEFAULT_BLOCK_SIZE);
+                                        << testInfoMsg(request, executor_mode, concurrency, DEFAULT_BLOCK_SIZE);
         if (it->second.first != not_check_rows)
             ASSERT_EQ(summary.num_produced_rows(), it->second.first)
                 << fmt::format("executor_id: {}", summary.executor_id()) << "\n"
-                << testInfoMsg(request, enable_pipeline, concurrency, DEFAULT_BLOCK_SIZE);
+                << testInfoMsg(request, executor_mode, concurrency, DEFAULT_BLOCK_SIZE);
         if (it->second.second != not_check_concurrency)
             ASSERT_EQ(summary.concurrency(), it->second.second)
                 << fmt::format("executor_id: {}", summary.executor_id()) << "\n"
-                << testInfoMsg(request, enable_pipeline, concurrency, DEFAULT_BLOCK_SIZE);
+                << testInfoMsg(request, executor_mode, concurrency, DEFAULT_BLOCK_SIZE);
 
         // Normally, `summary.time_processed_ns` should always be less than or equal to the execution time of the `executeStream`.
         // However, sometimes the check fails in CI.

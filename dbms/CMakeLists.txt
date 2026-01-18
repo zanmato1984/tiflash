@@ -352,6 +352,10 @@ if (ENABLE_TESTS)
     target_compile_definitions(dbms PUBLIC MULTIPLE_CONTEXT_GTEST)
 
     target_link_libraries(gtests_dbms test_util_gtest_main tiflash_functions tiflash-dttool-lib delta_merge kvstore)
+    if (ENABLE_TIFORTH)
+        target_compile_definitions(gtests_dbms PUBLIC TIFLASH_ENABLE_TIFORTH=1)
+        target_link_libraries(gtests_dbms tiforth::tiforth)
+    endif ()
 
     install (TARGETS gtests_dbms
             COMPONENT tiflash-gtest
