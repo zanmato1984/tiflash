@@ -113,6 +113,15 @@ Semantics to preserve (carry over from MS5 common path):
 - output column ordering: aggregate outputs first, then group keys
 - key normalization rules (float canonicalization, collated string sort-key normalization, decimals raw bytes)
 
+### 3) Adopt TiFlash `OperatorStatus` for true pipeline mirroring
+
+TiFlash’s pipeline model relies on a richer `OperatorStatus` surface than the common-path
+`NeedInput/HasOutput/Finished` subset (e.g. IO/wait states for spill/restore and network I/O).
+
+To mirror TiFlash’s “true pipeline breaker” form and to support host-provided I/O operators (storage/RPC), TiForth should
+adopt TiFlash `OperatorStatus` (or a 1:1 mapping) and plumb it through TiForth’s task execution states so the host
+scheduler can route work between CPU/IO/wait appropriately.
+
 ## Work Items / Tasks (for a dedicated agent)
 
 ### A) Pipeline framework: multi-pipeline + breaker dependency
@@ -124,10 +133,13 @@ Semantics to preserve (carry over from MS5 common path):
 2. Extend the internal execution engine to run pipeline stages in dependency order
    - minimal: two stages (build then convergent), single concurrency
    - later: N build drivers + M convergent drivers (mirror TiFlash `PipelineExecGroup`/concurrency)
-3. Add a generic “breaker state” ownership model
+3. Adopt TiFlash `OperatorStatus` (or a 1:1 mapping) in TiForth
+   - extend operator/task state machine beyond the common-path subset (IO/wait states)
+   - define task-level mapping for the host scheduler (CPU/IO/wait routing)
+4. Add a generic “breaker state” ownership model
    - state must outlive both stages
    - state must be attached to the task instance (not global/static)
-4. Add unit tests in TiForth for stage transitions and EOS semantics
+5. Add unit tests in TiForth for stage transitions and EOS semantics
    - build stage consumes all input and produces no output
    - convergent stage produces output after build completes
 
@@ -161,4 +173,3 @@ Semantics to preserve (carry over from MS5 common path):
 
 - TiForth: `cmake --build /Users/zanmato/dev/tiforth/build-debug && ctest --test-dir /Users/zanmato/dev/tiforth/build-debug`
 - TiFlash: `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms && cmake-build-tiflash-tiforth-debug/dbms/gtests_dbms --gtest_filter='TiForthFilterAggParityTestRunner.*'`
-

@@ -54,6 +54,11 @@ Expose an operator-level status enum similar to TiFlash:
 - `kHasOutput`: operator produced a batch (via out-parameter)
 - `kFinished`: end-of-stream reached
 
+Note: TiFlash `OperatorStatus` includes additional states used by the full pipeline scheduler (e.g. IO and waiting).
+TiForth’s common path starts with the minimal subset above; when implementing true pipeline breakers and host-provided I/O
+operators (storage/RPC), TiForth should adopt TiFlash’s full status surface (or a 1:1 mapping). See MS11:
+`docs/design/2026-01-14-tiforth-milestone-11-pipeline-breaker-hash-aggregation.md`.
+
 ### Operator interfaces
 
 Define Arrow equivalents of TiFlash operator interfaces:
