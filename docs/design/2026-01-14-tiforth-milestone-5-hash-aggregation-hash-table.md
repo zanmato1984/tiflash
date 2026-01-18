@@ -10,7 +10,7 @@
 TiForth MS5 hash aggregation is correct and parity-tested, but the core GROUP BY keying path is still “prototype-grade”:
 
 - uses `std::unordered_map<NormalizedKey, group_id>` (node-based, poor locality)
-- stores string keys as owning `std::pmr::string` inside the key object
+- stores string output keys as owning bytes (initially `std::pmr::string`; now stored as arena slices `detail::ByteSlice`)
 - builds both `NormalizedKey` and `OutputKey` *per input row*, even when the group already exists, which causes:
   - per-row string copies (raw key + sort key) for collated string group keys
   - unnecessary allocations/constructors and increased CPU/memory overhead
@@ -94,7 +94,7 @@ This captures TiFlash’s core advantages (no per-entry heap allocations; locali
 
 Per input row:
 
-1. Encode normalized key bytes into a scratch buffer (stack/`std::string`/`BufferBuilder`).
+1. Encode normalized key bytes into a reusable Arrow-pool-backed scratch buffer (`detail::ScratchBytes`).
 2. Probe the hash table using the scratch pointer/size (no allocations).
 3. If found: use the existing `group_id`.
 4. If not found:
@@ -128,3 +128,9 @@ Status (2026-01-19): implemented in tiforth commit `147d4be` (arena-backed key s
 
 - The same arena + key table can be reused by hash join build side (and other operators with keying).
 - If/when TiForth adopts a more complete TiFlash aggregate function framework, group key handling can stay as-is and only the per-group aggregate state layout changes.
+
+Update (2026-01-19): follow-up landed in TiForth commits `bea93b3` + `7db1f7a`:
+
+- scratch key encoding switched from `std::string` to Arrow-pool-backed `detail::ScratchBytes`
+- output `binary` group keys are stored as arena slices (`detail::ByteSlice`) instead of owning `std::pmr::string`
+- added `KeyHashTable` stress tests (rehash + collision-heavy probing)
