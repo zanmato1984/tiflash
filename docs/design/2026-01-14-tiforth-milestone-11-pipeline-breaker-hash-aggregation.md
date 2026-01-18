@@ -2,7 +2,7 @@
 
 - Author(s): TBD
 - Last Updated: 2026-01-18
-- Status: Planned
+- Status: In progress (A implemented; B-D pending)
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS3 (pipeline framework common path), MS5 (hash agg common path)
 
@@ -142,6 +142,8 @@ scheduler can route work between CPU/IO/wait appropriately.
 5. Add unit tests in TiForth for stage transitions and EOS semantics
    - build stage consumes all input and produces no output
    - convergent stage produces output after build completes
+
+Status (2026-01-18): A is implemented in tiforth repo commit `39c3a04` (Plan + full OperatorStatus surface + plan breaker gtest).
 
 ### B) HashAgg refactor: context + build sink + convergent source
 
