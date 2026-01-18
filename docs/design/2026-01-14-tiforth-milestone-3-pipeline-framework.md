@@ -39,6 +39,11 @@ This milestone is intentionally about **core abstractions + integration shape**,
 - No multi-source or multi-sink DAG execution (single linear chain only).
 - No real TiFlash operator semantics (Projection/Filter/etc deferred to later milestones).
 
+Follow-up milestone:
+
+- True pipeline-breaker support (multi-pipeline DAG + dependency edges) is planned in
+  `docs/design/2026-01-14-tiforth-milestone-11-pipeline-breaker-hash-aggregation.md`.
+
 ## Public API (TiForth)
 
 ### Operator status

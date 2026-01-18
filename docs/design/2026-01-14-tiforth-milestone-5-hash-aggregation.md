@@ -47,6 +47,11 @@ Implement the first blocking operator:
 - Full TiFlash aggregate function set (avg, stddev, bitmap/hll, approx distinct, ...).
 - Memory spill / external aggregation.
 
+Follow-up milestone:
+
+- TiFlash “true pipeline breaker” form (AggregationBuild sink + AggregationConvergent source in distinct pipelines) is
+  planned in `docs/design/2026-01-14-tiforth-milestone-11-pipeline-breaker-hash-aggregation.md`.
+
 ## Proposed Public API
 
 Add a new operator and simple plan structs:
