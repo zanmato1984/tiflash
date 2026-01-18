@@ -1,8 +1,8 @@
 # TiForth Milestone 3 (Part B): Projection + Minimal Scalar Functions (Detailed Steps)
 
 - Author(s): TBD
-- Last Updated: 2026-01-17
-- Status: Implemented
+- Last Updated: 2026-01-18
+- Status: Implemented (extended arithmetic coverage)
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-3-pipeline-framework.md`
 
@@ -55,9 +55,16 @@ Expose a projection list type:
 
 ### Minimal scalar function set
 
-Start with a small set of functions implemented by delegating to Arrow compute:
+Start with a small set of functions implemented by delegating to Arrow compute, plus a small set
+of TiForth custom kernels to preserve TiFlash/TiDB semantics for tricky types:
 
-- numeric: `add` (and potentially `subtract`, `multiply` as follow-ups)
+- numeric (common path via Arrow compute): `add`, `subtract`, `multiply`, `divide`
+- numeric (TiForth custom kernels + compile-time rewrite when any argument is a decimal logical type):
+  - `tiforth.decimal_add` / `tiforth.decimal_subtract`
+  - `tiforth.decimal_multiply`
+  - `tiforth.decimal_divide` (TiFlash decimal inference + truncation)
+  - `tiforth.decimal_tidb_divide` (TiDB rounding + div-by-zero => NULL)
+  - `tiforth.decimal_modulo` (div-by-zero => NULL)
 - boolean: (optional) `and`, `not` (if Arrow compute mappings are straightforward)
 
 The function set is intentionally tiny for Milestone 3B; it expands in later milestones.
@@ -72,6 +79,8 @@ own `tiforth::Expr` IR into an Arrow compute `Expression`, and does **compile-ti
 
 - rewrite calls like `add/equal/hour` into `tiforth.decimal_add`, `tiforth.collated_equal`,
   `tiforth.mytime_hour` when inputs require TiFlash/TiDB semantics,
+- rewrite calls like `subtract/multiply/divide/tidbDivide/modulo` into the corresponding
+  `tiforth.decimal_*` kernels when at least one argument is a decimal logical type,
 - attach `FunctionOptions` (collation id / packed-MyTime type) derived from Arrow field metadata,
 - bind once (`Expression::Bind`) and execute via `ExecuteScalarExpression`.
 
@@ -115,6 +124,13 @@ Add TiForth gtests validating:
 - column selection projection (reorder + duplicate fields)
 - computed projection using `add` on int32 (and literal broadcast)
 - schema stability across multiple batches
+
+Add arithmetic-focused tests:
+
+- TiForth gtests for decimal arithmetic inference + semantics (mixed decimal/int inputs, overflow,
+  div-by-zero semantics for `tidbDivide` / `modulo`, rounding parity).
+- TiFlash differential gtests: run the same expressions via TiFlash `executeFunction(...)` and via
+  TiForth Projection/Expr on Arrow batches and assert identical types + values (including errors vs NULL).
 
 ## Validation / Definition of Done
 
