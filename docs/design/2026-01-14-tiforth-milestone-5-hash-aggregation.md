@@ -1,7 +1,7 @@
 # TiForth Milestone 5: Hash Aggregation (Common Path) + Minimal Aggregate Functions
 
 - Author(s): TBD
-- Last Updated: 2026-01-17
+- Last Updated: 2026-01-18
 - Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS2-4 (pipeline/task + projection + filter)
@@ -11,28 +11,41 @@
 Implement the first blocking operator:
 
 - hash aggregation (GROUP BY) as a `tiforth::TransformOp` on Arrow `RecordBatch`
-- only the most common/smallest supported path (single input, no partial merge, no spill)
-- a minimal aggregate function set (initially `count_all`, `sum_int32`)
+- common path only (single input, no partial merge, no spill)
+- a minimal-but-useful aggregate function set:
+  - `count_all` (COUNT(*))
+  - `count` (COUNT(arg), skip NULLs)
+  - `sum` (nullable output; signed/unsigned tracked)
+  - `min` / `max` (nullable output; skip NULLs)
 
 ## Goals
 
 - `HashAggTransformOp` consumes input batches and produces exactly one output `RecordBatch` at end-of-stream.
-- Support:
-  - single group key (int32, nullable)
-  - aggregate functions:
-    - `count_all` (COUNT(*))
-    - `sum` over int32 input (skip nulls; emit null if no non-null inputs in a group)
+- GROUP BY keys:
+  - up to 8 keys (nullable)
+  - supported key array types:
+    - integers (signed/unsigned), bool
+    - float/double keys normalized for hashing/equality:
+      - `-0.0` and `0.0` treated equal
+      - NaNs canonicalized for grouping
+    - `Decimal128` / `Decimal256` (raw bytes)
+    - binary strings (`arrow::binary`) with TiDB collations via sort-key normalization (padding + CI + no-pad)
+- Aggregate functions:
+  - `count_all`: always non-null `UInt64`
+  - `count`: always non-null `UInt64`
+  - `sum`: nullable `Int64` / `UInt64` depending on arg signedness (skip NULLs; emit NULL if no non-null inputs)
+  - `min` / `max`: nullable, same logical type as arg (skip NULLs; emit NULL if no non-null inputs)
 - Deterministic output order (stable group id assignment based on first appearance).
-- Unit tests covering multi-batch accumulation.
-- One TiFlash translation smoke (guarded by `TIFLASH_ENABLE_TIFORTH`) mapping a TiFlash DAG shape into a TiForth hash-agg pipeline (hardcoded config for now).
+- Output column order: aggregate outputs first, then group key columns.
+- Unit tests covering multi-batch accumulation, multi-key grouping, and collated string grouping.
+- TiFlash↔TiForth parity tests for common Filter+Agg pipelines.
 
 ## Non-goals
 
 - Partial aggregation / merge / multi-stage aggregation.
 - Distinct aggregates.
-- Multiple group keys / complex key types.
+- Full TiFlash aggregate function set (avg, stddev, bitmap/hll, approx distinct, ...).
 - Memory spill / external aggregation.
-- Full TiFlash semantics parity (type coercions, decimals, collations).
 
 ## Proposed Public API
 
@@ -40,15 +53,15 @@ Add a new operator and simple plan structs:
 
 - `struct AggKey { std::string name; ExprPtr expr; }`
 - `struct AggFunc { std::string name; std::string func; ExprPtr arg; }`
-  - `func` initially supports: `count_all`, `sum_int32`
+  - `func` supports: `count_all`, `count`, `sum`, `min`, `max` (some aliases accepted)
   - `arg` is unused for `count_all`
 - `class HashAggTransformOp final : public TransformOp`
-  - `explicit HashAggTransformOp(std::vector<AggKey> keys, std::vector<AggFunc> aggs)`
+  - `HashAggTransformOp(const Engine* engine, std::vector<AggKey> keys, std::vector<AggFunc> aggs, arrow::MemoryPool* pool = nullptr)`
 
 Notes:
 
 - `ExprPtr` reuse keeps TiForth independent from TiFlash expression types.
-- MS5 only requires `FieldRef` expressions (no nested compute) for keys/args.
+- MS5 common path assumes keys/args evaluate to arrays (scalar broadcasts are handled in expression execution helpers).
 
 ## Operator Semantics / State Machine
 
@@ -63,52 +76,61 @@ Notes:
 
 ## Implementation Plan
 
-### 1) Core data structures (minimal types)
+### 1) Core data structures
 
 Maintain:
 
-- `std::unordered_map<Key, uint32_t> key_to_group_id_`
-- `std::vector<Key> group_keys_` (index by group id, preserves insertion order)
+- `std::unordered_map<NormalizedKey, uint32_t> key_to_group_id_`
+- `std::vector<OutputKey> group_keys_` (index by group id, preserves insertion order)
 - per-aggregate state vectors (index by group id):
-  - `count_all_ : std::vector<uint64_t>`
-  - `sum_i64_ : std::vector<int64_t>`
-  - `sum_has_value_ : std::vector<bool>` (to emit null when all inputs are null)
+  - `count_all : std::vector<uint64_t>`
+  - `count : std::vector<uint64_t>`
+  - `sum_i64 / sum_u64 + sum_has_value`
+  - `extreme_out / extreme_norm` for `min`/`max`
 
 Key representation:
 
-- MS5 supports nullable int32:
-  - `struct Key { bool is_null; int32_t value; }` with custom hash/eq
+- `NormalizedKey` stores a small fixed array of key parts (up to 8) used for hashing/equality:
+  - numeric keys: widened to `int64_t` / `uint64_t`
+  - float keys: store canonicalized IEEE bits in `uint64_t`
+  - decimal keys: store raw bytes (`Decimal128`/`Decimal256`)
+  - string keys: store collation sort key in a `std::pmr::string`
+- `OutputKey` stores the first-seen raw key values for output materialization (e.g. original strings).
 
 ### 2) Batch consumption
 
-- Evaluate key/arg expressions to arrays (MS5: require `int32` arrays).
+- Lazily compile key/arg expressions on the first input batch.
+- Evaluate key/arg expressions to arrays per batch.
 - Iterate rows:
-  - find/insert group id for key
-  - update `count_all_`
-  - update `sum_*` for non-null arg values
+  - build `NormalizedKey` / `OutputKey`
+  - find/insert group id
+  - update aggregate state:
+    - `count_all`: +1
+    - `count`: +1 if arg non-null
+    - `sum`: add value if arg non-null (track `sum_has_value`)
+    - `min`/`max`: compare normalized value, keep output value
 
 ### 3) Finalize output
 
-- Build output arrays using Arrow builders:
-  - key column(s): `arrow::Int32Builder` (+ nulls)
-  - `count_all`: `arrow::UInt64Builder`
-  - `sum_int32`: `arrow::Int64Builder` (+ nulls based on `sum_has_value_`)
+- Build output arrays using Arrow builders (with nullability rules above).
 - Output schema:
+  - aggregate columns first, then key columns
+  - preserve key/arg field metadata when keys/args are `FieldRef` expressions (collation + logical type)
   - cache `output_schema_` for stable shared schema across outputs
 
 ### 4) Tests
 
 TiForth gtests:
 
-- multi-batch input with repeated/new keys, validate counts/sums
-- null key handling (NULL group)
-- sum null behavior (all-null group -> output null)
+- multi-batch input with repeated/new keys, validate `count`/`sum`/`min`/`max`
+- multi-key grouping
+- collated string keys (padding BIN, general CI, 0900 no-pad)
 
-TiFlash gtest (guarded by `TIFLASH_ENABLE_TIFORTH`):
+TiFlash gtests (guarded by `TIFLASH_ENABLE_TIFORTH`):
 
-- construct a TiFlash-shaped DAG containing a dummy “agg” transform
-- translate into a TiForth pipeline using TiForth APIs only (hardcoded config)
-- run TiForth pipeline on Arrow input and validate output
+- parity tests comparing TiFlash execution vs TiForth `HashAggTransformOp` outputs on the same mock tables:
+  - `Filter` + `HashAgg` common pipelines
+  - multi-key + collated string group keys
 
 ## Definition of Done
 
@@ -117,4 +139,4 @@ TiFlash gtest (guarded by `TIFLASH_ENABLE_TIFORTH`):
   - `ctest --test-dir libs/tiforth/build-debug`
 - TiFlash:
   - `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms`
-  - `gtests_dbms --gtest_filter=TiForthPipelineTranslateTest.*`
+  - `gtests_dbms --gtest_filter=TiForthFilterAggParityTestRunner.*`

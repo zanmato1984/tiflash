@@ -43,7 +43,8 @@ arrow::Result<std::vector<BlockConversionResult>> RunTiForthPipelineOnBlocks(
     const tiforth::Pipeline & pipeline,
     const std::vector<Block> & input_blocks,
     const std::unordered_map<String, ColumnOptions> & input_options_by_name,
-    arrow::MemoryPool * pool)
+    arrow::MemoryPool * pool,
+    const Block * sample_block)
 {
     ARROW_RETURN_NOT_OK(ensurePool(pool));
 
@@ -52,9 +53,18 @@ arrow::Result<std::vector<BlockConversionResult>> RunTiForthPipelineOnBlocks(
         return arrow::Status::Invalid("task must not be null");
 
     std::vector<std::shared_ptr<arrow::RecordBatch>> input_batches;
-    input_batches.reserve(input_blocks.size());
+    input_batches.reserve(input_blocks.size() + ((input_blocks.empty() && sample_block != nullptr) ? 1 : 0));
 
     std::shared_ptr<arrow::Schema> schema;
+    if (input_blocks.empty() && sample_block != nullptr)
+    {
+        ARROW_ASSIGN_OR_RAISE(auto batch, toArrowRecordBatch(*sample_block, input_options_by_name, pool));
+        if (batch == nullptr)
+            return arrow::Status::Invalid("converted arrow batch must not be null");
+        schema = batch->schema();
+        input_batches.push_back(std::move(batch));
+    }
+
     for (const auto & block : input_blocks)
     {
         ARROW_ASSIGN_OR_RAISE(auto batch, toArrowRecordBatch(block, input_options_by_name, pool));

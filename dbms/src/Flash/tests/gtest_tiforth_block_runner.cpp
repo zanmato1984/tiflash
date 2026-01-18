@@ -552,7 +552,7 @@ arrow::Status RunTwoKeyHashAggOnBlocks() {
                                        {"k2", tiforth::MakeFieldRef("k2")}};
   std::vector<tiforth::AggFunc> aggs;
   aggs.push_back({"cnt", "count_all", nullptr});
-  aggs.push_back({"sum_v", "sum_int32", tiforth::MakeFieldRef("v")});
+  aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
   ARROW_RETURN_NOT_OK(builder->AppendTransform([engine_ptr = engine.get(), keys,
                                                 aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
@@ -580,22 +580,12 @@ arrow::Status RunTwoKeyHashAggOnBlocks() {
     return arrow::Status::Invalid("hash agg output collation id mismatch");
   }
 
-  const auto& s_out = block.getByPosition(0).column;
-  const auto* s_str = typeid_cast<const ColumnString*>(s_out.get());
-  if (s_str == nullptr) {
-    return arrow::Status::Invalid("expected ColumnString for group key s");
-  }
-  const auto& k2_out = block.getByPosition(1).column;
-  const auto* k2_i32 = typeid_cast<const ColumnInt32*>(k2_out.get());
-  if (k2_i32 == nullptr) {
-    return arrow::Status::Invalid("expected ColumnInt32 for group key k2");
-  }
-  const auto& cnt_out = block.getByPosition(2).column;
+  const auto& cnt_out = block.getByPosition(0).column;
   const auto* cnt_u64 = typeid_cast<const ColumnUInt64*>(cnt_out.get());
   if (cnt_u64 == nullptr) {
     return arrow::Status::Invalid("expected ColumnUInt64 for count");
   }
-  const auto& sum_out = block.getByPosition(3).column;
+  const auto& sum_out = block.getByPosition(1).column;
   const auto* sum_nullable = typeid_cast<const ColumnNullable*>(sum_out.get());
   if (sum_nullable == nullptr) {
     return arrow::Status::Invalid("expected nullable sum column");
@@ -603,6 +593,16 @@ arrow::Status RunTwoKeyHashAggOnBlocks() {
   const auto* sum_i64 = typeid_cast<const ColumnInt64*>(&sum_nullable->getNestedColumn());
   if (sum_i64 == nullptr) {
     return arrow::Status::Invalid("expected nested ColumnInt64 for sum");
+  }
+  const auto& s_out = block.getByPosition(2).column;
+  const auto* s_str = typeid_cast<const ColumnString*>(s_out.get());
+  if (s_str == nullptr) {
+    return arrow::Status::Invalid("expected ColumnString for group key s");
+  }
+  const auto& k2_out = block.getByPosition(3).column;
+  const auto* k2_i32 = typeid_cast<const ColumnInt32*>(k2_out.get());
+  if (k2_i32 == nullptr) {
+    return arrow::Status::Invalid("expected ColumnInt32 for group key k2");
   }
 
   // Output order is first-seen groups: ("a",1), ("a ",2), ("b",1).
@@ -666,7 +666,7 @@ arrow::Status RunGeneralCiHashAggOnBlocks() {
   std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef("s")}};
   std::vector<tiforth::AggFunc> aggs;
   aggs.push_back({"cnt", "count_all", nullptr});
-  aggs.push_back({"sum_v", "sum_int32", tiforth::MakeFieldRef("v")});
+  aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
   ARROW_RETURN_NOT_OK(builder->AppendTransform([engine_ptr = engine.get(), keys,
                                                 aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
@@ -693,9 +693,9 @@ arrow::Status RunGeneralCiHashAggOnBlocks() {
     return arrow::Status::Invalid("hash agg output collation id mismatch");
   }
 
-  const auto* s_out = typeid_cast<const ColumnString*>(block.getByPosition(0).column.get());
-  const auto* cnt_out = typeid_cast<const ColumnUInt64*>(block.getByPosition(1).column.get());
-  const auto* sum_nullable = typeid_cast<const ColumnNullable*>(block.getByPosition(2).column.get());
+  const auto* cnt_out = typeid_cast<const ColumnUInt64*>(block.getByPosition(0).column.get());
+  const auto* sum_nullable = typeid_cast<const ColumnNullable*>(block.getByPosition(1).column.get());
+  const auto* s_out = typeid_cast<const ColumnString*>(block.getByPosition(2).column.get());
   if (s_out == nullptr || cnt_out == nullptr || sum_nullable == nullptr) {
     return arrow::Status::Invalid("unexpected hash agg output column types");
   }

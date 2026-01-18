@@ -120,7 +120,7 @@ ExecutionResult TiForthQueryExecutor::execute(ResultHandler && result_handler)
         input_stream->readSuffix();
 
         auto outputs_res
-            = RunTiForthPipelineOnBlocks(*pipeline, input_blocks, input_options_by_name, engine->memory_pool());
+            = RunTiForthPipelineOnBlocks(*pipeline, input_blocks, input_options_by_name, engine->memory_pool(), &sample_block);
         if (!outputs_res.ok())
             throw Exception(outputs_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
         auto outputs = std::move(outputs_res).ValueOrDie();

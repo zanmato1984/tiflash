@@ -1,7 +1,7 @@
 # TiForth Milestone 4: Filter + Predicate Expression Evaluation (Plan + Tests)
 
 - Author(s): TBD
-- Last Updated: 2026-01-17
+- Last Updated: 2026-01-18
 - Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: `docs/design/2026-01-14-tiforth-milestone-3-pipeline-framework.md`, `docs/design/2026-01-14-tiforth-milestone-3-projection-scalar-functions.md`
@@ -20,6 +20,11 @@ This milestone adds the first predicate-driven operator:
   - input: `arrow::RecordBatch` (or end-of-stream marker `nullptr`)
   - output: filtered `arrow::RecordBatch` with the same schema as input
   - SQL WHERE semantics: keep rows where predicate is `TRUE`; drop rows where predicate is `FALSE` or `NULL`
+- Support TiDB "truthy" predicates (TiFlash `convertBool` behavior):
+  - if predicate does not evaluate to `bool`, coerce to boolean via MySQL-style truthiness:
+    - numeric: `value != 0`
+    - string/binary: parse as number (invalid => 0), then `value != 0`
+    - `NULL` remains `NULL` (dropped by WHERE)
 - Extend expression evaluation enough to build typical TiFlash filter predicates:
   - comparisons (e.g. `equal`, `less`, `less_equal`, `greater`, `greater_equal`)
   - boolean ops with 3-valued logic (`and_kleene`, `or_kleene`, `invert`)
@@ -46,7 +51,8 @@ No changes to the existing `tiforth::Expr` IR are required in the common path; `
 - Input batches use the pipeline end-of-stream marker convention:
   - `nullptr` means EOS; `FilterTransformOp` must forward it and return `OperatorStatus::kHasOutput`.
 - Predicate evaluation result:
-  - must produce boolean values (scalar or array); scalars broadcast to `batch.num_rows()`.
+  - may produce boolean values (scalar or array); scalars broadcast to `batch.num_rows()`.
+  - if non-boolean: coerce to boolean using "truthy" rules above.
   - `NULL` in predicate is treated as “row not selected” (SQL WHERE). Implement by using Arrow `FilterOptions::NullSelectionBehavior::DROP`.
 
 ## Implementation Plan

@@ -202,11 +202,22 @@ void AggregationBinder::buildAggFunc(tipb::Expr * agg_func, const ASTFunction * 
     auto agg_sig = agg_sig_it->second;
     agg_func->set_tp(agg_sig);
 
-    if (agg_sig == tipb::ExprType::Count || agg_sig == tipb::ExprType::Sum)
+    if (agg_sig == tipb::ExprType::Count)
     {
         auto * ft = agg_func->mutable_field_type();
         ft->set_tp(TiDB::TypeLongLong);
         ft->set_flag(TiDB::ColumnFlagUnsigned | TiDB::ColumnFlagNotNull);
+    }
+    else if (agg_sig == tipb::ExprType::Sum)
+    {
+        if (agg_func->children_size() != 1)
+            throw Exception(fmt::format("Agg function({}) only accept 1 argument", func->name));
+
+        const auto & child_ft = agg_func->children(0).field_type();
+        auto * ft = agg_func->mutable_field_type();
+        ft->set_tp(TiDB::TypeLongLong);
+        // Preserve unsigned; always clear not-null for SUM.
+        ft->set_flag((child_ft.flag() & TiDB::ColumnFlagUnsigned) & (~TiDB::ColumnFlagNotNull));
     }
     else if (agg_sig == tipb::ExprType::Min || agg_sig == tipb::ExprType::Max || agg_sig == tipb::ExprType::First)
     {
@@ -274,9 +285,15 @@ ExecutorBinderPtr compileAggregation(
                 ci.tp = TiDB::TypeLongLong;
                 ci.flag = TiDB::ColumnFlagUnsigned | TiDB::ColumnFlagNotNull;
             }
-            else if (
-                func->name == "max" || func->name == "min" || func->name == "first_row" || func->name == "sum"
-                || func->name == "avg")
+            else if (func->name == "sum")
+            {
+                if (children_ci.size() != 1)
+                    throw Exception(fmt::format("Agg function({}) only accept 1 argument", func->name));
+
+                ci.tp = TiDB::TypeLongLong;
+                ci.flag = children_ci[0].flag & TiDB::ColumnFlagUnsigned;
+            }
+            else if (func->name == "max" || func->name == "min" || func->name == "first_row" || func->name == "avg")
             {
                 ci = children_ci[0];
                 ci.flag &= ~TiDB::ColumnFlagNotNull;

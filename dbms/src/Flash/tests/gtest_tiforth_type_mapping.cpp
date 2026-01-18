@@ -188,7 +188,7 @@ arrow::Status RunTypeMappingAndOps() {
     std::shared_ptr<arrow::Array> cnt_expect;
     ARROW_RETURN_NOT_OK(cnt_builder.Finish(&cnt_expect));
 
-    if (!key_expect->Equals(*out->column(0)) || !cnt_expect->Equals(*out->column(1))) {
+    if (!cnt_expect->Equals(*out->column(0)) || !key_expect->Equals(*out->column(1))) {
       return arrow::Status::Invalid("unexpected string hash agg values");
     }
   }
@@ -224,7 +224,7 @@ arrow::Status RunTypeMappingAndOps() {
     std::shared_ptr<arrow::Array> cnt_expect;
     ARROW_RETURN_NOT_OK(cnt_builder.Finish(&cnt_expect));
 
-    if (!key_expect->Equals(*out->column(0)) || !cnt_expect->Equals(*out->column(1))) {
+    if (!cnt_expect->Equals(*out->column(0)) || !key_expect->Equals(*out->column(1))) {
       return arrow::Status::Invalid("unexpected decimal hash agg values");
     }
   }
@@ -262,7 +262,7 @@ arrow::Status RunTypeMappingAndOps() {
     std::shared_ptr<arrow::Array> cnt_expect;
     ARROW_RETURN_NOT_OK(cnt_builder.Finish(&cnt_expect));
 
-    if (!key_expect->Equals(*out->column(0)) || !cnt_expect->Equals(*out->column(1))) {
+    if (!cnt_expect->Equals(*out->column(0)) || !key_expect->Equals(*out->column(1))) {
       return arrow::Status::Invalid("unexpected datetime hash agg values");
     }
   }

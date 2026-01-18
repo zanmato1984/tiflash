@@ -268,7 +268,7 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag, cons
       std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
       std::vector<tiforth::AggFunc> aggs;
       aggs.push_back({"cnt", "count_all", nullptr});
-      aggs.push_back({"sum_v", "sum_int32", tiforth::MakeFieldRef("v")});
+      aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
       ARROW_RETURN_NOT_OK(builder->AppendTransform(
           [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
             return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
@@ -462,8 +462,8 @@ arrow::Status RunHashAggTranslationSmoke() {
   if (out->num_columns() != 3 || out->num_rows() != 5) {
     return arrow::Status::Invalid("unexpected output shape");
   }
-  if (out->schema()->field(0)->name() != "k" || out->schema()->field(1)->name() != "cnt" ||
-      out->schema()->field(2)->name() != "sum_v") {
+  if (out->schema()->field(0)->name() != "cnt" || out->schema()->field(1)->name() != "sum_v" ||
+      out->schema()->field(2)->name() != "k") {
     return arrow::Status::Invalid("unexpected output schema");
   }
 
@@ -490,8 +490,8 @@ arrow::Status RunHashAggTranslationSmoke() {
   std::shared_ptr<arrow::Array> sum_expect;
   ARROW_RETURN_NOT_OK(sum_expect_builder.Finish(&sum_expect));
 
-  if (!k_expect->Equals(*out->column(0)) || !cnt_expect->Equals(*out->column(1)) ||
-      !sum_expect->Equals(*out->column(2))) {
+  if (!cnt_expect->Equals(*out->column(0)) || !sum_expect->Equals(*out->column(1)) ||
+      !k_expect->Equals(*out->column(2))) {
     return arrow::Status::Invalid("unexpected output values");
   }
 

@@ -37,7 +37,8 @@ arrow::Result<std::vector<BlockConversionResult>> RunTiForthPipelineOnBlocks(
     const tiforth::Pipeline & pipeline,
     const std::vector<Block> & input_blocks,
     const std::unordered_map<String, ColumnOptions> & input_options_by_name,
-    arrow::MemoryPool * pool);
+    arrow::MemoryPool * pool,
+    const Block * sample_block = nullptr);
 
 } // namespace DB::TiForth
 
