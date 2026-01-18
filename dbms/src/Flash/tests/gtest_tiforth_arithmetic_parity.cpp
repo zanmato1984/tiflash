@@ -12,6 +12,7 @@
 #include <arrow/result.h>
 #include <arrow/status.h>
 
+#include <limits>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -104,6 +105,49 @@ arrow::Status CheckBinaryFailureParity(FunctionTest& test, const String& tiflash
   Block input({lhs, rhs});
   auto expr = tiforth::MakeCall(std::string(tiforth_func),
                                 {tiforth::MakeFieldRef(lhs.name), tiforth::MakeFieldRef(rhs.name)});
+  const auto tiforth_res = EvalTiForthProjection(input, /*out_name=*/"out", expr);
+
+  if (!tiflash_failed) {
+    return arrow::Status::Invalid("expected TiFlash failure, got success");
+  }
+  if (tiforth_res.ok()) {
+    return arrow::Status::Invalid("expected TiForth failure, got success");
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status CheckUnaryParity(FunctionTest& test, const String& tiflash_func, std::string_view tiforth_func,
+                               const ColumnWithTypeAndName& arg, bool raw_function_test = false) {
+  ColumnWithTypeAndName expected;
+  try {
+    expected = test.executeFunction(
+        tiflash_func, ColumnsWithTypeAndName{arg}, /*collator=*/nullptr, raw_function_test);
+  } catch (const Exception& e) {
+    return arrow::Status::Invalid("TiFlash function threw: ", e.message());
+  }
+
+  Block input({arg});
+  auto expr = tiforth::MakeCall(std::string(tiforth_func), {tiforth::MakeFieldRef(arg.name)});
+  ARROW_ASSIGN_OR_RAISE(auto actual, EvalTiForthProjection(input, /*out_name=*/"out", expr));
+
+  if (auto cmp = DB::tests::columnEqual(expected, actual); !cmp) {
+    return arrow::Status::Invalid(cmp.message());
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status CheckUnaryFailureParity(FunctionTest& test, const String& tiflash_func, std::string_view tiforth_func,
+                                      const ColumnWithTypeAndName& arg, bool raw_function_test = false) {
+  bool tiflash_failed = false;
+  try {
+    (void)test.executeFunction(
+        tiflash_func, ColumnsWithTypeAndName{arg}, /*collator=*/nullptr, raw_function_test);
+  } catch (...) {
+    tiflash_failed = true;
+  }
+
+  Block input({arg});
+  auto expr = tiforth::MakeCall(std::string(tiforth_func), {tiforth::MakeFieldRef(arg.name)});
   const auto tiforth_res = EvalTiForthProjection(input, /*out_name=*/"out", expr);
 
   if (!tiflash_failed) {
@@ -237,6 +281,194 @@ TEST_F(FunctionTest, TiForthArithmeticParityDecimalOverflowIsError) {
 
   auto status = CheckBinaryFailureParity(*this, /*tiflash_func=*/"plus", /*tiforth_func=*/"add", lhs, rhs);
   ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST_F(FunctionTest, TiForthArithmeticParityBitwise) {
+  {
+    const auto lhs = createColumn<Nullable<Int64>>({Int64(-1), Int64(1), Int64(5), {}, std::numeric_limits<Int64>::max()},
+                                                  "lhs");
+    const auto rhs = createColumn<Nullable<Int64>>({Int64(0), Int64(3), Int64(1), Int64(4), Int64(-1)}, "rhs");
+    auto status = CheckBinaryParity(*this, /*tiflash_func=*/"bitAnd", /*tiforth_func=*/"bitAnd", lhs, rhs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto lhs = createColumn<Nullable<Int16>>({Int16(-1), Int16(0), Int16(1), {}}, "lhs");
+    const auto rhs = createColumn<Nullable<UInt32>>({UInt32(0), UInt32(1), UInt32(0), UInt32(1)}, "rhs");
+    auto status = CheckBinaryParity(*this, /*tiflash_func=*/"bitOr", /*tiforth_func=*/"bitOr", lhs, rhs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto lhs = createColumn<Nullable<UInt64>>(
+        {UInt64(0), std::numeric_limits<UInt64>::max(), UInt64(1), {}}, "lhs");
+    const auto rhs = createColumn<Nullable<Int8>>({Int8(0), Int8(1), Int8(-1), Int8(0)}, "rhs");
+    auto status = CheckBinaryParity(*this, /*tiflash_func=*/"bitXor", /*tiforth_func=*/"bitXor", lhs, rhs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto arg = createColumn<Nullable<Int64>>(
+        {Int64(-1), Int64(0), Int64(1), std::numeric_limits<Int64>::min(), {}}, "arg");
+    auto status = CheckUnaryParity(*this, /*tiflash_func=*/"bitNot", /*tiforth_func=*/"bitNot", arg);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto lhs = createColumn<Nullable<Int64>>({Int64(0),
+                                                   Int64(1),
+                                                   Int64(-1),
+                                                   std::numeric_limits<Int64>::max(),
+                                                   std::numeric_limits<Int64>::min(),
+                                                   {}},
+                                                  "lhs");
+    const auto rhs = createColumn<Nullable<UInt64>>({UInt64(0),
+                                                     UInt64(63),
+                                                     UInt64(1),
+                                                     UInt64(64),
+                                                     std::numeric_limits<UInt64>::max(),
+                                                     UInt64(1)},
+                                                    "rhs");
+    {
+      auto status = CheckBinaryParity(*this, /*tiflash_func=*/"bitShiftLeft", /*tiforth_func=*/"bitShiftLeft", lhs, rhs);
+      ASSERT_TRUE(status.ok()) << status.ToString();
+    }
+    {
+      auto status = CheckBinaryParity(*this, /*tiflash_func=*/"bitShiftRight", /*tiforth_func=*/"bitShiftRight", lhs, rhs);
+      ASSERT_TRUE(status.ok()) << status.ToString();
+    }
+  }
+}
+
+TEST_F(FunctionTest, TiForthArithmeticParityAbsNegate) {
+  {
+    const auto arg = createColumn<Nullable<Int64>>({Int64(-123), Int64(0), Int64(123), {}}, "arg");
+    auto status = CheckUnaryParity(*this, /*tiflash_func=*/"abs", /*tiforth_func=*/"abs", arg);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto arg = createColumn<Nullable<Int64>>({std::numeric_limits<Int64>::min()}, "arg");
+    auto status = CheckUnaryFailureParity(*this, /*tiflash_func=*/"abs", /*tiforth_func=*/"abs", arg);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto arg = createColumn<Nullable<UInt32>>({UInt32(0), UInt32(1), UInt32(0xffffffffu), {}}, "arg");
+    auto status = CheckUnaryParity(*this, /*tiflash_func=*/"abs", /*tiforth_func=*/"abs", arg);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+
+  {
+    const auto arg = createColumn<Nullable<Int64>>(
+        {Int64(123), Int64(-123), Int64(0), std::numeric_limits<Int64>::min(), {}}, "arg");
+    auto status = CheckUnaryParity(*this, /*tiflash_func=*/"negate", /*tiforth_func=*/"negate", arg);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto arg = createColumn<Nullable<UInt8>>({UInt8(0), UInt8(1), UInt8(255), {}}, "arg");
+    auto status = CheckUnaryParity(*this, /*tiflash_func=*/"negate", /*tiforth_func=*/"negate", arg);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto arg = createColumn<Nullable<UInt64>>(
+        {UInt64(0), UInt64(1), std::numeric_limits<UInt64>::max(), UInt64(9223372036854775808ull), {}}, "arg");
+    auto status = CheckUnaryParity(*this, /*tiflash_func=*/"negate", /*tiforth_func=*/"negate", arg);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+}
+
+TEST_F(FunctionTest, TiForthArithmeticParityIntDivAndModulo) {
+  {
+    const auto lhs = createColumn<Nullable<Int64>>({Int64(10), Int64(-10), std::numeric_limits<Int64>::min(), {}}, "lhs");
+    const auto rhs = createColumn<Nullable<Int64>>({Int64(3), Int64(3), Int64(2), Int64(1)}, "rhs");
+    auto status = CheckBinaryParity(*this, /*tiflash_func=*/"intDiv", /*tiforth_func=*/"intDiv", lhs, rhs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto lhs = createColumn<Nullable<UInt32>>({UInt32(10), UInt32(10), UInt32(0xffffffffu), {}}, "lhs");
+    const auto rhs = createColumn<Nullable<Int8>>({Int8(3), Int8(-3), Int8(1), Int8(1)}, "rhs");
+    auto status = CheckBinaryParity(*this, /*tiflash_func=*/"intDiv", /*tiforth_func=*/"intDiv", lhs, rhs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+
+  {
+    const auto lhs = createColumn<Nullable<Int64>>({Int64(1)}, "lhs");
+    const auto rhs = createColumn<Nullable<Int64>>({Int64(0)}, "rhs");
+    auto status = CheckBinaryFailureParity(*this, /*tiflash_func=*/"intDiv", /*tiforth_func=*/"intDiv", lhs, rhs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto lhs = createColumn<Nullable<Int64>>({std::numeric_limits<Int64>::min()}, "lhs");
+    const auto rhs = createColumn<Nullable<Int64>>({Int64(-1)}, "rhs");
+    auto status = CheckBinaryFailureParity(*this, /*tiflash_func=*/"intDiv", /*tiforth_func=*/"intDiv", lhs, rhs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto lhs = createColumn<Nullable<Int64>>({Int64(1), std::numeric_limits<Int64>::min()}, "lhs");
+    const auto rhs = createColumn<Nullable<Int64>>({Int64(0), Int64(-1)}, "rhs");
+    auto status = CheckBinaryParity(*this, /*tiflash_func=*/"intDivOrZero", /*tiforth_func=*/"intDivOrZero", lhs, rhs,
+                                    /*raw_function_test=*/true);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+
+  {
+    const auto lhs = createColumn<Nullable<Int64>>({Int64(5), Int64(-5), Int64(5), {}}, "lhs");
+    const auto rhs = createColumn<Nullable<Int64>>({Int64(3), Int64(3), Int64(0), Int64(1)}, "rhs");
+    auto status = CheckBinaryParity(*this, /*tiflash_func=*/"modulo", /*tiforth_func=*/"modulo", lhs, rhs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto lhs = createColumn<Nullable<UInt64>>({UInt64(5), UInt64(5), UInt64(0), {}}, "lhs");
+    const auto rhs = createColumn<Nullable<Int64>>({Int64(-3), Int64(3), Int64(7), Int64(1)}, "rhs");
+    auto status = CheckBinaryParity(*this, /*tiflash_func=*/"modulo", /*tiforth_func=*/"modulo", lhs, rhs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+  {
+    const auto lhs = createColumn<Nullable<Int64>>({std::numeric_limits<Int64>::min()}, "lhs");
+    const auto rhs = createColumn<Nullable<Int64>>({Int64(-1)}, "rhs");
+    auto status = CheckBinaryParity(*this, /*tiflash_func=*/"modulo", /*tiforth_func=*/"modulo", lhs, rhs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+  }
+}
+
+TEST_F(FunctionTest, TiForthArithmeticParityGcdLcm) {
+  {
+    const auto lhs = createColumn<Nullable<Int32>>({Int32(12), Int32(-12), Int32(18)}, "lhs");
+    const auto rhs = createColumn<Nullable<Int32>>({Int32(18), Int32(18), Int32(12)}, "rhs");
+    {
+      auto status = CheckBinaryParity(*this, /*tiflash_func=*/"gcd", /*tiforth_func=*/"gcd", lhs, rhs,
+                                      /*raw_function_test=*/true);
+      ASSERT_TRUE(status.ok()) << status.ToString();
+    }
+    {
+      auto status = CheckBinaryParity(*this, /*tiflash_func=*/"lcm", /*tiforth_func=*/"lcm", lhs, rhs,
+                                      /*raw_function_test=*/true);
+      ASSERT_TRUE(status.ok()) << status.ToString();
+    }
+  }
+  {
+    const auto lhs = createColumn<Nullable<Int32>>({Int32(0)}, "lhs");
+    const auto rhs = createColumn<Nullable<Int32>>({Int32(5)}, "rhs");
+    {
+      auto status = CheckBinaryFailureParity(*this, /*tiflash_func=*/"gcd", /*tiforth_func=*/"gcd", lhs, rhs,
+                                             /*raw_function_test=*/true);
+      ASSERT_TRUE(status.ok()) << status.ToString();
+    }
+    {
+      auto status = CheckBinaryFailureParity(*this, /*tiflash_func=*/"lcm", /*tiforth_func=*/"lcm", lhs, rhs,
+                                             /*raw_function_test=*/true);
+      ASSERT_TRUE(status.ok()) << status.ToString();
+    }
+  }
+  {
+    const auto lhs = createColumn<Nullable<Int64>>({std::numeric_limits<Int64>::min()}, "lhs");
+    const auto rhs = createColumn<Nullable<Int64>>({Int64(-1)}, "rhs");
+    {
+      auto status = CheckBinaryFailureParity(*this, /*tiflash_func=*/"gcd", /*tiforth_func=*/"gcd", lhs, rhs,
+                                             /*raw_function_test=*/true);
+      ASSERT_TRUE(status.ok()) << status.ToString();
+    }
+    {
+      auto status = CheckBinaryFailureParity(*this, /*tiflash_func=*/"lcm", /*tiforth_func=*/"lcm", lhs, rhs,
+                                             /*raw_function_test=*/true);
+      ASSERT_TRUE(status.ok()) << status.ToString();
+    }
+  }
 }
 
 #else

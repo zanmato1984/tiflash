@@ -65,13 +65,25 @@ of TiForth custom kernels to preserve TiFlash/TiDB semantics for tricky types:
   - `tiforth.decimal_divide` (TiFlash decimal inference + truncation)
   - `tiforth.decimal_tidb_divide` (TiDB rounding + div-by-zero => NULL)
   - `tiforth.decimal_modulo` (div-by-zero => NULL)
+- numeric / bitwise (TiForth custom kernels matching TiFlash/TiDB semantics):
+  - bitwise: `bitAnd`, `bitOr`, `bitXor`, `bitNot`, `bitShiftLeft`, `bitShiftRight` (returns `uint64`)
+  - unary: `abs` (signed int -> unsigned; `abs(INT64_MIN)` errors), `negate` (unsigned -> signed nextSize)
+  - integer division: `intDiv` (division-by-zero errors), `intDivOrZero` (division-by-zero returns 0)
+  - modulo: `modulo` (division-by-zero yields NULL; decimal cases are rewritten to `tiforth.decimal_modulo`)
+  - other: `gcd`, `lcm`
 - boolean: (optional) `and`, `not` (if Arrow compute mappings are straightforward)
 
 The function set is intentionally tiny for Milestone 3B; it expands in later milestones.
 
 Implementation note (current code): TiForth does not implement its own function registry. Instead,
 each `Engine` owns an **Arrow** `arrow::compute::FunctionRegistry` overlay (parent = Arrow global
-registry) with TiForth custom kernels registered (usually under `tiforth.*` names).
+registry) with TiForth custom kernels registered:
+
+- internal dispatch-only names (e.g. `tiforth.decimal_*`)
+- TiFlash-compatible names (e.g. `abs`, `modulo`, `intDiv`, `bitAnd`, ...)
+
+Some TiFlash-compatible names intentionally overlap Arrow builtins (notably `abs`/`negate`), so TiForth registers
+them with `allow_overwrite=true` to preserve TiFlash semantics when evaluated via Arrow compute.
 
 TiForth does **not** override Arrow builtin function names via `MetaFunction` because Arrow compute
 `Expression::Bind` cannot bind meta-functions (they have no kernels). Instead, TiForth compiles its
@@ -129,6 +141,8 @@ Add arithmetic-focused tests:
 
 - TiForth gtests for decimal arithmetic inference + semantics (mixed decimal/int inputs, overflow,
   div-by-zero semantics for `tidbDivide` / `modulo`, rounding parity).
+- TiForth gtests for TiFlash-style numeric/bitwise semantics (`abs/negate`, `intDiv/intDivOrZero`, integer `modulo`,
+  bitwise and shifts, `gcd/lcm`).
 - TiFlash differential gtests: run the same expressions via TiFlash `executeFunction(...)` and via
   TiForth Projection/Expr on Arrow batches and assert identical types + values (including errors vs NULL).
 
@@ -138,4 +152,7 @@ Add arithmetic-focused tests:
   - `cmake -S libs/tiforth -B libs/tiforth/build-debug -DTIFORTH_BUILD_TESTS=ON`
   - `ninja -C libs/tiforth/build-debug`
   - `ctest --test-dir libs/tiforth/build-debug`
+- TiFlash parity (ENABLE_TIFORTH=ON):
+  - `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms`
+  - `cmake-build-tiflash-tiforth-debug/dbms/gtests_dbms '--gtest_filter=FunctionTest.TiForthArithmeticParity*'`
 - Examples updated if needed for a “projection hello” pipeline.
