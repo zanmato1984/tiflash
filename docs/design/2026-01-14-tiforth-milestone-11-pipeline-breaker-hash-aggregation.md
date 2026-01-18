@@ -156,6 +156,8 @@ Status (2026-01-18): A is implemented in tiforth repo commit `39c3a04` (Plan + f
    - group-by and global agg in breaker form
    - multi-batch input (build stage) + chunked multi-batch output (convergent stage)
 
+Status (2026-01-18): B is implemented in tiforth repo commit `e295494` (`HashAggContext` + build/convergent ops + breaker gtest).
+
 ### C) TiFlash integration: translate pipeline-breaker agg into TiForth plan
 
 1. Update TiFlash DAG→TiForth translation to produce a TiForth multi-pipeline plan for aggregation

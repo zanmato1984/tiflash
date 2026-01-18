@@ -7,11 +7,10 @@
 
 # Work in Progress
 
-- Refactor TiForth hash agg into build sink + convergent source operators sharing `HashAggContext`
+- Wire TiFlash DAG→TiForth translation for aggregation breaker form
 
 # To Do
 
-- Wire TiFlash DAG→TiForth translation for aggregation breaker form
 - Add/extend TiFlash↔TiForth parity gtests to exercise breaker aggregation path
 
 # Completed
@@ -27,3 +26,4 @@
 - MS11 design (planned): documented TiFlash aggregation pipeline-breaker split (AggregationBuild sink + AggregationConvergent source, shared `AggregateContext`) and the target TiForth counterpart (multi-pipeline plan + `HashAggContext` + build sink + convergent source) with a task breakdown for a dedicated agent. Files: `docs/design/2026-01-14-tiforth.md`, `docs/design/2026-01-14-tiforth-milestone-3-pipeline-framework.md`, `docs/design/2026-01-14-tiforth-milestone-5-hash-aggregation.md`, `docs/design/2026-01-14-tiforth-milestone-11-pipeline-breaker-hash-aggregation.md`, `.codex/progress/daemon.md`. Checks: `ninja -C cmake-build-debug gtests_dbms && LOG_LEVEL=error cmake-build-debug/dbms/gtests_dbms --gtest_filter='TiForthPipelineTranslateTest.*'`.
 - Docs: clarified TiForth host-provided `SourceOp`/`SinkOp` as the key integration point for storage/network I/O (kept out of tiforth core), and recorded that true pipeline-breaker mirroring requires adopting TiFlash `OperatorStatus` (IO/wait states). Updated MS11 task breakdown accordingly. Files: `docs/design/2026-01-14-tiforth.md`, `docs/design/2026-01-14-tiforth-milestone-3-pipeline-framework.md`, `docs/design/2026-01-14-tiforth-milestone-11-pipeline-breaker-hash-aggregation.md`, `.codex/progress/daemon.md`. Notes: doc-only change; tests skipped per request.
 - TiForth MS11(A): added multi-stage `Plan` (pipeline DAG) + task-owned breaker state, extended TiForth `OperatorStatus` and `TaskState` to mirror TiFlash status surface (CANCELLED/WAITING/WAIT_FOR_NOTIFY/IO_IN/IO_OUT) and added Task methods + C ABI entrypoints for `execute_io/await/notify`. Decisions: keep existing `Pipeline` API for single-chain common path; add new `Plan` API for breaker plans; keep IO/await semantics TiFlash-shaped via `PipelineExec::{ExecuteIO,Await,Notify}` tracking the blocking operator. Files (tiforth repo): `include/tiforth/{plan,operators,pipeline_exec,task}.h`, `src/tiforth/{plan,pipeline_exec,task,pipeline}.cc`, `include/tiforth_c/tiforth.h`, `src/tiforth_capi/tiforth_capi.cc`, `tests/tiforth_plan_breaker_test.cpp`, `tests/CMakeLists.txt`. Checks: `cmake --build /Users/zanmato/dev/tiforth/build-debug && ctest --test-dir /Users/zanmato/dev/tiforth/build-debug`. Commit (tiforth): `39c3a04`.
+- TiForth MS11(B): refactored hash aggregation into a shared `HashAggContext` with a breaker split (`HashAggBuildSinkOp` + `HashAggConvergentSourceOp`), kept existing `HashAggTransformOp` working by delegating to the context, and added a TiForth plan breaker gtest for global-agg empty input. Decisions: convergent output chunks are RecordBatch slices of a cached full output batch (preserves MS5 single-batch behavior for `HashAggTransformOp`, enables multi-batch in breaker form). Files (tiforth repo): `include/tiforth/operators/hash_agg.h`, `src/tiforth/operators/hash_agg.cc`, `tests/tiforth_hash_agg_breaker_test.cpp`, `tests/CMakeLists.txt`. Checks: `cmake --build /Users/zanmato/dev/tiforth/build-debug && ctest --test-dir /Users/zanmato/dev/tiforth/build-debug`. Commit (tiforth): `e295494`.
