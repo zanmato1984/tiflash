@@ -2,7 +2,7 @@
 
 - Author(s): TBD
 - Last Updated: 2026-01-18
-- Status: Implemented (extended arithmetic coverage)
+- Status: Implemented (arithmetic + comparison + logical coverage)
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-3-pipeline-framework.md`
 
@@ -27,7 +27,7 @@ The goal is to unlock a realistic “single-input → single-output” DAG path 
 ## Non-goals
 
 - Full TiFlash function parity (collation, decimal/date/time quirks, etc).
-- Filter / expression short-circuiting / boolean tri-valued semantics parity (deferred).
+- Full SQL short-circuit semantics across operators (deferred).
 - Codegen/JIT or vectorized custom kernels (deferred).
 - Multi-input expressions (e.g. join condition evaluation) and multi-stream DAGs.
 
@@ -71,7 +71,12 @@ of TiForth custom kernels to preserve TiFlash/TiDB semantics for tricky types:
   - integer division: `intDiv` (division-by-zero errors), `intDivOrZero` (division-by-zero returns 0)
   - modulo: `modulo` (division-by-zero yields NULL; decimal cases are rewritten to `tiforth.decimal_modulo`)
   - other: `gcd`, `lcm`
-- boolean: (optional) `and`, `not` (if Arrow compute mappings are straightforward)
+- comparison:
+  - common path via Arrow compute: `equal`, `not_equal`, `less`, `less_equal`, `greater`, `greater_equal`
+  - collated strings: compile-time rewrite to `tiforth.collated_*` with `collation_id` options derived from Arrow field metadata
+  - TiFlash names: `equals/notEquals/lessOrEquals/greaterOrEquals` are normalized to Arrow compute names during TiForth compilation
+- logical (TiForth custom kernels, numeric truthiness, 3VL semantics):
+  - `and`, `or`, `xor`, `not`
 
 The function set is intentionally tiny for Milestone 3B; it expands in later milestones.
 
@@ -93,6 +98,8 @@ own `tiforth::Expr` IR into an Arrow compute `Expression`, and does **compile-ti
   `tiforth.mytime_hour` when inputs require TiFlash/TiDB semantics,
 - rewrite calls like `subtract/multiply/divide/tidbDivide/modulo` into the corresponding
   `tiforth.decimal_*` kernels when at least one argument is a decimal logical type,
+- normalize TiFlash/ClickHouse comparison names (`equals/notEquals/...`) to Arrow compute names
+  (`equal/not_equal/...`) before the above dispatch rules,
 - attach `FunctionOptions` (collation id / packed-MyTime type) derived from Arrow field metadata,
 - bind once (`Expression::Bind`) and execute via `ExecuteScalarExpression`.
 
@@ -154,5 +161,5 @@ Add arithmetic-focused tests:
   - `ctest --test-dir libs/tiforth/build-debug`
 - TiFlash parity (ENABLE_TIFORTH=ON):
   - `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms`
-  - `cmake-build-tiflash-tiforth-debug/dbms/gtests_dbms '--gtest_filter=FunctionTest.TiForthArithmeticParity*'`
+  - `cmake-build-tiflash-tiforth-debug/dbms/gtests_dbms '--gtest_filter=FunctionTest.TiForthArithmeticParity*:FunctionTest.TiForthComparisonParity*:FunctionTest.TiForthLogicalParity*'`
 - Examples updated if needed for a “projection hello” pipeline.

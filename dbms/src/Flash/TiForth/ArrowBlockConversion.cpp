@@ -111,6 +111,10 @@ arrow::Result<DataTypePtr> fieldToDataType(const arrow::Field & field, ColumnOpt
         case arrow::Type::UINT64:
             nested = std::make_shared<DataTypeUInt64>();
             break;
+        case arrow::Type::BOOL:
+            // ClickHouse-style boolean results are represented as UInt8 in TiFlash.
+            nested = std::make_shared<DataTypeUInt8>();
+            break;
         case arrow::Type::FLOAT:
             nested = std::make_shared<DataTypeFloat32>();
             break;
@@ -344,7 +348,18 @@ arrow::Result<ColumnPtr> arrayToColumn(const arrow::Array & array, const DataTyp
         }
         case TypeIndex::UInt8:
         {
-            ARROW_ASSIGN_OR_RAISE(nested_col, (buildPODColumn<arrow::UInt8Array, ColumnUInt8, UInt8>(array)));
+            if (array.type_id() == arrow::Type::BOOL)
+            {
+                ARROW_ASSIGN_OR_RAISE(
+                    nested_col,
+                    (buildPODColumn<arrow::BooleanArray, ColumnUInt8, UInt8>(array)));
+            }
+            else
+            {
+                ARROW_ASSIGN_OR_RAISE(
+                    nested_col,
+                    (buildPODColumn<arrow::UInt8Array, ColumnUInt8, UInt8>(array)));
+            }
             break;
         }
         case TypeIndex::UInt16:
