@@ -21,6 +21,7 @@
 #include <arrow/status.h>
 #include <arrow/type.h>
 
+#include "tiforth/plan.h"
 #include "tiforth/pipeline.h"
 #include "tiforth/task.h"
 
@@ -37,10 +38,9 @@ arrow::Status ensurePool(arrow::MemoryPool * pool)
     return arrow::Status::OK();
 }
 
-} // namespace
-
-arrow::Result<std::vector<BlockConversionResult>> RunTiForthPipelineOnBlocks(
-    const tiforth::Pipeline & pipeline,
+template <typename CreateTaskFn>
+arrow::Result<std::vector<BlockConversionResult>> RunTiForthOnBlocksImpl(
+    CreateTaskFn && create_task,
     const std::vector<Block> & input_blocks,
     const std::unordered_map<String, ColumnOptions> & input_options_by_name,
     arrow::MemoryPool * pool,
@@ -48,7 +48,7 @@ arrow::Result<std::vector<BlockConversionResult>> RunTiForthPipelineOnBlocks(
 {
     ARROW_RETURN_NOT_OK(ensurePool(pool));
 
-    ARROW_ASSIGN_OR_RAISE(auto task, pipeline.CreateTask());
+    ARROW_ASSIGN_OR_RAISE(auto task, create_task());
     if (task == nullptr)
         return arrow::Status::Invalid("task must not be null");
 
@@ -117,10 +117,39 @@ arrow::Result<std::vector<BlockConversionResult>> RunTiForthPipelineOnBlocks(
         }
         case tiforth::TaskState::kFinished:
             return outputs;
-        case tiforth::TaskState::kBlocked:
-            return arrow::Status::NotImplemented("task returned blocked state (spill/backpressure not wired yet)");
+        case tiforth::TaskState::kCancelled:
+            return arrow::Status::Cancelled("task is cancelled");
+        case tiforth::TaskState::kWaiting:
+        case tiforth::TaskState::kWaitForNotify:
+        case tiforth::TaskState::kIOIn:
+        case tiforth::TaskState::kIOOut:
+            return arrow::Status::NotImplemented("task is blocked (IO/await/notify not wired)");
         }
     }
+}
+
+} // namespace
+
+arrow::Result<std::vector<BlockConversionResult>> RunTiForthPipelineOnBlocks(
+    const tiforth::Pipeline & pipeline,
+    const std::vector<Block> & input_blocks,
+    const std::unordered_map<String, ColumnOptions> & input_options_by_name,
+    arrow::MemoryPool * pool,
+    const Block * sample_block)
+{
+    return RunTiForthOnBlocksImpl(
+        [&pipeline]() { return pipeline.CreateTask(); }, input_blocks, input_options_by_name, pool, sample_block);
+}
+
+arrow::Result<std::vector<BlockConversionResult>> RunTiForthPlanOnBlocks(
+    const tiforth::Plan & plan,
+    const std::vector<Block> & input_blocks,
+    const std::unordered_map<String, ColumnOptions> & input_options_by_name,
+    arrow::MemoryPool * pool,
+    const Block * sample_block)
+{
+    return RunTiForthOnBlocksImpl(
+        [&plan]() { return plan.CreateTask(); }, input_blocks, input_options_by_name, pool, sample_block);
 }
 
 } // namespace DB::TiForth

@@ -21,6 +21,7 @@
 #include "tiforth/expr.h"
 #include "tiforth/operators/filter.h"
 #include "tiforth/operators/hash_agg.h"
+#include "tiforth/plan.h"
 #include "tiforth/pipeline.h"
 
 namespace DB::tests {
@@ -55,6 +56,42 @@ arrow::Result<ColumnsWithTypeAndName> RunTiForthPipelineOnBlock(
       auto outputs,
       TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input}, options_by_name,
                                           arrow::default_memory_pool()));
+
+  Blocks out_blocks;
+  out_blocks.reserve(outputs.size());
+  for (auto& out : outputs) {
+    out_blocks.push_back(std::move(out.block));
+  }
+
+  return vstackBlocks(std::move(out_blocks)).getColumnsWithTypeAndName();
+}
+
+arrow::Result<ColumnsWithTypeAndName> RunTiForthPlanOnBlock(
+    const Block& input, const std::unordered_map<String, TiForth::ColumnOptions>& options_by_name,
+    std::function<arrow::Status(const tiforth::Engine*, tiforth::PlanBuilder*)> build_plan) {
+  if (build_plan == nullptr) {
+    return arrow::Status::Invalid("plan builder must not be null");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
+  if (engine == nullptr) {
+    return arrow::Status::Invalid("tiforth engine must not be null");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
+  if (builder == nullptr) {
+    return arrow::Status::Invalid("tiforth plan builder must not be null");
+  }
+
+  ARROW_RETURN_NOT_OK(build_plan(engine.get(), builder.get()));
+
+  ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
+  if (plan == nullptr) {
+    return arrow::Status::Invalid("tiforth plan must not be null");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto outputs, TiForth::RunTiForthPlanOnBlocks(*plan, {input}, options_by_name,
+                                                                      arrow::default_memory_pool()));
 
   Blocks out_blocks;
   out_blocks.reserve(outputs.size());
@@ -300,6 +337,69 @@ try
 }
 CATCH
 
+TEST_F(TiForthFilterAggParityTestRunner, HashAggBreakerGroupByInt32)
+try
+{
+  const auto scan_cols = executeRawQuery("select k, v from default.tiforth_agg_parity");
+  const Block scan_block(scan_cols);
+
+  const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+  auto actual = RunTiForthPlanOnBlock(
+      scan_block, options_by_name,
+      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
+        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+        std::vector<tiforth::AggFunc> aggs;
+        aggs.push_back({"cnt_all", "count_all", nullptr});
+        aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
+
+        ARROW_ASSIGN_OR_RAISE(
+            const auto ctx_id,
+            builder->AddBreakerState<tiforth::HashAggContext>(
+                [engine, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+                  return std::make_shared<tiforth::HashAggContext>(engine, keys, aggs);
+                }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->SetStageSink(
+            build_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggBuildSinkOp>(std::move(agg_ctx));
+            }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto convergent_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->SetStageSource(
+            convergent_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggConvergentSourceOp>(
+                  std::move(agg_ctx), /*max_output_rows=*/1 << 30);
+            }));
+
+        ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, convergent_stage));
+        return arrow::Status::OK();
+      });
+  ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+
+  const auto expected = executeStreams(
+      context.scan("default", "tiforth_agg_parity")
+          .aggregation(
+              {Count(lit(Field(static_cast<UInt64>(1)))),
+               Count(col("v")),
+               Sum(col("v")),
+               Min(col("v")),
+               Max(col("v"))},
+              {col("k")})
+          .project({"count(1)", "count(v)", "sum(v)", "min(v)", "max(v)", "k"})
+          .build(context),
+      /*concurrency=*/1);
+  ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
+}
+CATCH
+
 TEST_F(TiForthFilterAggParityTestRunner, HashAggGroupByStringBinary)
 try
 {
@@ -357,6 +457,66 @@ try
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
               return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
             });
+      });
+  ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+
+  const auto expected = executeStreams(
+      context.scan("default", "tiforth_agg_collation_bin")
+          .aggregation(
+              {Count(lit(Field(static_cast<UInt64>(1)))),
+               Sum(col("v"))},
+              {col("s")})
+          .project({"count(1)", "sum(v)", "s"})
+          .build(context),
+      /*concurrency=*/1);
+  ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
+}
+CATCH
+
+TEST_F(TiForthFilterAggParityTestRunner, HashAggBreakerGroupByStringUtf8Mb4BinPadSpace)
+try
+{
+  const auto scan_cols = executeRawQuery("select s, v from default.tiforth_agg_collation_bin");
+  const Block scan_block(scan_cols);
+
+  std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+  options_by_name.emplace(scan_block.getByPosition(0).name,
+                          TiForth::ColumnOptions{.collation_id = 46});  // UTF8MB4_BIN (PAD SPACE)
+
+  auto actual = RunTiForthPlanOnBlock(
+      scan_block, options_by_name,
+      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
+        std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef(0)}};
+        std::vector<tiforth::AggFunc> aggs;
+        aggs.push_back({"cnt_all", "count_all", nullptr});
+        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+
+        ARROW_ASSIGN_OR_RAISE(
+            const auto ctx_id,
+            builder->AddBreakerState<tiforth::HashAggContext>(
+                [engine, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+                  return std::make_shared<tiforth::HashAggContext>(engine, keys, aggs);
+                }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->SetStageSink(
+            build_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggBuildSinkOp>(std::move(agg_ctx));
+            }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto convergent_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->SetStageSource(
+            convergent_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggConvergentSourceOp>(
+                  std::move(agg_ctx), /*max_output_rows=*/1 << 30);
+            }));
+
+        ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, convergent_stage));
+        return arrow::Status::OK();
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
@@ -536,6 +696,79 @@ try
 }
 CATCH
 
+TEST_F(TiForthFilterAggParityTestRunner, FilterThenGlobalAggEmptyInputBreaker)
+try
+{
+  const auto scan_cols = executeRawQuery("select k, v from default.tiforth_agg_parity");
+  const Block scan_block(scan_cols);
+
+  const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+  auto actual = RunTiForthPlanOnBlock(
+      scan_block, options_by_name,
+      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
+        auto predicate = tiforth::MakeCall(
+            "equal", {tiforth::MakeFieldRef(0),
+                      tiforth::MakeLiteral(std::make_shared<arrow::Int32Scalar>(999))});
+
+        std::vector<tiforth::AggKey> keys;
+        std::vector<tiforth::AggFunc> aggs;
+        aggs.push_back({"cnt_all", "count_all", nullptr});
+        aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
+
+        ARROW_ASSIGN_OR_RAISE(
+            const auto ctx_id,
+            builder->AddBreakerState<tiforth::HashAggContext>(
+                [engine, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+                  return std::make_shared<tiforth::HashAggContext>(engine, keys, aggs);
+                }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->AppendTransform(
+            build_stage,
+            [engine, predicate](tiforth::PlanTaskContext *) -> arrow::Result<tiforth::TransformOpPtr> {
+              return std::make_unique<tiforth::FilterTransformOp>(engine, predicate);
+            }));
+        ARROW_RETURN_NOT_OK(builder->SetStageSink(
+            build_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggBuildSinkOp>(std::move(agg_ctx));
+            }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto convergent_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->SetStageSource(
+            convergent_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggConvergentSourceOp>(
+                  std::move(agg_ctx), /*max_output_rows=*/1 << 30);
+            }));
+
+        ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, convergent_stage));
+        return arrow::Status::OK();
+      });
+  ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+
+  const auto expected = executeStreams(
+      context.scan("default", "tiforth_agg_parity")
+          .filter(eq(col("k"), lit(Field(static_cast<Int64>(999)))))
+          .aggregation(
+              {Count(lit(Field(static_cast<UInt64>(1)))),
+               Count(col("v")),
+               Sum(col("v")),
+               Min(col("v")),
+               Max(col("v"))},
+              {})
+          .project({"count(1)", "count(v)", "sum(v)", "min(v)", "max(v)"})
+          .build(context),
+      /*concurrency=*/1);
+  ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
+}
+CATCH
+
 TEST_F(TiForthFilterAggParityTestRunner, GlobalAggNonEmptyInput)
 try
 {
@@ -558,6 +791,68 @@ try
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
               return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
             });
+      });
+  ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+
+  const auto expected = executeStreams(
+      context.scan("default", "tiforth_agg_parity")
+          .aggregation(
+              {Count(lit(Field(static_cast<UInt64>(1)))),
+               Count(col("v")),
+               Sum(col("v")),
+               Min(col("v")),
+               Max(col("v"))},
+              {})
+          .build(context),
+      /*concurrency=*/1);
+  ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
+}
+CATCH
+
+TEST_F(TiForthFilterAggParityTestRunner, GlobalAggNonEmptyInputBreaker)
+try
+{
+  const auto scan_cols = executeRawQuery("select k, v from default.tiforth_agg_parity");
+  const Block scan_block(scan_cols);
+
+  const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+  auto actual = RunTiForthPlanOnBlock(
+      scan_block, options_by_name,
+      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
+        std::vector<tiforth::AggKey> keys;
+        std::vector<tiforth::AggFunc> aggs;
+        aggs.push_back({"cnt_all", "count_all", nullptr});
+        aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
+
+        ARROW_ASSIGN_OR_RAISE(
+            const auto ctx_id,
+            builder->AddBreakerState<tiforth::HashAggContext>(
+                [engine, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+                  return std::make_shared<tiforth::HashAggContext>(engine, keys, aggs);
+                }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->SetStageSink(
+            build_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggBuildSinkOp>(std::move(agg_ctx));
+            }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto convergent_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->SetStageSource(
+            convergent_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggConvergentSourceOp>(
+                  std::move(agg_ctx), /*max_output_rows=*/1 << 30);
+            }));
+
+        ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, convergent_stage));
+        return arrow::Status::OK();
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 

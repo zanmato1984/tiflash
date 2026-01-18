@@ -1,8 +1,8 @@
 # TiForth Milestone 11: Pipeline Breaker Hash Aggregation (Build/Convergent Split, TiFlash Parity)
 
 - Author(s): TBD
-- Last Updated: 2026-01-18
-- Status: In progress (A implemented; B-D pending)
+- Last Updated: 2026-01-19
+- Status: Implemented (A-D implemented; E validated in TiFlash gtests; spill/IO states not wired end-to-end yet)
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS3 (pipeline framework common path), MS5 (hash agg common path)
 
@@ -165,6 +165,8 @@ Status (2026-01-18): B is implemented in tiforth repo commit `e295494` (`HashAgg
    - convergent pipeline: convergent source + after-agg expressions
 2. Keep TiForth independent (no TiFlash types in `tiforth`); translation lives in TiFlash
 
+Status (2026-01-19): implemented in TiFlash gtests + Block runner: `Plan` breaker plan wiring (`RunTiForthPlanOnBlocks`), translation smoke test emits breaker plan for hash agg.
+
 ### D) Parity tests: exercise “true breaker” path
 
 1. Extend `dbms/src/Flash/tests/gtest_tiforth_filter_agg_parity.cpp` to run the new breaker plan
@@ -173,7 +175,9 @@ Status (2026-01-18): B is implemented in tiforth repo commit `e295494` (`HashAgg
    - global aggregation (empty and non-empty)
 3. Keep existing MS5 common-path tests until breaker path is stable; then consider switching default path to breaker.
 
+Status (2026-01-19): implemented in TiFlash parity gtests (group-by + global-agg breaker path; collated string keys).
+
 ### E) Validation checklist
 
 - TiForth: `cmake --build /Users/zanmato/dev/tiforth/build-debug && ctest --test-dir /Users/zanmato/dev/tiforth/build-debug`
-- TiFlash: `ninja -C cmake-build-tiflash-tiforth-debug gtests_dbms && cmake-build-tiflash-tiforth-debug/dbms/gtests_dbms --gtest_filter='TiForthFilterAggParityTestRunner.*'`
+- TiFlash: `ninja -C cmake-build-debug gtests_dbms && LOG_LEVEL=error cmake-build-debug/dbms/gtests_dbms --gtest_filter='TiForthPipelineTranslateTest.*:TiForthFilterAggParityTestRunner.*'`

@@ -28,6 +28,7 @@
 namespace tiforth
 {
 class Pipeline;
+class Plan;
 } // namespace tiforth
 
 namespace DB::TiForth
@@ -35,6 +36,13 @@ namespace DB::TiForth
 
 arrow::Result<std::vector<BlockConversionResult>> RunTiForthPipelineOnBlocks(
     const tiforth::Pipeline & pipeline,
+    const std::vector<Block> & input_blocks,
+    const std::unordered_map<String, ColumnOptions> & input_options_by_name,
+    arrow::MemoryPool * pool,
+    const Block * sample_block = nullptr);
+
+arrow::Result<std::vector<BlockConversionResult>> RunTiForthPlanOnBlocks(
+    const tiforth::Plan & plan,
     const std::vector<Block> & input_blocks,
     const std::unordered_map<String, ColumnOptions> & input_options_by_name,
     arrow::MemoryPool * pool,
