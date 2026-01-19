@@ -424,6 +424,11 @@ if (ENABLE_TESTS)
         tiflash_aggregate_functions
         kvstore)
 
+    if (ENABLE_TIFORTH)
+        target_compile_definitions(bench_dbms PUBLIC TIFLASH_ENABLE_TIFORTH=1)
+        target_link_libraries(bench_dbms tiforth::tiforth)
+    endif ()
+
     if (NOT CMAKE_BUILD_TYPE_UC STREQUAL "DEBUG")
         target_link_libraries(bench_dbms tiflash_contrib::highfive)
     endif()
