@@ -7,14 +7,13 @@
 
 # Work in Progress
 
-- TiForth: extend Arrow-compute aggregation operator to accept non-`FieldRef` expressions for group keys + aggregate args by compiling `Expr` to Arrow compute `Expression` and inserting a pre-projection stage; add unit tests (nulls, strings, multi-key).
+- TiFlash: optionally wire Arrow-compute aggregation into DAG→pipeline translation behind a runtime switch for A/B runs; add one parity gtest validating results match native aggregation for a simple group-by query shape.
 
 # To Do
 
-- TiFlash: optionally wire Arrow-compute aggregation into DAG→pipeline translation behind a runtime switch for A/B runs; add one parity gtest validating results match native aggregation for a simple group-by query shape.
-
 # Completed
 
+- TiForth Arrow-compute agg expressions (2026-01-19): added a pre-projection stage so group keys + aggregate args can be arbitrary TiForth `Expr` (compiled to Arrow `compute::Expression` via `CompileExpr`) while Acero `aggregate` still consumes `FieldRef` keys/targets by index. Unit tests added for computed key/arg expressions, string keys, multi-key grouping, and NULL coverage. Validation: TiForth `ctest --preset debug` pass. Files: `docs/design/2026-01-14-tiforth-milestone-14-arrow-compute-aggregation.md`, `.codex/progress/daemon.md`. TiForth commit `71cb82a`.
 - TiForth Arrow-compute agg streaming (2026-01-19): rewired `ArrowComputeAggTransformOp` to stream input into Acero via `SourceNodeOptions` + `PushGenerator<std::optional<arrow::compute::ExecBatch>>` (no `Table::FromRecordBatches`), and drain `DeclarationToReader` output batches (no forced output combining). Kept key renaming to `AggKey.name`, added cancellation checks on generator `Push/Close`, and updated gtest to not assume output ordering/batching. Design doc synced (MS14). Validation: TiForth `ctest --preset debug` pass. Files: `docs/design/2026-01-14-tiforth-milestone-14-arrow-compute-aggregation.md`, `.codex/progress/daemon.md`. TiForth commit `17e1e9f`.
 - TiForth baseline delivered (MS1-13, 2026-01-19): standalone `tiforth` library with Engine/Pipeline/Plan/Task + C ABI skeleton; core operators (projection/filter/hash agg/join/sort) and breaker plan; Arrow-native type contract via field metadata (decimals/MyTime/collations) with custom Arrow compute kernels for TiDB/TiFlash semantics; memory pool routed through host-provided `arrow::MemoryPool`. TiFlash integrates behind `TIFLASH_ENABLE_TIFORTH` with Block<->Arrow bridge + DAG→pipeline translation and parity gtests for a common DAG shape.
 - TiForth “full aggregation core” progress (MS12/MS12A, 2026-01-19): ported TiFlash-shaped aggregation method selection and optimized hash tables (dense direct-map, fixed-key open addressing, single-string fast path; multi-key via serialized bytes in `detail::KeyHashTable`), plus broader aggregate coverage (decimal sum/avg inference + avg state, float min/max NaN alignment, metadata upsert). TiFlash parity gtests extended for avg/decimal/float and TiFlash pins TiForth accordingly.

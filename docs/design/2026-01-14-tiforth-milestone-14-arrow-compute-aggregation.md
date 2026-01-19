@@ -2,7 +2,7 @@
 
 - Author(s): TBD
 - Last Updated: 2026-01-19
-- Status: Implemented (baseline) + streaming update
+- Status: Implemented
 
 ## Summary
 
@@ -37,7 +37,6 @@ This milestone is explicitly a **rapid validation / performance baseline** and t
 
 - Parity with TiFlash aggregation semantics and all function coverage.
 - External / spilled aggregation.
-- Full expression support for group keys / aggregate args (follow-up To Do: add a pre-projection stage).
 - Host-managed executor integration for Acero (current implementation uses Arrow's CPU thread pool via `QueryOptions.use_threads=true` so the plan can run while the pipeline is feeding input).
 - Wiring this operator into TiFlash DAG→pipeline translation (benchmark uses manual pipeline construction).
 
@@ -49,9 +48,13 @@ High-level behavior:
 
 1. On first input batch:
    - validate the input schema,
-   - bind key / aggregate argument `Expr` to Arrow `FieldRef` (currently only `FieldRef` supported),
+   - compile key / aggregate argument `Expr` to Arrow `arrow::compute::Expression`,
+   - insert a `project` stage so computed keys/args become physical columns (Acero `aggregate` only accepts `FieldRef` keys/targets),
    - build an Acero plan:
      - `source` node backed by an `AsyncGenerator<std::optional<arrow::compute::ExecBatch>>`,
+     - `project` node using `arrow::acero::ProjectNodeOptions` with names:
+       - group keys output as `AggKey.name`,
+       - aggregate arguments output as internal `__tiforth_agg_arg*` columns,
      - `aggregate` node using `arrow::acero::AggregateNodeOptions`.
    - materialize a `arrow::RecordBatchReader` via `arrow::acero::DeclarationToReader`.
 2. For each input batch:
@@ -99,6 +102,8 @@ TiForth:
 - Implement the operator using Arrow Acero (`source` + `aggregate`) and a `RecordBatchReader` result stream.
 - Add unit tests:
   - correctness on a few types (int keys + numeric values; include NULLs; multi-batch input)
+  - string keys and multi-key group-by
+  - computed key + computed aggregate argument expressions
   - validate EOS behavior (output batches + EOS) without assuming output order.
 
 TiFlash:
