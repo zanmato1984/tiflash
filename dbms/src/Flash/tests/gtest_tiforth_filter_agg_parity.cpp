@@ -6,12 +6,15 @@
 #include <DataTypes/DataTypeDecimal.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <Flash/TiForth/BlockPipelineRunner.h>
+#include <Interpreters/Context.h>
 #include <TestUtils/ExecutorTestUtils.h>
 #include <TestUtils/FunctionTestUtils.h>
 
 #include <arrow/result.h>
 #include <arrow/scalar.h>
 #include <arrow/status.h>
+
+#include <ext/scope_guard.h>
 
 #include <functional>
 #include <optional>
@@ -22,6 +25,7 @@
 
 #include "tiforth/engine.h"
 #include "tiforth/expr.h"
+#include "tiforth/operators/arrow_compute_agg.h"
 #include "tiforth/operators/filter.h"
 #include "tiforth/operators/hash_agg.h"
 #include "tiforth/plan.h"
@@ -363,6 +367,49 @@ try
                Max(col("v"))},
               {col("k")})
           .project({"count(1)", "count(v)", "sum(v)", "avg(v)", "min(v)", "max(v)", "k"})
+          .build(context),
+      /*concurrency=*/1);
+  ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
+}
+CATCH
+
+TEST_F(TiForthFilterAggParityTestRunner, ArrowComputeAggGroupByInt32Sum)
+try
+{
+  const bool old_flag = context.context->getSettingsRef().enable_tiforth_arrow_compute_agg;
+  context.context->setSetting("enable_tiforth_arrow_compute_agg", "true");
+  SCOPE_EXIT({
+    context.context->setSetting("enable_tiforth_arrow_compute_agg", old_flag ? "true" : "false");
+  });
+
+  const auto scan_cols = executeRawQuery("select k, v from default.tiforth_agg_parity");
+  const Block scan_block(scan_cols);
+
+  const bool use_arrow_compute = context.context->getSettingsRef().enable_tiforth_arrow_compute_agg;
+  ASSERT_TRUE(use_arrow_compute);
+
+  const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+  auto actual = RunTiForthPipelineOnBlock(
+      scan_block, options_by_name,
+      [use_arrow_compute](const tiforth::Engine* engine, tiforth::PipelineBuilder* builder) -> arrow::Status {
+        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+        std::vector<tiforth::AggFunc> aggs;
+        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+
+        return builder->AppendTransform(
+            [engine, keys, aggs, use_arrow_compute]() -> arrow::Result<tiforth::TransformOpPtr> {
+              if (use_arrow_compute) {
+                return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs);
+              }
+              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+            });
+      });
+  ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+
+  const auto expected = executeStreams(
+      context.scan("default", "tiforth_agg_parity")
+          .aggregation({Sum(col("v"))}, {col("k")})
+          .project({"sum(v)", "k"})
           .build(context),
       /*concurrency=*/1);
   ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));

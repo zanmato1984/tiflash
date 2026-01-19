@@ -15,8 +15,11 @@
 #include <arrow/result.h>
 #include <arrow/status.h>
 
+#include <set>
+
 #include "tiforth/engine.h"
 #include "tiforth/expr.h"
+#include "tiforth/operators/arrow_compute_agg.h"
 #include "tiforth/operators/filter.h"
 #include "tiforth/operators/hash_agg.h"
 #include "tiforth/operators/hash_join.h"
@@ -243,8 +246,23 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeJoinProbeBatch() {
   return arrow::RecordBatch::Make(schema, /*num_rows=*/4, {k_array, pv_array});
 }
 
+arrow::Result<std::multiset<std::vector<std::string>>> RecordBatchRowSet(const arrow::RecordBatch& batch) {
+  std::multiset<std::vector<std::string>> rows;
+  for (int64_t row = 0; row < batch.num_rows(); ++row) {
+    std::vector<std::string> values;
+    values.reserve(batch.num_columns());
+    for (int c = 0; c < batch.num_columns(); ++c) {
+      ARROW_ASSIGN_OR_RAISE(auto scalar, batch.column(c)->GetScalar(row));
+      values.push_back(scalar->ToString());
+    }
+    rows.insert(std::move(values));
+  }
+  return rows;
+}
+
 arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag, const tiforth::Engine* engine,
-                                           tiforth::PipelineBuilder* builder) {
+                                           tiforth::PipelineBuilder* builder,
+                                           bool use_arrow_compute_agg = false) {
   if (engine == nullptr) {
     return arrow::Status::Invalid("engine must not be null");
   }
@@ -271,7 +289,10 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag, cons
       aggs.push_back({"cnt", "count_all", nullptr});
       aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
       ARROW_RETURN_NOT_OK(builder->AppendTransform(
-          [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
+          [engine, keys, aggs, use_arrow_compute_agg]() -> arrow::Result<tiforth::TransformOpPtr> {
+            if (use_arrow_compute_agg) {
+              return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs);
+            }
             return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
           }));
       continue;
@@ -362,6 +383,79 @@ arrow::Status TranslateDagToTiForthAggBreakerPlan(const PipelineExecBuilder& dag
                                                                     /*max_output_rows=*/1 << 30);
       }));
   ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, convergent_stage));
+
+  return arrow::Status::OK();
+}
+
+arrow::Status RunHashAggTransformTranslationSmoke(bool use_arrow_compute_agg) {
+  PipelineExecutorContext exec_context;
+  const String req_id = "tiforth_pipeline_translate_hashagg_transform";
+
+  PipelineExecBuilder dag;
+  dag.setSourceOp(std::make_unique<DummyAggSourceOp>(exec_context, req_id));
+  dag.appendTransformOp(std::make_unique<DummyHashAggTransformOp>(exec_context, req_id));
+  dag.setSinkOp(std::make_unique<DummySinkOp>(exec_context, req_id));
+
+  ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, engine.get(), builder.get(), use_arrow_compute_agg));
+  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
+
+  ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
+  if (initial_state != tiforth::TaskState::kNeedInput) {
+    return arrow::Status::Invalid("expected TaskState::kNeedInput");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto batch0, MakeAggBatch0());
+  ARROW_RETURN_NOT_OK(task->PushInput(batch0));
+  ARROW_ASSIGN_OR_RAISE(auto batch1, MakeAggBatch1());
+  ARROW_RETURN_NOT_OK(task->PushInput(batch1));
+  ARROW_RETURN_NOT_OK(task->CloseInput());
+
+  std::vector<std::shared_ptr<arrow::RecordBatch>> outputs;
+  while (true) {
+    ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
+    if (state == tiforth::TaskState::kFinished) {
+      break;
+    }
+    if (state == tiforth::TaskState::kNeedInput) {
+      continue;
+    }
+    if (state != tiforth::TaskState::kHasOutput) {
+      return arrow::Status::Invalid("unexpected task state");
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto out, task->PullOutput());
+    if (out == nullptr) {
+      return arrow::Status::Invalid("expected non-null output batch");
+    }
+    if (out->num_columns() != 3) {
+      return arrow::Status::Invalid("unexpected output schema");
+    }
+    if (out->schema()->field(0)->name() != "cnt" || out->schema()->field(1)->name() != "sum_v" ||
+        out->schema()->field(2)->name() != "k") {
+      return arrow::Status::Invalid("unexpected output schema");
+    }
+    outputs.push_back(std::move(out));
+  }
+
+  std::multiset<std::vector<std::string>> row_set;
+  for (const auto& batch : outputs) {
+    ARROW_ASSIGN_OR_RAISE(auto rows, RecordBatchRowSet(*batch));
+    row_set.insert(rows.begin(), rows.end());
+  }
+
+  std::multiset<std::vector<std::string>> expected;
+  expected.insert({"2", "10", "1"});
+  expected.insert({"2", "21", "2"});
+  expected.insert({"2", "7", "null"});
+  expected.insert({"1", "5", "3"});
+  expected.insert({"1", "null", "4"});
+
+  if (row_set != expected) {
+    return arrow::Status::Invalid("unexpected output values");
+  }
 
   return arrow::Status::OK();
 }
@@ -634,6 +728,16 @@ TEST(TiForthPipelineTranslateTest, TiFlashDagWithFilterToTiForth) {
 
 TEST(TiForthPipelineTranslateTest, TiFlashDagWithHashAggToTiForth) {
   auto status = RunHashAggTranslationSmoke();
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthPipelineTranslateTest, TiFlashDagWithHashAggTransformToTiForth) {
+  auto status = RunHashAggTransformTranslationSmoke(/*use_arrow_compute_agg=*/false);
+  ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(TiForthPipelineTranslateTest, TiFlashDagWithArrowComputeAggTransformToTiForth) {
+  auto status = RunHashAggTransformTranslationSmoke(/*use_arrow_compute_agg=*/true);
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 
