@@ -182,32 +182,6 @@ std::optional<QueryExecutorPtr> executeAsPipeline(Context & context, bool intern
 }
 
 #if defined(TIFLASH_ENABLE_TIFORTH)
-bool isTiForthPassThroughDag(const DAGRequest & dag_request)
-{
-    size_t executor_count = 0;
-    bool supported = true;
-    dag_request.traverse([&](const tipb::Executor & executor) {
-        ++executor_count;
-        if (executor_count > 1)
-        {
-            supported = false;
-            return false;
-        }
-
-        switch (executor.tp())
-        {
-        case tipb::ExecType::TypeTableScan:
-        case tipb::ExecType::TypePartitionTableScan:
-        case tipb::ExecType::TypeExchangeReceiver:
-            return true;
-        default:
-            supported = false;
-            return false;
-        }
-    });
-    return supported && executor_count == 1;
-}
-
 QueryExecutorPtr executeAsTiForth(Context & context, bool internal)
 {
     RUNTIME_ASSERT(context.getDAGContext());
@@ -224,17 +198,6 @@ QueryExecutorPtr executeAsTiForth(Context & context, bool internal)
     auto memory_tracker = prepareQueryLevelMemoryTracker(context, dag_context, internal);
 
     FAIL_POINT_TRIGGER_EXCEPTION(FailPoints::random_interpreter_failpoint);
-
-    // Today TiForthQueryExecutor is a pass-through wrapper around a native stream pipeline.
-    // Allow non-pass-through DAGs only when we intentionally opt in for TiForth-backed compute
-    // inside the native plan (e.g. ArrowComputeAgg integration).
-    const bool allow_non_passthrough = context.getSettingsRef().enable_tiforth_arrow_compute_agg;
-    if (!allow_non_passthrough && !isTiForthPassThroughDag(dag_context.dag_request))
-    {
-        throw Exception(
-            ErrorCodes::NOT_IMPLEMENTED,
-            "TiForth executor supports only pass-through DAG requests for now (enable `enable_tiforth_arrow_compute_agg` to opt in)");
-    }
 
     Planner planner{context};
     auto stream = planner.execute();

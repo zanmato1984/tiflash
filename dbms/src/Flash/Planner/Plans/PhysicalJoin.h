@@ -15,6 +15,7 @@
 #pragma once
 
 #include <Flash/Planner/Plans/PhysicalBinary.h>
+#include <Core/Names.h>
 #include <Interpreters/ExpressionActions.h>
 #include <Interpreters/Join.h>
 #include <tipb/executor.pb.h>
@@ -42,11 +43,19 @@ public:
         const PhysicalPlanNodePtr & build_,
         const JoinPtr & join_ptr_,
         const ExpressionActionsPtr & probe_side_prepare_actions_,
-        const ExpressionActionsPtr & build_side_prepare_actions_)
+        const ExpressionActionsPtr & build_side_prepare_actions_,
+        std::vector<String> probe_key_names_,
+        std::vector<String> build_key_names_,
+        tipb::JoinType join_type_,
+        bool has_other_conditions_)
         : PhysicalBinary(executor_id_, PlanType::Join, schema_, fine_grained_shuffle_, req_id, probe_, build_)
         , join_ptr(join_ptr_)
         , probe_side_prepare_actions(probe_side_prepare_actions_)
         , build_side_prepare_actions(build_side_prepare_actions_)
+        , probe_key_names(std::move(probe_key_names_))
+        , build_key_names(std::move(build_key_names_))
+        , join_type(join_type_)
+        , has_other_conditions(has_other_conditions_)
     {}
 
     void buildPipeline(PipelineBuilder & builder, Context & context, PipelineExecutorContext & exec_context) override;
@@ -71,5 +80,10 @@ private:
 
     ExpressionActionsPtr probe_side_prepare_actions;
     ExpressionActionsPtr build_side_prepare_actions;
+
+    std::vector<String> probe_key_names;
+    std::vector<String> build_key_names;
+    tipb::JoinType join_type = tipb::JoinType::TypeInnerJoin;
+    bool has_other_conditions = false;
 };
 } // namespace DB

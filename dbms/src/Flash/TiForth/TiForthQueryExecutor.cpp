@@ -175,7 +175,6 @@ ExecutionResult TiForthQueryExecutor::execute(ResultHandler && result_handler)
             throw Exception(ErrorCodes::LOGICAL_ERROR, "tiforth task must not be null");
 
         bool input_closed = false;
-        bool pushed_any_input = false;
 
         while (true)
         {
@@ -197,7 +196,6 @@ ExecutionResult TiForthQueryExecutor::execute(ResultHandler && result_handler)
                     auto batch_res = toArrowRecordBatch(block, input_options_by_name, pool_holder.get());
                     if (!batch_res.ok())
                         throw Exception(batch_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-                    pushed_any_input = true;
 
                     auto st = task->PushInput(batch_res.ValueOrDie());
                     if (!st.ok())
@@ -205,18 +203,6 @@ ExecutionResult TiForthQueryExecutor::execute(ResultHandler && result_handler)
                 }
                 else
                 {
-                    if (!pushed_any_input)
-                    {
-                        auto batch_res = toArrowRecordBatch(sample_block, input_options_by_name, pool_holder.get());
-                        if (!batch_res.ok())
-                            throw Exception(batch_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-                        pushed_any_input = true;
-
-                        auto st = task->PushInput(batch_res.ValueOrDie());
-                        if (!st.ok())
-                            throw Exception(st.ToString(), ErrorCodes::LOGICAL_ERROR);
-                    }
-
                     auto st = task->CloseInput();
                     if (!st.ok())
                         throw Exception(st.ToString(), ErrorCodes::LOGICAL_ERROR);

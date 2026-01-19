@@ -82,7 +82,9 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
 {
     if (!context.getSettingsRef().enable_tiforth_executor)
         return std::nullopt;
-    if (!context.getSettingsRef().enable_tiforth_arrow_compute_agg)
+    const bool allow_tiforth_agg
+        = context.getSettingsRef().enable_tiforth_translate_dag || context.getSettingsRef().enable_tiforth_arrow_compute_agg;
+    if (!allow_tiforth_agg)
         return std::nullopt;
     if (expr_after_agg == nullptr)
         return std::nullopt;
@@ -167,7 +169,7 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
     }
 
     const bool has_string_key = containsStringGroupKeys(before_agg_header, aggregation_keys);
-    const bool use_arrow_compute = !aggregation_keys.empty() && !has_string_key;
+    const bool use_arrow_compute = context.getSettingsRef().enable_tiforth_arrow_compute_agg && !aggregation_keys.empty() && !has_string_key;
 
     size_t max_threads = static_cast<size_t>(context.getSettingsRef().max_threads);
     if (max_threads == 0)

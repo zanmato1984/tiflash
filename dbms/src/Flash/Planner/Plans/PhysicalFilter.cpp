@@ -23,6 +23,19 @@
 #include <Interpreters/Context.h>
 #include <Operators/FilterTransformOp.h>
 
+#if defined(TIFLASH_ENABLE_TIFORTH)
+#include <DataTypes/DataTypeNullable.h>
+#include <Flash/TiForth/TiFlashMemoryPool.h>
+#include <Flash/TiForth/TiForthPipelineBlockInputStream.h>
+#include <Flash/TiForth/TipbExprToTiForthExpr.h>
+
+#include <arrow/memory_pool.h>
+
+#include "tiforth/engine.h"
+#include "tiforth/operators/filter.h"
+#include "tiforth/pipeline.h"
+#endif // defined(TIFLASH_ENABLE_TIFORTH)
+
 namespace DB
 {
 PhysicalPlanNodePtr PhysicalFilter::build(
@@ -39,12 +52,18 @@ PhysicalPlanNodePtr PhysicalFilter::build(
 
     String filter_column_name = analyzer.buildFilterColumn(before_filter_actions, selection.conditions(), true);
 
+    std::vector<tipb::Expr> conditions;
+    conditions.reserve(static_cast<size_t>(selection.conditions_size()));
+    for (const auto & cond : selection.conditions())
+        conditions.push_back(cond);
+
     auto physical_filter = std::make_shared<PhysicalFilter>(
         executor_id,
         child->getSchema(),
         child->getFineGrainedShuffle(),
         log->identifier(),
         child,
+        std::move(conditions),
         filter_column_name,
         before_filter_actions);
 
@@ -54,6 +73,96 @@ PhysicalPlanNodePtr PhysicalFilter::build(
 void PhysicalFilter::buildBlockInputStreamImpl(DAGPipeline & pipeline, Context & context, size_t max_streams)
 {
     child->buildBlockInputStream(pipeline, context, max_streams);
+
+#if defined(TIFLASH_ENABLE_TIFORTH)
+    if (context.getSettingsRef().enable_tiforth_executor && context.getSettingsRef().enable_tiforth_translate_dag)
+    {
+        const auto input_header = pipeline.firstStream()->getHeader();
+        bool has_string = false;
+        for (const auto & col : input_header)
+        {
+            if (col.type == nullptr)
+                continue;
+            if (removeNullable(col.type)->isStringOrFixedString())
+            {
+                has_string = true;
+                break;
+            }
+        }
+
+        if (!has_string)
+        {
+            auto predicate_res = DB::TiForth::TipbSelectionConditionsToTiForthPredicate(conditions, child->getSchema());
+            if (predicate_res.ok())
+            {
+                const auto predicate = predicate_res.ValueOrDie();
+                auto pool_holder = DB::TiForth::MakeCurrentMemoryTrackerPoolOrDefault(arrow::default_memory_pool());
+
+                NamesAndTypesList output_columns;
+                for (const auto & col : input_header)
+                    output_columns.emplace_back(col.name, col.type);
+
+                BlockInputStreams new_streams;
+                new_streams.reserve(pipeline.streams.size());
+                bool ok = true;
+                for (const auto & stream : pipeline.streams)
+                {
+                    tiforth::EngineOptions engine_options;
+                    engine_options.memory_pool = pool_holder.get();
+                    auto engine_res = tiforth::Engine::Create(engine_options);
+                    if (!engine_res.ok() || engine_res.ValueOrDie() == nullptr)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    auto engine = std::move(engine_res).ValueOrDie();
+
+                    auto builder_res = tiforth::PipelineBuilder::Create(engine.get());
+                    if (!builder_res.ok() || builder_res.ValueOrDie() == nullptr)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    auto builder = std::move(builder_res).ValueOrDie();
+
+                    const auto st = builder->AppendTransform(
+                        [engine = engine.get(), predicate]() -> arrow::Result<tiforth::TransformOpPtr> {
+                            return std::make_unique<tiforth::FilterTransformOp>(engine, predicate);
+                        });
+                    if (!st.ok())
+                    {
+                        ok = false;
+                        break;
+                    }
+
+                    auto pipeline_res = builder->Finalize();
+                    if (!pipeline_res.ok() || pipeline_res.ValueOrDie() == nullptr)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    auto tiforth_pipeline = std::move(pipeline_res).ValueOrDie();
+
+                    new_streams.push_back(std::make_shared<DB::TiForth::TiForthPipelineBlockInputStream>(
+                        "TiForthFilter",
+                        stream,
+                        std::move(engine),
+                        std::move(tiforth_pipeline),
+                        output_columns,
+                        /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
+                        pool_holder,
+                        input_header));
+                }
+
+                if (ok)
+                {
+                    pipeline.streams = std::move(new_streams);
+                    return;
+                }
+            }
+        }
+    }
+#endif // defined(TIFLASH_ENABLE_TIFORTH)
 
     pipeline.transform([&](auto & stream) {
         stream
