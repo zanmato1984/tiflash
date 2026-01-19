@@ -127,6 +127,62 @@ The slowdown is primarily **representation + algorithmic overhead** in Arrow’s
 - `BinaryArray` keys require **varlen hashing** and **varlen equality comparisons** against an internal row table of unique keys.
 - The Arrow grouper implementation uses a Swiss-table + row-table layout; for varlen keys this triggers frequent varbinary compare logic (`CompareVarBinaryColumnToRowHelper`) and memmove/memcpy in the hot loop.
 
+## Why TiFlash native is faster than Arrow/Acero for short strings
+
+The benchmark’s `kString` keys are **very short** (e.g. `"k0"`, `"k1"`, ...). This matters because TiFlash’s native
+aggregation uses a **string-specialized hash table** that turns short strings into fixed-width keys, while Arrow treats
+all strings as varlen.
+
+### TiFlash: `StringHashTable` small-string specialization + saved-hash for long strings
+
+TiFlash’s `StringHashMap` is backed by `StringHashTable` which dispatches string keys into multiple subtables:
+
+- **1..8 bytes** → `StringKey8` (`UInt64`)
+- **9..16 bytes** → `StringKey16` (`UInt128`)
+- **17..24 bytes** → `StringKey24` (3×`UInt64`)
+- **>= 25 bytes** → `StringRef` table with **saved hash**
+
+Key properties:
+
+- Short strings are materialized into fixed-width integers once (`memcpy` + bit-shift mask) and then compared by
+  integer equality (no varbinary loop / memcmp).
+- Hashing for the short-string tables uses **CRC32 on 8-byte chunks** when available (SSE4.2 / ARM CRC), otherwise
+  CityHash on the fixed-width key.
+- Long strings use a `HashMapCellWithSavedHash` (saved `size_t` hash) so probing can reject mismatches quickly before
+  touching key bytes.
+
+Relevant code:
+
+- `dbms/src/Common/HashTable/StringHashTable.h` (`dispatch()` 1..24B → StringKey8/16/24; >=25B → StringRef)
+- `dbms/src/Common/HashTable/StringHashMap.h` (`StringHashMapCell<StringRef, ...>` uses `HashMapCellWithSavedHash`)
+- `dbms/src/Common/HashTable/HashMap.h` (`HashMapCellWithSavedHash`)
+
+### Arrow/Acero: varlen hash + row-table varbinary compare for every row
+
+Arrow’s grouped aggregation (Acero `GroupByNode`) uses `GrouperFastImpl`:
+
+- Hashing: `Hashing32::HashMultiColumn` → `HashVarLenImp` scans varlen payload (16-byte “stripe” hashing).
+- Lookup: `SwissTable::find` uses an equality callback which, for varlen keys, calls
+  `KeyCompare::CompareVarBinaryColumnToRowHelper`.
+
+For short strings, the per-row overhead is dominated by the *framework* around comparing varlen keys:
+
+- decode varbinary offset/length from the row-table encoding (`first_varbinary_offset_and_length` / `nth_varbinary...`)
+- compare 8 bytes at a time using `SafeLoad` (often compiles to `memcpy`/`memmove` for unaligned loads)
+- allocate and update temporary match byte/bit vectors per minibatch
+
+Relevant code:
+
+- `cmake-build-debug/_deps/arrow-src/cpp/src/arrow/compute/row/grouper.cc` (`GrouperFastImpl::ConsumeImpl`)
+- `cmake-build-debug/_deps/arrow-src/cpp/src/arrow/compute/key_hash_internal.cc` (`Hashing32::HashVarLenImp`)
+- `cmake-build-debug/_deps/arrow-src/cpp/src/arrow/compute/row/compare_internal.cc` (`CompareVarBinaryColumnToRowHelper`)
+
+### Practical takeaway
+
+TiFlash wins for “short string key” workloads mainly because the key becomes *effectively fixed-width* (<=24B), so both
+hashing and equality checks avoid the varlen path. Arrow/Acero has no equivalent “short string key → integer” fast path
+in the grouper today, so it pays varlen hash + varlen compare costs even when keys are tiny.
+
 Why dict keys help:
 
 - Feeding a `DictionaryArray` with a **stable dictionary** effectively turns the group key into a fixed-width integer index, avoiding the varbinary compare loop.
