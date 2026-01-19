@@ -29,6 +29,7 @@
 
 #include <Flash/TiForth/ArrowTypeMapping.h>
 
+#include <arrow/builder.h>
 #include <arrow/result.h>
 #include <arrow/status.h>
 #include <arrow/util/logging.h>
@@ -161,6 +162,7 @@ private:
 struct Dataset {
     std::vector<Block> blocks;
     std::vector<std::shared_ptr<arrow::RecordBatch>> arrow_batches;
+    std::vector<std::shared_ptr<arrow::RecordBatch>> arrow_batches_dict_key;
     Block header;
 };
 
@@ -285,6 +287,59 @@ std::shared_ptr<Dataset> GetOrCreateDataset(const BenchConfig & cfg) {
             = TiForth::toArrowRecordBatch(block, options_by_name, arrow::default_memory_pool());
         ARROW_CHECK_OK(maybe_batch.status());
         out->arrow_batches.push_back(std::move(maybe_batch).ValueUnsafe());
+    }
+
+    if (cfg.key_type == KeyType::kString) {
+        std::unordered_map<std::string_view, Int32> dict_index;
+        dict_index.reserve(string_key_dictionary.size());
+        for (size_t i = 0; i < string_key_dictionary.size(); ++i) {
+            dict_index.emplace(string_key_dictionary[i], static_cast<Int32>(i));
+        }
+
+        arrow::BinaryBuilder dict_builder(arrow::default_memory_pool());
+        for (const auto & s : string_key_dictionary) {
+            ARROW_CHECK_OK(dict_builder.Append(s));
+        }
+        std::shared_ptr<arrow::Array> dict_values;
+        ARROW_CHECK_OK(dict_builder.Finish(&dict_values));
+        ARROW_CHECK(dict_values != nullptr);
+
+        const auto dict_type = arrow::dictionary(arrow::int32(), dict_values->type());
+
+        out->arrow_batches_dict_key.reserve(out->arrow_batches.size());
+        for (const auto & batch : out->arrow_batches) {
+            ARROW_CHECK(batch != nullptr);
+            ARROW_CHECK(batch->num_columns() == 2);
+            auto schema = batch->schema();
+            ARROW_CHECK(schema != nullptr);
+            ARROW_CHECK(schema->num_fields() == 2);
+
+            const auto & key_array = batch->column(0);
+            ARROW_CHECK(key_array != nullptr);
+            const auto & key_binary = dynamic_cast<const arrow::BinaryArray &>(*key_array);
+            arrow::Int32Builder index_builder(arrow::default_memory_pool());
+            ARROW_CHECK_OK(index_builder.Reserve(batch->num_rows()));
+            for (int64_t i = 0; i < batch->num_rows(); ++i) {
+                const auto view = key_binary.GetView(i);
+                auto it = dict_index.find(view);
+                ARROW_CHECK(it != dict_index.end());
+                ARROW_CHECK_OK(index_builder.Append(it->second));
+            }
+            std::shared_ptr<arrow::Array> indices;
+            ARROW_CHECK_OK(index_builder.Finish(&indices));
+            ARROW_CHECK(indices != nullptr);
+
+            auto maybe_dict_array = arrow::DictionaryArray::FromArrays(dict_type, indices, dict_values);
+            ARROW_CHECK_OK(maybe_dict_array.status());
+            auto dict_array = std::move(maybe_dict_array).ValueUnsafe();
+            ARROW_CHECK(dict_array != nullptr);
+
+            auto fields = schema->fields();
+            fields[0] = fields[0]->WithType(dict_array->type());
+            auto dict_schema = arrow::schema(std::move(fields), schema->metadata());
+            out->arrow_batches_dict_key.push_back(arrow::RecordBatch::Make(
+                std::move(dict_schema), batch->num_rows(), {std::move(dict_array), batch->column(1)}));
+        }
     }
 
     cache.emplace(id, out);
@@ -450,6 +505,73 @@ void RunTiForthArrowComputeAgg(const BenchConfig & cfg, benchmark::State & state
     state.SetItemsProcessed(static_cast<int64_t>(cfg.num_rows) * state.iterations());
 }
 
+void RunTiForthArrowComputeAggDictKey(const BenchConfig & cfg, benchmark::State & state) {
+    ARROW_CHECK(cfg.key_type == KeyType::kString);
+    const auto dataset = GetOrCreateDataset(cfg);
+    ARROW_CHECK(!dataset->arrow_batches_dict_key.empty());
+
+    auto maybe_engine = tiforth::Engine::Create(tiforth::EngineOptions{});
+    ARROW_CHECK_OK(maybe_engine.status());
+    auto engine = std::move(maybe_engine).ValueUnsafe();
+
+    std::unique_ptr<tiforth::Pipeline> pipeline;
+    {
+        auto maybe_builder = tiforth::PipelineBuilder::Create(engine.get());
+        ARROW_CHECK_OK(maybe_builder.status());
+        auto builder = std::move(maybe_builder).ValueUnsafe();
+        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
+        std::vector<tiforth::AggFunc> aggs;
+        aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
+        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
+
+        auto status = builder->AppendTransform(
+            [engine_ptr = engine.get(), keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
+                return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine_ptr, keys, aggs);
+            });
+        ARROW_CHECK_OK(status);
+
+        auto maybe_pipeline = builder->Finalize();
+        ARROW_CHECK_OK(maybe_pipeline.status());
+        pipeline = std::move(maybe_pipeline).ValueUnsafe();
+    }
+
+    for (const auto & _ : state) {
+        (void)_;
+        auto maybe_task = pipeline->CreateTask();
+        ARROW_CHECK_OK(maybe_task.status());
+        auto task = std::move(maybe_task).ValueUnsafe();
+        auto maybe_task_state = task->Step();
+        ARROW_CHECK_OK(maybe_task_state.status());
+        auto task_state = maybe_task_state.ValueUnsafe();
+        ARROW_CHECK(task_state == tiforth::TaskState::kNeedInput);
+
+        for (const auto & batch : dataset->arrow_batches_dict_key) {
+            ARROW_CHECK_OK(task->PushInput(batch));
+        }
+        ARROW_CHECK_OK(task->CloseInput());
+
+        while (true) {
+            maybe_task_state = task->Step();
+            ARROW_CHECK_OK(maybe_task_state.status());
+            task_state = maybe_task_state.ValueUnsafe();
+            if (task_state == tiforth::TaskState::kFinished) {
+                break;
+            }
+            if (task_state == tiforth::TaskState::kNeedInput) {
+                continue;
+            }
+            ARROW_CHECK(task_state == tiforth::TaskState::kHasOutput);
+            auto maybe_out = task->PullOutput();
+            ARROW_CHECK_OK(maybe_out.status());
+            auto out = std::move(maybe_out).ValueUnsafe();
+            ARROW_CHECK(out != nullptr);
+            benchmark::DoNotOptimize(out->num_rows());
+        }
+    }
+
+    state.SetItemsProcessed(static_cast<int64_t>(cfg.num_rows) * state.iterations());
+}
+
 void RegisterCases() {
     const size_t num_rows_numeric = 1 << 20;
     const size_t rows_per_block = 1 << 16;
@@ -479,6 +601,12 @@ void RegisterCases() {
         benchmark::RegisterBenchmark(
             fmt::format("ArrowComputeAgg/TiForth/{}", case_name).c_str(),
             [cfg](benchmark::State & state) { RunTiForthArrowComputeAgg(cfg, state); });
+
+        if (cfg.key_type == KeyType::kString) {
+            benchmark::RegisterBenchmark(
+                fmt::format("ArrowComputeAgg/TiForthDictKey/{}", case_name).c_str(),
+                [cfg](benchmark::State & state) { RunTiForthArrowComputeAggDictKey(cfg, state); });
+        }
     }
 }
 
