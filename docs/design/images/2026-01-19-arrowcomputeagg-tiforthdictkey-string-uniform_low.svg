@@ -1,0 +1,3090 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="774" onload="init(evt)" viewBox="0 0 1200 774" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="774.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >2026-01-19-arrowcomputeagg-tiforthdictkey-string-uniform_low</text>
+<text id="details" x="10.00" y="757" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="757" > </text>
+<g id="frames">
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="19.6" y="101" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="22.63" y="111.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::RowTableEncoder::PrepareEncodeSelected(long.long, (9 samples, 0.13%)</title><rect x="149.8" y="341" width="1.6" height="15.0" fill="rgb(221,78,18)" rx="2" ry="2" />
+<text  x="152.84" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::QueryContext::QueryContext(arrow::acero::QueryOptions,.arrow::compute::ExecContext) (1 samples, 0.01%)</title><rect x="1187.6" y="421" width="0.2" height="15.0" fill="rgb(239,160,38)" rx="2" ry="2" />
+<text  x="1190.64" y="431.5" ></text>
+</g>
+<g >
+<title>bench_dbms`DYLD-STUB$$std::__shared_weak_count::__release_weak() (1 samples, 0.01%)</title><rect x="15.6" y="501" width="0.1" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="18.57" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::TaskSchedulerImpl::StartTaskGroup(unsigned.long, (8 samples, 0.11%)</title><rect x="23.2" y="373" width="1.3" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="26.17" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::vector&lt;arrow::ArraySpan&gt;::~vector[abi:ne200100]() (2 samples, 0.03%)</title><rect x="1180.4" y="373" width="0.3" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="1183.37" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="40.6" y="325" width="0.1" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="43.57" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::SwissTable::find(int,.unsigned (1,382 samples, 19.78%)</title><rect x="645.0" y="341" width="233.4" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="648.01" y="351.5" >libarrow_compute.2200.0.0`arro..</text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memmove (4 samples, 0.06%)</title><rect x="10.7" y="485" width="0.7" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="13.68" y="495.5" ></text>
+</g>
+<g >
+<title>libsystem_pthread`_pthread_mutex_check_init_slow (2 samples, 0.03%)</title><rect x="20.5" y="37" width="0.3" height="15.0" fill="rgb(242,171,41)" rx="2" ry="2" />
+<text  x="23.47" y="47.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1186.3" y="341" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1189.28" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`malloc_type_malloc (1 samples, 0.01%)</title><rect x="1185.9" y="309" width="0.2" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="1188.95" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::FutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (1 samples, 0.01%)</title><rect x="1182.2" y="453" width="0.2" height="15.0" fill="rgb(221,75,17)" rx="2" ry="2" />
+<text  x="1185.23" y="463.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::internal::SerialExecutor::SpawnReal(arrow::internal::TaskHints,.arrow::internal::FnOnce&lt;void (1 samples, 0.01%)</title><rect x="20.8" y="117" width="0.2" height="15.0" fill="rgb(207,9,2)" rx="2" ry="2" />
+<text  x="23.81" y="127.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::internal::AddTemporalKernels&lt;arrow::compute::internal::(anonymous.namespace)::UnaryTemporalFactory&lt;arrow::compute::internal::(anonymous (1 samples, 0.01%)</title><rect x="13.9" y="453" width="0.2" height="15.0" fill="rgb(243,175,41)" rx="2" ry="2" />
+<text  x="16.88" y="463.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::__sift_up[abi:ne200100]&lt;std::_ClassicAlgPolicy,.std::__wrap_iter&lt;arrow::internal::(anonymous (1 samples, 0.01%)</title><rect x="21.7" y="421" width="0.1" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="24.65" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;int&gt;::DoMarkFinished(arrow::Result&lt;int&gt;) (3 samples, 0.04%)</title><rect x="19.5" y="229" width="0.5" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="22.46" y="239.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`small_malloc_from_free_list (1 samples, 0.01%)</title><rect x="1189.7" y="437" width="0.1" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="1192.66" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (1 samples, 0.01%)</title><rect x="22.5" y="261" width="0.2" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="25.50" y="271.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__shared_ptr_emplace&lt;arrow::acero::(anonymous.namespace)::BatchConverter&gt;::__on_zero_shared() (1 samples, 0.01%)</title><rect x="1183.1" y="453" width="0.1" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="1186.08" y="463.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="16.1" y="469" width="0.1" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="19.08" y="479.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`free_tiny (2 samples, 0.03%)</title><rect x="1178.7" y="357" width="0.3" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="1181.68" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::TaskScheduler::Make() (1 samples, 0.01%)</title><rect x="1187.6" y="405" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="1190.64" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::RunOrScheduleCallback(std::shared_ptr&lt;arrow::FutureImpl&gt;.const&amp;, (1 samples, 0.01%)</title><rect x="22.5" y="277" width="0.2" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="25.50" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::~ConcreteFutureImpl() (1 samples, 0.01%)</title><rect x="23.5" y="213" width="0.2" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="26.51" y="223.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (2 samples, 0.03%)</title><rect x="15.1" y="485" width="0.3" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="18.07" y="495.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::vector&lt;arrow::compute::SortKey&gt;::__init_with_size[abi:ne200100]&lt;arrow::compute::SortKey*,.arrow::compute::SortKey*&gt;(arrow::compute::SortKey*, (1 samples, 0.01%)</title><rect x="14.4" y="533" width="0.2" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="17.39" y="543.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::(anonymous.namespace)::RangeDataEqualsImpl::CompareWithType(arrow::DataType (3 samples, 0.04%)</title><rect x="38.9" y="325" width="0.5" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="41.88" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memset (1 samples, 0.01%)</title><rect x="24.0" y="69" width="0.2" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="27.02" y="79.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::ExecuteScalarExpression(arrow::compute::Expression.const&amp;, (2 samples, 0.03%)</title><rect x="29.3" y="373" width="0.3" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="32.25" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::RunOrScheduleCallback(std::shared_ptr&lt;arrow::FutureImpl&gt;.const&amp;, (2 samples, 0.03%)</title><rect x="19.5" y="197" width="0.3" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="22.46" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_free_list_add_ptr (1 samples, 0.01%)</title><rect x="36.2" y="277" width="0.1" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="39.18" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`std::__function::__func&lt;arrow::compute::(anonymous.namespace)::GrouperFastImpl::Make(std::vector&lt;arrow::TypeHolder&gt; (645 samples, 9.23%)</title><rect x="769.3" y="309" width="108.9" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="772.31" y="319.5" >libarrow_comp..</text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::Hashing32::HashInt(bool,.unsigned (625 samples, 8.95%)</title><rect x="42.9" y="325" width="105.6" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="45.93" y="335.5" >libarrow_com..</text>
+</g>
+<g >
+<title>bench_dbms`tiforth::detail::CompileExpr(std::shared_ptr&lt;arrow::Schema&gt;.const&amp;, (4 samples, 0.06%)</title><rect x="1183.2" y="501" width="0.7" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="1186.24" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;int&gt;::MarkFinished(arrow::Result&lt;int&gt;) (3 samples, 0.04%)</title><rect x="19.5" y="245" width="0.5" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="22.46" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::MapNode::StartProducing() (1 samples, 0.01%)</title><rect x="1188.0" y="405" width="0.1" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="1190.97" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::Declaration::AddToPlan(arrow::acero::ExecPlan*,.arrow::acero::ExecFactoryRegistry*) (3 samples, 0.04%)</title><rect x="1184.3" y="421" width="0.5" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="1187.26" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Resize(long.long, (1 samples, 0.01%)</title><rect x="34.7" y="293" width="0.1" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="37.66" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::DeclarationToReader(arrow::acero::Declaration,.arrow::acero::QueryOptions)::PlanReader::~PlanReader() (12 samples, 0.17%)</title><rect x="16.2" y="501" width="2.1" height="15.0" fill="rgb(254,225,53)" rx="2" ry="2" />
+<text  x="19.25" y="511.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memmove (1 samples, 0.01%)</title><rect x="10.5" y="533" width="0.2" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="13.51" y="543.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ArrayData::~ArrayData() (3 samples, 0.04%)</title><rect x="35.2" y="341" width="0.5" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="38.16" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`szone_malloc_should_clear (1 samples, 0.01%)</title><rect x="39.7" y="229" width="0.2" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="42.72" y="239.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`small_free_list_remove_ptr_no_clear (1 samples, 0.01%)</title><rect x="15.2" y="421" width="0.2" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="18.24" y="431.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_malloc_should_clear (1 samples, 0.01%)</title><rect x="1179.4" y="309" width="0.1" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="1182.36" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::Initialize() (1 samples, 0.01%)</title><rect x="13.9" y="501" width="0.2" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="16.88" y="511.5" ></text>
+</g>
+<g >
+<title>libsystem_pthread`pthread_cond_broadcast (1 samples, 0.01%)</title><rect x="22.7" y="261" width="0.1" height="15.0" fill="rgb(226,101,24)" rx="2" ry="2" />
+<text  x="25.67" y="271.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::SourceNode::StartProducing() (1 samples, 0.01%)</title><rect x="1187.8" y="405" width="0.2" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="1190.80" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::KeyColumnArray::Slice(long.long, (5 samples, 0.07%)</title><rect x="150.5" y="325" width="0.9" height="15.0" fill="rgb(227,105,25)" rx="2" ry="2" />
+<text  x="153.51" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::util::(anonymous.namespace)::AsyncTaskSchedulerImpl::AddTask(std::unique_ptr&lt;arrow::util::AsyncTaskScheduler::Task&gt;) (1 samples, 0.01%)</title><rect x="20.8" y="165" width="0.2" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="23.81" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (2 samples, 0.03%)</title><rect x="35.3" y="325" width="0.4" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="38.33" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::vector&lt;arrow::compute::Aggregate&gt;::__init_with_size[abi:ne200100]&lt;arrow::compute::Aggregate*,.arrow::compute::Aggregate*&gt;(arrow::compute::Aggregate*, (2 samples, 0.03%)</title><rect x="1186.1" y="357" width="0.4" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="1189.12" y="367.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::make_unique[abi:ne200100]&lt;tiforth::ArrowComputeAggTransformOp,.tiforth::Engine* (1 samples, 0.01%)</title><rect x="14.1" y="533" width="0.1" height="15.0" fill="rgb(245,185,44)" rx="2" ry="2" />
+<text  x="17.05" y="543.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::SwissTable::map_new_keys_helper(unsigned.int (4 samples, 0.06%)</title><rect x="880.1" y="325" width="0.7" height="15.0" fill="rgb(234,133,32)" rx="2" ry="2" />
+<text  x="883.10" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_c`_swrite (1 samples, 0.01%)</title><rect x="10.0" y="533" width="0.2" height="15.0" fill="rgb(215,50,12)" rx="2" ry="2" />
+<text  x="13.00" y="543.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::SimpleRecordBatch::SimpleRecordBatch(std::shared_ptr&lt;arrow::Schema&gt;,.long (1 samples, 0.01%)</title><rect x="19.0" y="469" width="0.1" height="15.0" fill="rgb(212,36,8)" rx="2" ry="2" />
+<text  x="21.95" y="479.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::KeyValueMetadata::FindKey(std::basic_string_view&lt;char&gt;).const (1 samples, 0.01%)</title><rect x="1183.6" y="437" width="0.2" height="15.0" fill="rgb(228,108,25)" rx="2" ry="2" />
+<text  x="1186.58" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::SimplifyWithGuarantee(arrow::compute::Expression,.arrow::compute::Expression (3 samples, 0.04%)</title><rect x="31.4" y="357" width="0.6" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="34.45" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__function::__alloc_func&lt;arrow::acero::(anonymous.namespace)::SourceNode::SliceAndDeliverMorsel(arrow::compute::ExecBatch (2 samples, 0.03%)</title><rect x="22.0" y="405" width="0.3" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="24.99" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Reserve(long.long) (1 samples, 0.01%)</title><rect x="25.0" y="293" width="0.2" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="28.03" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::FutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (2 samples, 0.03%)</title><rect x="20.5" y="181" width="0.3" height="15.0" fill="rgb(221,75,17)" rx="2" ry="2" />
+<text  x="23.47" y="191.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::bit_util::bytes_to_bits(long.long, (25 samples, 0.36%)</title><rect x="873.5" y="277" width="4.2" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="876.51" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::RunOrScheduleCallback(std::shared_ptr&lt;arrow::FutureImpl&gt;.const&amp;, (2 samples, 0.03%)</title><rect x="22.5" y="373" width="0.3" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="25.50" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_free (1 samples, 0.01%)</title><rect x="1178.2" y="357" width="0.1" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="1181.18" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::FutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (1 samples, 0.01%)</title><rect x="23.7" y="149" width="0.1" height="15.0" fill="rgb(221,75,17)" rx="2" ry="2" />
+<text  x="26.68" y="159.5" ></text>
+</g>
+<g >
+<title>bench_dbms`&lt;deduplicated_symbol&gt; (1 samples, 0.01%)</title><rect x="14.6" y="517" width="0.1" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="17.56" y="527.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="25.7" y="325" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="28.71" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`malloc_type_malloc (1 samples, 0.01%)</title><rect x="1186.3" y="325" width="0.2" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="1189.28" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ArrayData::~ArrayData() (2 samples, 0.03%)</title><rect x="1181.6" y="373" width="0.3" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="1184.56" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`&lt;deduplicated_symbol&gt; (1 samples, 0.01%)</title><rect x="40.2" y="325" width="0.2" height="15.0" fill="rgb(224,87,20)" rx="2" ry="2" />
+<text  x="43.23" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::~ConcreteFutureImpl() (1 samples, 0.01%)</title><rect x="19.8" y="181" width="0.2" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="22.80" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memcmp (1 samples, 0.01%)</title><rect x="12.7" y="549" width="0.2" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="15.70" y="559.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1184.9" y="309" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1187.93" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::(anonymous.namespace)::GrouperFastImpl::AllocatePaddedBuffer(long (1 samples, 0.01%)</title><rect x="25.0" y="341" width="0.2" height="15.0" fill="rgb(205,3,0)" rx="2" ry="2" />
+<text  x="28.03" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::(anonymous.namespace)::GrouperFastImpl::~GrouperFastImpl() (3 samples, 0.04%)</title><rect x="25.4" y="341" width="0.5" height="15.0" fill="rgb(242,171,41)" rx="2" ry="2" />
+<text  x="28.37" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::BaseMemoryPoolImpl&lt;arrow::(anonymous.namespace)::SystemAllocator&gt;::Free(unsigned (2 samples, 0.03%)</title><rect x="25.4" y="293" width="0.3" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="28.37" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`&lt;deduplicated_symbol&gt; (2 samples, 0.03%)</title><rect x="1184.4" y="341" width="0.4" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="1187.43" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::util::Mutex::Lock() (1 samples, 0.01%)</title><rect x="1182.4" y="421" width="0.2" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="1185.40" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::Datum::type().const (1 samples, 0.01%)</title><rect x="29.3" y="357" width="0.1" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="32.25" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::TempVectorStack::release(int,.unsigned (4 samples, 0.06%)</title><rect x="149.0" y="325" width="0.7" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="151.99" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::allocate_shared[abi:ne200100]&lt;arrow::BooleanScalar,.bool&amp;, (1 samples, 0.01%)</title><rect x="32.1" y="341" width="0.2" height="15.0" fill="rgb(234,133,31)" rx="2" ry="2" />
+<text  x="35.12" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::ExecBatch::ExecBatch(arrow::RecordBatch.const&amp;) (2 samples, 0.03%)</title><rect x="1183.9" y="517" width="0.4" height="15.0" fill="rgb(248,200,47)" rx="2" ry="2" />
+<text  x="1186.92" y="527.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`malloc_type_malloc (1 samples, 0.01%)</title><rect x="36.7" y="325" width="0.2" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="39.68" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::~PoolBuffer() (2 samples, 0.03%)</title><rect x="25.4" y="325" width="0.3" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="28.37" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memset (1 samples, 0.01%)</title><rect x="644.8" y="325" width="0.2" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="647.84" y="335.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::basic_streambuf&lt;char&gt;::xsputn(char.const*, (3 samples, 0.04%)</title><rect x="1188.5" y="325" width="0.5" height="15.0" fill="rgb(230,116,27)" rx="2" ry="2" />
+<text  x="1191.48" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`__bzero (1 samples, 0.01%)</title><rect x="16.8" y="389" width="0.1" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="19.76" y="399.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1185.9" y="325" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1188.95" y="335.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::Task::Init(std::vector&lt;std::unique_ptr&lt;tiforth::TransformOp&gt;&gt;) (1 samples, 0.01%)</title><rect x="14.2" y="533" width="0.2" height="15.0" fill="rgb(215,48,11)" rx="2" ry="2" />
+<text  x="17.22" y="543.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::FunctionRegistry::FunctionRegistryImpl::GetFunction(std::basic_string&lt;char&gt;.const&amp;) (1 samples, 0.01%)</title><rect x="1185.6" y="325" width="0.2" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="1188.61" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_free (1 samples, 0.01%)</title><rect x="1180.0" y="341" width="0.2" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="1183.04" y="351.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::__shared_weak_count::__release_weak() (1 samples, 0.01%)</title><rect x="21.3" y="421" width="0.2" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="24.32" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`&lt;deduplicated_symbol&gt; (1 samples, 0.01%)</title><rect x="1185.6" y="309" width="0.2" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="1188.61" y="319.5" ></text>
+</g>
+<g >
+<title>libc++abi`DYLD-STUB$$malloc_type_malloc (1 samples, 0.01%)</title><rect x="18.4" y="485" width="0.2" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="21.44" y="495.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::FieldRef::hash().const (1 samples, 0.01%)</title><rect x="31.3" y="309" width="0.1" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="34.28" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::Schema::~Schema() (1 samples, 0.01%)</title><rect x="16.2" y="421" width="0.2" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="19.25" y="431.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_free_list_add_ptr (1 samples, 0.01%)</title><rect x="878.9" y="149" width="0.2" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="881.91" y="159.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::internal::SerialExecutor::RunTasksOnAllExecutors() (6,887 samples, 98.57%)</title><rect x="19.1" y="453" width="1163.1" height="15.0" fill="rgb(210,27,6)" rx="2" ry="2" />
+<text  x="22.12" y="463.5" >libarrow.2200.0.0`arrow::internal::SerialExecutor::RunTasksOnAllExecutors()</text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::RunOrScheduleCallback(std::shared_ptr&lt;arrow::FutureImpl&gt;.const&amp;, (2 samples, 0.03%)</title><rect x="20.5" y="149" width="0.3" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="23.47" y="159.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Reserve(long.long) (1 samples, 0.01%)</title><rect x="34.7" y="277" width="0.1" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="37.66" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::vector&lt;arrow::compute::ExecValue&gt;::__emplace_back_slow_path&lt;arrow::compute::ExecValue.const&amp;&gt;(arrow::compute::ExecValue (3 samples, 0.04%)</title><rect x="36.3" y="357" width="0.6" height="15.0" fill="rgb(222,78,18)" rx="2" ry="2" />
+<text  x="39.35" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (1 samples, 0.01%)</title><rect x="23.7" y="133" width="0.1" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="26.68" y="143.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::Finalize() (12 samples, 0.17%)</title><rect x="24.5" y="373" width="2.1" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="27.52" y="383.5" ></text>
+</g>
+<g >
+<title>bench_dbms`arrow::acero::Declaration::Declaration&lt;arrow::acero::AggregateNodeOptions&gt;(std::basic_string&lt;char&gt;,.arrow::acero::AggregateNodeOptions) (1 samples, 0.01%)</title><rect x="15.4" y="517" width="0.2" height="15.0" fill="rgb(252,216,51)" rx="2" ry="2" />
+<text  x="18.40" y="527.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`DYLD-STUB$$arrow::bit_util::SetBitsTo(unsigned.char*, (1 samples, 0.01%)</title><rect x="1177.7" y="341" width="0.1" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="1180.67" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::util::CheckAlignment(arrow::ArrayData.const&amp;, (2 samples, 0.03%)</title><rect x="27.9" y="405" width="0.3" height="15.0" fill="rgb(208,14,3)" rx="2" ry="2" />
+<text  x="30.90" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ArrayData::Slice(long.long, (1 samples, 0.01%)</title><rect x="33.5" y="357" width="0.1" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="36.48" y="367.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="21.1" y="245" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="24.15" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::RecordBatch::Make(std::shared_ptr&lt;arrow::Schema&gt;,.long (1 samples, 0.01%)</title><rect x="19.0" y="501" width="0.1" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="21.95" y="511.5" ></text>
+</g>
+<g >
+<title>bench_dbms`benchmark::ConsoleReporter::ReportContext(benchmark::BenchmarkReporter::Context.const&amp;) (1 samples, 0.01%)</title><rect x="10.0" y="645" width="0.2" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="13.00" y="655.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::Declaration::~Declaration() (1 samples, 0.01%)</title><rect x="1187.3" y="437" width="0.2" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="1190.30" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::BaseMemoryPoolImpl&lt;arrow::(anonymous.namespace)::SystemAllocator&gt;::Reallocate(long (1 samples, 0.01%)</title><rect x="26.2" y="261" width="0.2" height="15.0" fill="rgb(211,27,6)" rx="2" ry="2" />
+<text  x="29.21" y="271.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ArrayData::~ArrayData() (4 samples, 0.06%)</title><rect x="16.9" y="405" width="0.7" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="19.92" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::ProjectNode::Make(arrow::acero::ExecPlan*, (3 samples, 0.04%)</title><rect x="1184.3" y="373" width="0.5" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="1187.26" y="383.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1185.8" y="293" width="0.1" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1188.78" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;arrow::internal::Empty&gt;::MarkFinished&lt;arrow::internal::Empty,.void&gt;(arrow::Status) (5 samples, 0.07%)</title><rect x="22.3" y="421" width="0.9" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="25.33" y="431.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_malloc_from_free_list (1 samples, 0.01%)</title><rect x="1187.6" y="341" width="0.2" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="1190.64" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="1184.6" y="325" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="1187.60" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memset (1 samples, 0.01%)</title><rect x="35.5" y="309" width="0.2" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="38.50" y="319.5" ></text>
+</g>
+<g >
+<title>libsystem_pthread`_pthread_start (1 samples, 0.01%)</title><rect x="1189.8" y="677" width="0.2" height="15.0" fill="rgb(253,220,52)" rx="2" ry="2" />
+<text  x="1192.83" y="687.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::ExecBatch::Slice(long.long, (6 samples, 0.09%)</title><rect x="26.9" y="405" width="1.0" height="15.0" fill="rgb(244,181,43)" rx="2" ry="2" />
+<text  x="29.89" y="415.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::CompileExpr(std::shared_ptr&lt;arrow::Schema&gt;.const&amp;, (4 samples, 0.06%)</title><rect x="1183.2" y="517" width="0.7" height="15.0" fill="rgb(214,41,10)" rx="2" ry="2" />
+<text  x="1186.24" y="527.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::__function::__func&lt;DB::tests::(anonymous.namespace)::RunTiForthArrowComputeAggDictKey(DB::tests::(anonymous (1 samples, 0.01%)</title><rect x="14.1" y="549" width="0.1" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="17.05" y="559.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::util::AsyncTaskScheduler::Make(arrow::internal::FnOnce&lt;arrow::Status.(arrow::util::AsyncTaskScheduler*)&gt;, (8 samples, 0.11%)</title><rect x="1187.8" y="437" width="1.4" height="15.0" fill="rgb(213,37,8)" rx="2" ry="2" />
+<text  x="1190.80" y="447.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1189.7" y="485" width="0.1" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1192.66" y="495.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="18.4" y="501" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="21.44" y="511.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (1 samples, 0.01%)</title><rect x="1184.9" y="293" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="1187.93" y="303.5" ></text>
+</g>
+<g >
+<title>bench_dbms`benchmark::RunSpecifiedBenchmarks(benchmark::BenchmarkReporter*,.benchmark::BenchmarkReporter*) (6,986 samples, 99.99%)</title><rect x="10.0" y="661" width="1179.8" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="13.00" y="671.5" >bench_dbms`benchmark::RunSpecifiedBenchmarks(benchmark::BenchmarkReporter*,.benchmark::BenchmarkReporter*)</text>
+</g>
+<g >
+<title>bench_dbms`DB::tests::(anonymous.namespace)::RunTiForthArrowComputeAggDictKey(DB::tests::(anonymous (6,985 samples, 99.97%)</title><rect x="10.2" y="581" width="1179.6" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="13.17" y="591.5" >bench_dbms`DB::tests::(anonymous.namespace)::RunTiForthArrowComputeAggDictKey(DB::tests::(anonymous</text>
+</g>
+<g >
+<title>bench_dbms`tiforth::detail::EnsureArrowComputeInitialized() (1 samples, 0.01%)</title><rect x="13.9" y="549" width="0.2" height="15.0" fill="rgb(227,105,25)" rx="2" ry="2" />
+<text  x="16.88" y="559.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::DeclarationToReader(arrow::acero::Declaration,.arrow::acero::QueryOptions) (31 samples, 0.44%)</title><rect x="1184.3" y="517" width="5.2" height="15.0" fill="rgb(230,117,28)" rx="2" ry="2" />
+<text  x="1187.26" y="527.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::~PoolBuffer().(.cold.1) (1 samples, 0.01%)</title><rect x="17.1" y="357" width="0.2" height="15.0" fill="rgb(243,179,42)" rx="2" ry="2" />
+<text  x="20.09" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::NumericArray&lt;arrow::UInt32Type&gt;::NumericArray&lt;arrow::UInt32Type&gt;(std::enable_if&lt;is_parameter_free_type&lt;arrow::UInt32Type&gt;::value,.long (1 samples, 0.01%)</title><rect x="40.7" y="341" width="0.2" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="43.74" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::ExecBatch::Slice(long.long, (1 samples, 0.01%)</title><rect x="33.5" y="373" width="0.1" height="15.0" fill="rgb(244,181,43)" rx="2" ry="2" />
+<text  x="36.48" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;2ul&gt;::__dispatch[abi:ne200100]&lt;std::__variant_detail::__dtor&lt;std::__variant_detail::__traits&lt;arrow::Datum::Empty, (3 samples, 0.04%)</title><rect x="35.2" y="357" width="0.5" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="38.16" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::ExecPlan::StartProducing() (9 samples, 0.13%)</title><rect x="1187.8" y="453" width="1.5" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="1190.80" y="463.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::(anonymous.namespace)::ExtractKnownFieldValues(std::vector&lt;arrow::compute::Expression&gt;*, (2 samples, 0.03%)</title><rect x="29.8" y="357" width="0.3" height="15.0" fill="rgb(212,33,7)" rx="2" ry="2" />
+<text  x="32.76" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::Hashing32::HashMultiColumn(std::vector&lt;arrow::compute::KeyColumnArray&gt;.const&amp;, (1 samples, 0.01%)</title><rect x="885.2" y="357" width="0.1" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="888.16" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::NestedSelector&lt;arrow::Field,.false&gt;::GetChild(int) (1 samples, 0.01%)</title><rect x="1185.1" y="293" width="0.2" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="1188.10" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::~ConcreteFutureImpl() (1 samples, 0.01%)</title><rect x="20.3" y="245" width="0.2" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="23.30" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;::InitializeFromResult(arrow::Result&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;) (1 samples, 0.01%)</title><rect x="1182.6" y="389" width="0.1" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="1185.57" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;0ul&gt;::__dispatch[abi:ne200100]&lt;std::__variant_detail::__dtor&lt;std::__variant_detail::__traits&lt;arrow::Datum::Empty, (1 samples, 0.01%)</title><rect x="32.5" y="357" width="0.1" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="35.46" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::KeyCompare::CompareBinaryColumnToRow&lt;false&gt;(unsigned.int, (592 samples, 8.47%)</title><rect x="771.3" y="277" width="100.0" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="774.33" y="287.5" >libarrow_com..</text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Resize(long.long, (3 samples, 0.04%)</title><rect x="878.9" y="293" width="0.5" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="881.91" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ArrayData::Slice(long.long, (1 samples, 0.01%)</title><rect x="23.3" y="309" width="0.2" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="26.34" y="319.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::PipelineExec::Execute() (6,960 samples, 99.61%)</title><rect x="14.4" y="549" width="1175.4" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="17.39" y="559.5" >bench_dbms`tiforth::PipelineExec::Execute()</text>
+</g>
+<g >
+<title>libsystem_malloc`_posix_memalign (3 samples, 0.04%)</title><rect x="878.9" y="229" width="0.5" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="881.91" y="239.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`__bzero (1 samples, 0.01%)</title><rect x="35.7" y="325" width="0.1" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="38.67" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::BufferBuilder::Resize(long.long, (2 samples, 0.03%)</title><rect x="26.0" y="293" width="0.4" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="29.04" y="303.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`mvm_allocate_pages_plat (1 samples, 0.01%)</title><rect x="39.7" y="197" width="0.2" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="42.72" y="207.5" ></text>
+</g>
+<g >
+<title>bench_dbms`arrow::BaseBinaryBuilder&lt;arrow::BinaryType&gt;::Append(unsigned.char (4 samples, 0.06%)</title><rect x="10.7" y="501" width="0.7" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="13.68" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::KeyColumnArray::KeyColumnArray(arrow::compute::KeyColumnMetadata.const&amp;, (1 samples, 0.01%)</title><rect x="149.7" y="341" width="0.1" height="15.0" fill="rgb(234,133,32)" rx="2" ry="2" />
+<text  x="152.67" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::Schema::Impl::~Impl() (1 samples, 0.01%)</title><rect x="16.6" y="389" width="0.2" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="19.59" y="399.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="16.2" y="389" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="19.25" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::FutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (4 samples, 0.06%)</title><rect x="20.5" y="245" width="0.6" height="15.0" fill="rgb(221,75,17)" rx="2" ry="2" />
+<text  x="23.47" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::SourceNode::StartProducing()::'lambda'()::operator()() (1 samples, 0.01%)</title><rect x="1187.8" y="389" width="0.2" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="1190.80" y="399.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_memalign (1 samples, 0.01%)</title><rect x="25.0" y="213" width="0.2" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="28.03" y="223.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`OUTLINED_FUNCTION_9 (1 samples, 0.01%)</title><rect x="39.2" y="293" width="0.2" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="42.22" y="303.5" ></text>
+</g>
+<g >
+<title>bench_dbms`DYLD-STUB$$memcpy (1 samples, 0.01%)</title><rect x="10.3" y="533" width="0.2" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="13.34" y="543.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::SimpleRecordBatch::SimpleRecordBatch(std::shared_ptr&lt;arrow::Schema&gt;,.long (1 samples, 0.01%)</title><rect x="24.0" y="101" width="0.2" height="15.0" fill="rgb(212,36,8)" rx="2" ry="2" />
+<text  x="27.02" y="111.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1187.6" y="389" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1190.64" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::ExecPlan::EmplaceNode&lt;arrow::acero::aggregate::GroupByNode,.arrow::acero::ExecNode*&amp;, (1 samples, 0.01%)</title><rect x="1184.9" y="373" width="0.2" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="1187.93" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::RecordBatch::Make(std::shared_ptr&lt;arrow::Schema&gt;,.long (1 samples, 0.01%)</title><rect x="24.0" y="133" width="0.2" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="27.02" y="143.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::basic_string&lt;char&gt;::push_back(char) (2 samples, 0.03%)</title><rect x="1188.6" y="293" width="0.4" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="1191.65" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::~ConcreteFutureImpl() (1 samples, 0.01%)</title><rect x="21.8" y="421" width="0.2" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="24.82" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`decltype(std::declval&lt;arrow::detail::ContinueFuture&amp;&gt;()(std::declval&lt;arrow::Future&lt;arrow::internal::Empty&gt;&amp;&gt;(),.std::declval&lt;std::function&lt;arrow::Status (6,867 samples, 98.28%)</title><rect x="22.3" y="437" width="1159.8" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="25.33" y="447.5" >libarrow_acero.2200.0.0`decltype(std::declval&lt;arrow::detail::ContinueFuture&amp;&gt;()(std::declval&lt;arrow::Future&lt;arrow::internal::Empty&gt;&amp;&gt;(),.std::declval&lt;std::functio..</text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`DYLD-STUB$$std::__shared_weak_count::__release_weak() (1 samples, 0.01%)</title><rect x="22.2" y="389" width="0.1" height="15.0" fill="rgb(237,150,36)" rx="2" ry="2" />
+<text  x="25.16" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::TaskSchedulerImpl::ExecuteMore(unsigned.long, (8 samples, 0.11%)</title><rect x="23.2" y="357" width="1.3" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="26.17" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::__shared_ptr_emplace&lt;std::variant&lt;arrow::Datum,.arrow::compute::Expression::Parameter, (1 samples, 0.01%)</title><rect x="33.6" y="373" width="0.2" height="15.0" fill="rgb(217,58,13)" rx="2" ry="2" />
+<text  x="36.64" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`szone_malloc_should_clear (1 samples, 0.01%)</title><rect x="1179.4" y="325" width="0.1" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="1182.36" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_c`fwrite (1 samples, 0.01%)</title><rect x="10.0" y="565" width="0.2" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="575.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="23.3" y="293" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="26.34" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::CountOptions::CountOptions(arrow::compute::CountOptions::CountMode) (1 samples, 0.01%)</title><rect x="34.3" y="293" width="0.2" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="37.32" y="303.5" ></text>
+</g>
+<g >
+<title>libsystem_c`__swrite (1 samples, 0.01%)</title><rect x="10.0" y="517" width="0.2" height="15.0" fill="rgb(252,217,52)" rx="2" ry="2" />
+<text  x="13.00" y="527.5" ></text>
+</g>
+<g >
+<title>bench_dbms`benchmark::BenchmarkReporter::PrintBasicContext(std::basic_ostream&lt;char&gt;*,.benchmark::BenchmarkReporter::Context (1 samples, 0.01%)</title><rect x="10.0" y="629" width="0.2" height="15.0" fill="rgb(251,213,51)" rx="2" ry="2" />
+<text  x="13.00" y="639.5" ></text>
+</g>
+<g >
+<title>bench_dbms`DB::tests::(anonymous.namespace)::GetOrCreateDataset(DB::tests::(anonymous (5 samples, 0.07%)</title><rect x="11.4" y="549" width="0.8" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="14.35" y="559.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::Schema::~Schema() (1 samples, 0.01%)</title><rect x="16.1" y="501" width="0.1" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="19.08" y="511.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memset (1 samples, 0.01%)</title><rect x="1182.1" y="421" width="0.1" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="1185.06" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::(anonymous.namespace)::GrouperFastImpl::~GrouperFastImpl() (3 samples, 0.04%)</title><rect x="25.4" y="357" width="0.5" height="15.0" fill="rgb(242,171,41)" rx="2" ry="2" />
+<text  x="28.37" y="367.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_free_no_lock (1 samples, 0.01%)</title><rect x="878.9" y="165" width="0.2" height="15.0" fill="rgb(230,117,27)" rx="2" ry="2" />
+<text  x="881.91" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel`__write_nocancel (1 samples, 0.01%)</title><rect x="10.0" y="501" width="0.2" height="15.0" fill="rgb(236,143,34)" rx="2" ry="2" />
+<text  x="13.00" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::default_memory_pool() (1 samples, 0.01%)</title><rect x="1185.1" y="277" width="0.2" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="1188.10" y="287.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memmove (2 samples, 0.03%)</title><rect x="32.8" y="373" width="0.3" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="35.80" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_free_no_lock (2 samples, 0.03%)</title><rect x="1178.7" y="341" width="0.3" height="15.0" fill="rgb(230,117,27)" rx="2" ry="2" />
+<text  x="1181.68" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__function::__func&lt;arrow::acero::(anonymous.namespace)::SourceNode::SliceAndDeliverMorsel(arrow::compute::ExecBatch (2 samples, 0.03%)</title><rect x="22.0" y="421" width="0.3" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="24.99" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::internal::(anonymous.namespace)::GroupedCountImpl::Resize(long (2 samples, 0.03%)</title><rect x="1015.0" y="357" width="0.4" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="1018.04" y="367.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_free (1 samples, 0.01%)</title><rect x="32.0" y="357" width="0.1" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="34.96" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`DYLD-STUB$$operator.delete(void*) (1 samples, 0.01%)</title><rect x="16.4" y="421" width="0.2" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="19.42" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__pad_and_output[abi:ne200100]&lt;char&gt;(std::ostreambuf_iterator&lt;char&gt;,.char (1 samples, 0.01%)</title><rect x="1188.0" y="357" width="0.1" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="1190.97" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::util::AsyncTaskScheduler::SimpleTask&lt;arrow::acero::QueryContext::ScheduleTask(std::function&lt;arrow::Status.()&gt;, (1 samples, 0.01%)</title><rect x="20.8" y="149" width="0.2" height="15.0" fill="rgb(251,213,51)" rx="2" ry="2" />
+<text  x="23.81" y="159.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::FnOnce&lt;arrow::Result&lt;std::function&lt;arrow::Future&lt;std::shared_ptr&lt;arrow::RecordBatch&gt;&gt;.()&gt;&gt; (30 samples, 0.43%)</title><rect x="1184.3" y="485" width="5.0" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="1187.26" y="495.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::InitKernel(arrow::compute::HashAggregateKernel.const*, (1 samples, 0.01%)</title><rect x="34.3" y="325" width="0.2" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="37.32" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::DoMarkFinishedOrFailed(arrow::FutureState) (2 samples, 0.03%)</title><rect x="20.5" y="85" width="0.3" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="23.47" y="95.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_malloc_from_free_list (1 samples, 0.01%)</title><rect x="25.0" y="181" width="0.2" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="28.03" y="191.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (1 samples, 0.01%)</title><rect x="19.8" y="197" width="0.2" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="22.80" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (2 samples, 0.03%)</title><rect x="22.8" y="373" width="0.4" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="25.84" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::DoWait() (6,887 samples, 98.57%)</title><rect x="19.1" y="469" width="1163.1" height="15.0" fill="rgb(252,216,51)" rx="2" ry="2" />
+<text  x="22.12" y="479.5" >libarrow.2200.0.0`arrow::ConcreteFutureImpl::DoWait()</text>
+</g>
+<g >
+<title>libsystem_pthread`pthread_mutex_lock (1 samples, 0.01%)</title><rect x="14.7" y="469" width="0.2" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="17.73" y="479.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_malloc_zone_memalign (1 samples, 0.01%)</title><rect x="25.0" y="229" width="0.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="28.03" y="239.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::ExecPlanImpl::~ExecPlanImpl() (12 samples, 0.17%)</title><rect x="16.2" y="485" width="2.1" height="15.0" fill="rgb(205,1,0)" rx="2" ry="2" />
+<text  x="19.25" y="495.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::~PoolBuffer() (1 samples, 0.01%)</title><rect x="35.2" y="309" width="0.1" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="38.16" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::Executor::Submit&lt;std::function&lt;arrow::Status.()&gt;, (1 samples, 0.01%)</title><rect x="20.8" y="133" width="0.2" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="23.81" y="143.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Resize(long.long, (1 samples, 0.01%)</title><rect x="35.0" y="293" width="0.2" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="37.99" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::SinkNode::Process(arrow::compute::ExecBatch) (6 samples, 0.09%)</title><rect x="23.5" y="309" width="1.0" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="26.51" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::Datum::Datum&lt;arrow::NumericArray&lt;arrow::UInt32Type&gt;,.arrow::NumericArray&lt;arrow::UInt32Type&gt;, (4 samples, 0.06%)</title><rect x="40.1" y="341" width="0.6" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="43.06" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::InitKernels(std::vector&lt;arrow::compute::HashAggregateKernel.const*&gt; (1 samples, 0.01%)</title><rect x="34.3" y="341" width="0.2" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="37.32" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_pthread`_pthread_mutex_lock_init_slow (2 samples, 0.03%)</title><rect x="20.5" y="53" width="0.3" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="23.47" y="63.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::FieldRef::FindOne&lt;arrow::Schema&gt;(arrow::Schema.const&amp;) (1 samples, 0.01%)</title><rect x="1185.1" y="357" width="0.2" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="1188.10" y="367.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::chrono::steady_clock::now() (1 samples, 0.01%)</title><rect x="1189.8" y="613" width="0.2" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="1192.83" y="623.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__function::__func&lt;arrow::acero::(anonymous.namespace)::DeclarationToRecordBatchGenerator(arrow::acero::Declaration, (1 samples, 0.01%)</title><rect x="1183.1" y="469" width="0.1" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1186.08" y="479.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_posix_memalign (1 samples, 0.01%)</title><rect x="25.0" y="245" width="0.2" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="28.03" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;2ul, (1 samples, 0.01%)</title><rect x="32.5" y="373" width="0.1" height="15.0" fill="rgb(211,29,7)" rx="2" ry="2" />
+<text  x="35.46" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_free_no_lock (1 samples, 0.01%)</title><rect x="25.4" y="261" width="0.1" height="15.0" fill="rgb(230,117,27)" rx="2" ry="2" />
+<text  x="28.37" y="271.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::SwissTable::map_new_keys(unsigned.int, (2 samples, 0.03%)</title><rect x="885.3" y="357" width="0.4" height="15.0" fill="rgb(247,197,47)" rx="2" ry="2" />
+<text  x="888.33" y="367.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (1 samples, 0.01%)</title><rect x="1186.6" y="341" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="1189.62" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;std::optional&lt;int&gt;&gt;::MarkFinished(arrow::Result&lt;std::optional&lt;int&gt;&gt;) (2 samples, 0.03%)</title><rect x="20.5" y="117" width="0.3" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="23.47" y="127.5" ></text>
+</g>
+<g >
+<title>libsystem_pthread`thread_start (1 samples, 0.01%)</title><rect x="1189.8" y="693" width="0.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1192.83" y="703.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__function::__func&lt;arrow::Result&lt;arrow::acero::ExecNode*&gt;.(*)(arrow::acero::ExecPlan*, (3 samples, 0.04%)</title><rect x="1184.3" y="389" width="0.5" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="1187.26" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::Schema::Impl::~Impl() (1 samples, 0.01%)</title><rect x="16.1" y="485" width="0.1" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="19.08" y="495.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_free (1 samples, 0.01%)</title><rect x="1181.0" y="373" width="0.2" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="1184.05" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::BaseMemoryPoolImpl&lt;arrow::(anonymous.namespace)::SystemAllocator&gt;::Reallocate(long (1 samples, 0.01%)</title><rect x="1178.0" y="293" width="0.2" height="15.0" fill="rgb(211,27,6)" rx="2" ry="2" />
+<text  x="1181.01" y="303.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="27.6" y="357" width="0.1" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="30.56" y="367.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::deque&lt;arrow::Result&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;&gt;::__add_back_capacity() (2 samples, 0.03%)</title><rect x="15.1" y="501" width="0.3" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="18.07" y="511.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel`mach_continuous_time (1 samples, 0.01%)</title><rect x="1189.8" y="565" width="0.2" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="1192.83" y="575.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`malloc_type_malloc (1 samples, 0.01%)</title><rect x="1186.5" y="341" width="0.1" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="1189.45" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::vector&lt;arrow::FutureImpl::CallbackRecord&gt;::__emplace_back_slow_path&lt;arrow::FutureImpl::CallbackRecord&gt;(arrow::FutureImpl::CallbackRecord&amp;&amp;) (1 samples, 0.01%)</title><rect x="19.6" y="117" width="0.2" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="22.63" y="127.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::schema(std::vector&lt;std::shared_ptr&lt;arrow::Field&gt;&gt;,.std::shared_ptr&lt;arrow::KeyValueMetadata (1 samples, 0.01%)</title><rect x="1184.3" y="357" width="0.1" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="1187.26" y="367.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="21.0" y="181" width="0.1" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="23.98" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_malloc_from_free_list (2 samples, 0.03%)</title><rect x="36.0" y="293" width="0.3" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="39.01" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::DoMarkFinishedOrFailed(arrow::FutureState) (3 samples, 0.04%)</title><rect x="23.7" y="197" width="0.5" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="26.68" y="207.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;::DoMarkFinished(arrow::Result&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;) (3 samples, 0.04%)</title><rect x="23.7" y="213" width="0.5" height="15.0" fill="rgb(251,212,50)" rx="2" ry="2" />
+<text  x="26.68" y="223.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::TempVectorStack::Init(arrow::MemoryPool*,.long (1 samples, 0.01%)</title><rect x="35.0" y="325" width="0.2" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="37.99" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`free_tiny (1 samples, 0.01%)</title><rect x="18.1" y="453" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="21.11" y="463.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_free (1 samples, 0.01%)</title><rect x="1187.5" y="437" width="0.1" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="1190.47" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::ProjectNode::~ProjectNode() (1 samples, 0.01%)</title><rect x="16.2" y="453" width="0.2" height="15.0" fill="rgb(246,192,46)" rx="2" ry="2" />
+<text  x="19.25" y="463.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::__call_once_proxy[abi:ne200100]&lt;std::tuple&lt;tiforth::detail::EnsureArrowComputeInitialized()::$_0&amp;&amp;&gt;&gt;(void*) (1 samples, 0.01%)</title><rect x="13.9" y="517" width="0.2" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="16.88" y="527.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::ReplaceFieldsWithKnownValues(arrow::compute::KnownFieldValues.const&amp;, (7 samples, 0.10%)</title><rect x="30.3" y="357" width="1.1" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="33.27" y="367.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`free_tiny (1 samples, 0.01%)</title><rect x="1181.4" y="373" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="1184.39" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`small_malloc_should_clear (1 samples, 0.01%)</title><rect x="15.2" y="453" width="0.2" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="18.24" y="463.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Resize(long.long, (2 samples, 0.03%)</title><rect x="1177.8" y="325" width="0.4" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="1180.84" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::DeclarationToRecordBatchGenerator(arrow::acero::Declaration, (30 samples, 0.43%)</title><rect x="1184.3" y="469" width="5.0" height="15.0" fill="rgb(234,133,31)" rx="2" ry="2" />
+<text  x="1187.26" y="479.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memcmp (1 samples, 0.01%)</title><rect x="1183.6" y="421" width="0.2" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="1186.58" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::~PoolBuffer() (1 samples, 0.01%)</title><rect x="879.4" y="293" width="0.2" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="882.42" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::internal::FnOnce&lt;void.()&gt;::FnImpl&lt;arrow::ConcreteFutureImpl::RunOrScheduleCallback(std::shared_ptr&lt;arrow::FutureImpl&gt; (14 samples, 0.20%)</title><rect x="19.1" y="437" width="2.4" height="15.0" fill="rgb(211,27,6)" rx="2" ry="2" />
+<text  x="22.12" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::ModifyExpression&lt;arrow::compute::ReplaceFieldsWithKnownValues(arrow::compute::KnownFieldValues.const&amp;, (7 samples, 0.10%)</title><rect x="30.3" y="341" width="1.1" height="15.0" fill="rgb(233,130,31)" rx="2" ry="2" />
+<text  x="33.27" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::RowTableEncoder::PrepareEncodeSelected(long.long, (2 samples, 0.03%)</title><rect x="40.9" y="325" width="0.3" height="15.0" fill="rgb(221,78,18)" rx="2" ry="2" />
+<text  x="43.91" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::construct_at[abi:ne200100]&lt;arrow::SimpleRecordBatch,.std::shared_ptr&lt;arrow::Schema&gt;, (1 samples, 0.01%)</title><rect x="24.0" y="117" width="0.2" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="27.02" y="127.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::ExecBatch::Slice(long.long, (2 samples, 0.03%)</title><rect x="23.2" y="325" width="0.3" height="15.0" fill="rgb(244,181,43)" rx="2" ry="2" />
+<text  x="26.17" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::__move_impl&lt;std::_ClassicAlgPolicy&gt;::operator()[abi:ne200100]&lt;std::shared_ptr&lt;arrow::ArrayData&gt;*,.std::shared_ptr&lt;arrow::ArrayData&gt;*, (1 samples, 0.01%)</title><rect x="1184.1" y="501" width="0.2" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="1187.09" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::internal::FilterVector&lt;arrow::compute::Expression,.arrow::compute::(anonymous (2 samples, 0.03%)</title><rect x="29.8" y="341" width="0.3" height="15.0" fill="rgb(238,154,36)" rx="2" ry="2" />
+<text  x="32.76" y="351.5" ></text>
+</g>
+<g >
+<title>libc++abi`DYLD-STUB$$free (1 samples, 0.01%)</title><rect x="17.9" y="453" width="0.2" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="20.94" y="463.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_malloc_should_clear (1 samples, 0.01%)</title><rect x="25.0" y="197" width="0.2" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="28.03" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`szone_malloc_should_clear (2 samples, 0.03%)</title><rect x="15.1" y="469" width="0.3" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="18.07" y="479.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::deque&lt;arrow::Result&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;&gt;::clear() (1 samples, 0.01%)</title><rect x="15.9" y="485" width="0.2" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="18.91" y="495.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (1 samples, 0.01%)</title><rect x="1189.2" y="421" width="0.1" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="1192.16" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::InitLocalStateIfNeeded(arrow::acero::aggregate::GroupByNode::ThreadLocalState*) (5 samples, 0.07%)</title><rect x="34.3" y="357" width="0.9" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="37.32" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::ExecBatch::SelectValues(std::vector&lt;int&gt;.const&amp;) (1 samples, 0.01%)</title><rect x="33.3" y="373" width="0.2" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="36.31" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::ExecPlan::Make(arrow::acero::QueryOptions,.arrow::compute::ExecContext, (1 samples, 0.01%)</title><rect x="1187.6" y="453" width="0.2" height="15.0" fill="rgb(211,27,6)" rx="2" ry="2" />
+<text  x="1190.64" y="463.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;arrow::internal::Empty&gt;::DoMarkFinished(arrow::Result&lt;arrow::internal::Empty&gt;) (1 samples, 0.01%)</title><rect x="19.5" y="149" width="0.1" height="15.0" fill="rgb(246,192,45)" rx="2" ry="2" />
+<text  x="22.46" y="159.5" ></text>
+</g>
+<g >
+<title>bench_dbms`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;0ul&gt;::__dispatch[abi:ne200100]&lt;std::__variant_detail::__visitation::__variant::__value_visitor&lt;tiforth::detail::(anonymous (2 samples, 0.03%)</title><rect x="1183.4" y="485" width="0.4" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="1186.41" y="495.5" ></text>
+</g>
+<g >
+<title>bench_dbms`main (6,986 samples, 99.99%)</title><rect x="10.0" y="677" width="1179.8" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="13.00" y="687.5" >bench_dbms`main</text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (1 samples, 0.01%)</title><rect x="27.6" y="341" width="0.1" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="30.56" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="17.6" y="421" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="20.60" y="431.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="1178.3" y="357" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="1181.35" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::DeclarationToReader(arrow::acero::Declaration,.arrow::acero::QueryOptions)::PlanReader::ReadNext(std::shared_ptr&lt;arrow::RecordBatch&gt;*) (6,893 samples, 98.65%)</title><rect x="19.1" y="501" width="1164.1" height="15.0" fill="rgb(212,32,7)" rx="2" ry="2" />
+<text  x="22.12" y="511.5" >libarrow_acero.2200.0.0`arrow::acero::DeclarationToReader(arrow::acero::Declaration,.arrow::acero::QueryOptions)::PlanReader::ReadNext(std::shared_ptr&lt;arrow::Reco..</text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::~GroupByNode() (8 samples, 0.11%)</title><rect x="16.4" y="437" width="1.4" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="19.42" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;2ul&gt;::__dispatch[abi:ne200100]&lt;void (1 samples, 0.01%)</title><rect x="29.4" y="357" width="0.2" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="32.42" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::InputReceived(arrow::acero::ExecNode*,.arrow::compute::ExecBatch) (6,800 samples, 97.32%)</title><rect x="33.1" y="389" width="1148.5" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="36.14" y="399.5" >libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::InputReceived(arrow::acero::ExecNode*,.arrow::compute::ExecBatch)</text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="32.1" y="325" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="35.12" y="335.5" ></text>
+</g>
+<g >
+<title>libc++abi`DYLD-STUB$$free (1 samples, 0.01%)</title><rect x="1181.7" y="357" width="0.2" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="1184.72" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::AllocateBuffer(long.long, (3 samples, 0.04%)</title><rect x="39.4" y="341" width="0.5" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="42.39" y="351.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::SinkOp::Write(std::shared_ptr&lt;arrow::RecordBatch&gt;) (2 samples, 0.03%)</title><rect x="1189.5" y="533" width="0.3" height="15.0" fill="rgb(240,161,38)" rx="2" ry="2" />
+<text  x="1192.49" y="543.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::mutex::lock() (1 samples, 0.01%)</title><rect x="1182.4" y="405" width="0.2" height="15.0" fill="rgb(233,129,30)" rx="2" ry="2" />
+<text  x="1185.40" y="415.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::condition_variable::notify_all() (1 samples, 0.01%)</title><rect x="22.7" y="277" width="0.1" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="25.67" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::AggregatesToString(std::basic_stringstream&lt;char&gt;*,.arrow::Schema (4 samples, 0.06%)</title><rect x="1188.5" y="373" width="0.7" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="1191.48" y="383.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::Task::OutputSinkOp::WriteImpl(std::shared_ptr&lt;arrow::RecordBatch&gt;) (2 samples, 0.03%)</title><rect x="1189.5" y="517" width="0.3" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="1192.49" y="527.5" ></text>
+</g>
+<g >
+<title>bench_dbms`arrow::Future&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;::InitializeFromResult(arrow::Result&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;) (1 samples, 0.01%)</title><rect x="20.0" y="245" width="0.1" height="15.0" fill="rgb(233,130,31)" rx="2" ry="2" />
+<text  x="22.96" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::literal(arrow::Datum) (1 samples, 0.01%)</title><rect x="1183.9" y="501" width="0.2" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="1186.92" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::Canonicalize(arrow::compute::Expression,.arrow::compute::ExecContext*) (2 samples, 0.03%)</title><rect x="31.6" y="341" width="0.4" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="34.62" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__function::__func&lt;arrow::acero::(anonymous.namespace)::SinkNode::SinkNode(arrow::acero::ExecPlan*, (4 samples, 0.06%)</title><rect x="1182.4" y="453" width="0.7" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="1185.40" y="463.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::Canonicalize(arrow::compute::Expression,.arrow::compute::ExecContext*) (1 samples, 0.01%)</title><rect x="31.8" y="325" width="0.2" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="34.79" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`szone_malloc_should_clear (3 samples, 0.04%)</title><rect x="35.8" y="325" width="0.5" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="38.84" y="335.5" ></text>
+</g>
+<g >
+<title>bench_dbms`arrow::PushGenerator&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;::State::~State() (1 samples, 0.01%)</title><rect x="15.9" y="501" width="0.2" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="18.91" y="511.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`malloc_type_malloc (1 samples, 0.01%)</title><rect x="1182.7" y="389" width="0.2" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="1185.74" y="399.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memmove (6 samples, 0.09%)</title><rect x="12.9" y="549" width="1.0" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="15.87" y="559.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::SimplifyWithGuarantee(arrow::compute::Expression,.arrow::compute::Expression (15 samples, 0.21%)</title><rect x="29.6" y="373" width="2.5" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="32.59" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::field(std::basic_string&lt;char&gt;,.std::shared_ptr&lt;arrow::DataType&gt;, (1 samples, 0.01%)</title><rect x="1185.9" y="341" width="0.2" height="15.0" fill="rgb(210,27,6)" rx="2" ry="2" />
+<text  x="1188.95" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (3 samples, 0.04%)</title><rect x="1186.8" y="357" width="0.5" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="1189.79" y="367.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::__thread_proxy[abi:ne200100]&lt;std::tuple&lt;std::unique_ptr&lt;std::__thread_struct&gt;,.void (1 samples, 0.01%)</title><rect x="1189.8" y="661" width="0.2" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="1192.83" y="671.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::GroupByNode(arrow::acero::ExecNode*,.std::shared_ptr&lt;arrow::Schema&gt;, (1 samples, 0.01%)</title><rect x="1184.9" y="357" width="0.2" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="1187.93" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::SwissTable::map_new_keys(unsigned.int, (14 samples, 0.20%)</title><rect x="878.4" y="341" width="2.4" height="15.0" fill="rgb(247,197,47)" rx="2" ry="2" />
+<text  x="881.41" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::internal::(anonymous.namespace)::GroupedCountImpl::Finalize() (1 samples, 0.01%)</title><rect x="25.9" y="341" width="0.1" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="28.88" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::bit_util::bits_to_indexes_internal&lt;1,.true&gt;(long (2 samples, 0.03%)</title><rect x="880.4" y="309" width="0.4" height="15.0" fill="rgb(236,142,34)" rx="2" ry="2" />
+<text  x="883.43" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (1 samples, 0.01%)</title><rect x="1187.8" y="357" width="0.2" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="1190.80" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (4 samples, 0.06%)</title><rect x="20.5" y="229" width="0.6" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="23.47" y="239.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_free_no_lock (1 samples, 0.01%)</title><rect x="26.4" y="341" width="0.2" height="15.0" fill="rgb(230,117,27)" rx="2" ry="2" />
+<text  x="29.38" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_pthread`pthread_mutex_lock (1 samples, 0.01%)</title><rect x="23.7" y="101" width="0.1" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="26.68" y="111.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1189.2" y="437" width="0.1" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1192.16" y="447.5" ></text>
+</g>
+<g >
+<title>Thread_37605176.DispatchQueue_1: (6,986 samples, 99.99%)</title><rect x="10.0" y="709" width="1179.8" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="13.00" y="719.5" >Thread_37605176.DispatchQueue_1:</text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Iterator&lt;std::shared_ptr&lt;arrow::RecordBatch&gt;&gt;::Delete&lt;arrow::GeneratorIterator&lt;std::shared_ptr&lt;arrow::RecordBatch&gt;&gt;&gt;(void*) (1 samples, 0.01%)</title><rect x="1183.1" y="485" width="0.1" height="15.0" fill="rgb(254,225,54)" rx="2" ry="2" />
+<text  x="1186.08" y="495.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::GeneratorIterator&lt;std::shared_ptr&lt;arrow::RecordBatch&gt;&gt;::Next() (6,892 samples, 98.64%)</title><rect x="19.1" y="485" width="1164.0" height="15.0" fill="rgb(236,142,34)" rx="2" ry="2" />
+<text  x="22.12" y="495.5" >libarrow_acero.2200.0.0`arrow::GeneratorIterator&lt;std::shared_ptr&lt;arrow::RecordBatch&gt;&gt;::Next()</text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::Function::DispatchExact(std::vector&lt;arrow::TypeHolder&gt;.const&amp;) (2 samples, 0.03%)</title><rect x="1185.3" y="325" width="0.3" height="15.0" fill="rgb(217,58,13)" rx="2" ry="2" />
+<text  x="1188.27" y="335.5" ></text>
+</g>
+<g >
+<title>libc++abi`DYLD-STUB$$free (1 samples, 0.01%)</title><rect x="16.9" y="373" width="0.2" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="19.92" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::TracedNode::TraceInputReceived(arrow::compute::ExecBatch.const&amp;) (3 samples, 0.04%)</title><rect x="32.6" y="389" width="0.5" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="35.63" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::Future&lt;arrow::internal::Empty&gt;::DoMarkFinished(arrow::Result&lt;arrow::internal::Empty&gt;) (2 samples, 0.03%)</title><rect x="22.5" y="309" width="0.3" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="25.50" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::Schema::Impl::~Impl() (1 samples, 0.01%)</title><rect x="16.2" y="405" width="0.2" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="19.25" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (3 samples, 0.04%)</title><rect x="23.7" y="165" width="0.5" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="26.68" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="1183.1" y="437" width="0.1" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="1186.08" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::literal(arrow::Datum) (1 samples, 0.01%)</title><rect x="1184.9" y="325" width="0.2" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="1187.93" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`medium_malloc_should_clear (1 samples, 0.01%)</title><rect x="39.7" y="213" width="0.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="42.72" y="223.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ArrayData::ArrayData(arrow::ArrayData.const&amp;) (1 samples, 0.01%)</title><rect x="33.5" y="341" width="0.1" height="15.0" fill="rgb(249,202,48)" rx="2" ry="2" />
+<text  x="36.48" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::MakeExecNode(std::basic_string&lt;char&gt;.const&amp;, (15 samples, 0.21%)</title><rect x="1184.8" y="421" width="2.5" height="15.0" fill="rgb(218,59,14)" rx="2" ry="2" />
+<text  x="1187.76" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::AllocateResizableBuffer(long.long, (1 samples, 0.01%)</title><rect x="35.0" y="309" width="0.2" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="37.99" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::SwissTable::grow_double() (9 samples, 0.13%)</title><rect x="878.6" y="325" width="1.5" height="15.0" fill="rgb(242,174,41)" rx="2" ry="2" />
+<text  x="881.58" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::bit_util::bits_to_indexes(int,.long (2 samples, 0.03%)</title><rect x="877.9" y="293" width="0.3" height="15.0" fill="rgb(222,78,18)" rx="2" ry="2" />
+<text  x="880.90" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Resize(long.long, (2 samples, 0.03%)</title><rect x="39.6" y="325" width="0.3" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="42.55" y="335.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="24.2" y="213" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="27.19" y="223.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::Task::Step() (6,960 samples, 99.61%)</title><rect x="14.4" y="565" width="1175.4" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="17.39" y="575.5" >bench_dbms`tiforth::Task::Step()</text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::(anonymous.namespace)::SystemAllocator::ReallocateAligned(long (1 samples, 0.01%)</title><rect x="26.2" y="245" width="0.2" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="29.21" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::~PoolBuffer() (2 samples, 0.03%)</title><rect x="25.4" y="309" width="0.3" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="28.37" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::SwissTable::extract_group_ids(int,.unsigned (675 samples, 9.66%)</title><rect x="654.1" y="325" width="114.0" height="15.0" fill="rgb(207,13,3)" rx="2" ry="2" />
+<text  x="657.13" y="335.5" >libarrow_compu..</text>
+</g>
+<g >
+<title>libsystem_malloc`_free (1 samples, 0.01%)</title><rect x="1178.0" y="261" width="0.2" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="1181.01" y="271.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::BufferBuilder::Finish(std::shared_ptr&lt;arrow::Buffer&gt;*,.bool) (2 samples, 0.03%)</title><rect x="26.0" y="309" width="0.4" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="29.04" y="319.5" ></text>
+</g>
+<g >
+<title>bench_dbms`arrow::PushGenerator&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;::Producer::Push(arrow::Result&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;) (3 samples, 0.04%)</title><rect x="14.9" y="517" width="0.5" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="17.90" y="527.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`small_malloc_should_clear (1 samples, 0.01%)</title><rect x="1189.7" y="453" width="0.1" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="1192.66" y="463.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::(anonymous.namespace)::SystemAllocator::AllocateAligned(long (3 samples, 0.04%)</title><rect x="878.9" y="245" width="0.5" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="881.91" y="255.5" ></text>
+</g>
+<g >
+<title>bench_dbms`DB::TiForth::(anonymous.namespace)::buildBinaryArray(DB::IColumn (4 samples, 0.06%)</title><rect x="10.7" y="517" width="0.7" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="13.68" y="527.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::DoMarkFinishedOrFailed(arrow::FutureState) (2 samples, 0.03%)</title><rect x="22.5" y="293" width="0.3" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="25.50" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::(anonymous.namespace)::GrouperFastImpl::ConsumeImpl(arrow::compute::ExecSpan (5,023 samples, 71.89%)</title><rect x="36.9" y="357" width="848.3" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="39.85" y="367.5" >libarrow_compute.2200.0.0`arrow::compute::(anonymous.namespace)::GrouperFastImpl::ConsumeImpl(arrow::compute::ExecSpan</text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::shared_ptr&lt;arrow::FutureImpl&gt;::operator=[abi:ne200100]&lt;arrow::FutureImpl,.0&gt;(std::unique_ptr&lt;arrow::FutureImpl&gt;&amp;&amp;) (1 samples, 0.01%)</title><rect x="1182.7" y="421" width="0.2" height="15.0" fill="rgb(238,154,37)" rx="2" ry="2" />
+<text  x="1185.74" y="431.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1015.2" y="325" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1018.20" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::RowTableImpl::Init(arrow::MemoryPool*,.arrow::compute::RowTableMetadata (2 samples, 0.03%)</title><rect x="34.5" y="325" width="0.3" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="37.49" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`free_tiny (1 samples, 0.01%)</title><rect x="878.9" y="181" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="881.91" y="191.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1179.4" y="341" width="0.1" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1182.36" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::FnOnce&lt;void.()&gt;::FnImpl&lt;std::__bind&lt;arrow::detail::ContinueFuture, (3 samples, 0.04%)</title><rect x="21.8" y="437" width="0.5" height="15.0" fill="rgb(207,11,2)" rx="2" ry="2" />
+<text  x="24.82" y="447.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="879.8" y="309" width="0.1" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="882.76" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::Schema::~Schema() (1 samples, 0.01%)</title><rect x="16.6" y="405" width="0.2" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="19.59" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GetKernels(arrow::compute::ExecContext*,.std::vector&lt;arrow::compute::Aggregate&gt; (4 samples, 0.06%)</title><rect x="1185.3" y="357" width="0.6" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="1188.27" y="367.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`__bzero (1 samples, 0.01%)</title><rect x="17.6" y="405" width="0.2" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="20.60" y="415.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_free (1 samples, 0.01%)</title><rect x="1182.9" y="437" width="0.2" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="1185.91" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::TempVectorStack::alloc(unsigned.int, (1 samples, 0.01%)</title><rect x="878.2" y="325" width="0.2" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="881.24" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::ExtendWithGroupIdType(std::vector&lt;arrow::TypeHolder&gt;.const&amp;) (1 samples, 0.01%)</title><rect x="1185.8" y="325" width="0.1" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="1188.78" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__put_character_sequence[abi:ne200100]&lt;char&gt;(std::basic_ostream&lt;char&gt;&amp;,.char (4 samples, 0.06%)</title><rect x="1188.5" y="357" width="0.7" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="1191.48" y="367.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="879.9" y="309" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="882.93" y="319.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::GetMetadataValue(arrow::Field.const&amp;, (1 samples, 0.01%)</title><rect x="1183.6" y="453" width="0.2" height="15.0" fill="rgb(206,8,2)" rx="2" ry="2" />
+<text  x="1186.58" y="463.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::basic_stringbuf&lt;char&gt;::overflow(int) (2 samples, 0.03%)</title><rect x="1188.6" y="309" width="0.4" height="15.0" fill="rgb(239,158,37)" rx="2" ry="2" />
+<text  x="1191.65" y="319.5" ></text>
+</g>
+<g >
+<title>bench_dbms`pingcap::common::FixedThreadPool::loop() (1 samples, 0.01%)</title><rect x="1189.8" y="645" width="0.2" height="15.0" fill="rgb(231,120,28)" rx="2" ry="2" />
+<text  x="1192.83" y="655.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::RunOrScheduleCallback(std::shared_ptr&lt;arrow::FutureImpl&gt;.const&amp;, (3 samples, 0.04%)</title><rect x="23.7" y="181" width="0.5" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="26.68" y="191.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::Future&lt;arrow::internal::Empty&gt;::MarkFinished&lt;arrow::internal::Empty,.void&gt;(arrow::Status) (2 samples, 0.03%)</title><rect x="22.5" y="325" width="0.3" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="25.50" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::KeyCompare::CompareColumnsToRows(unsigned.int, (1 samples, 0.01%)</title><rect x="769.1" y="309" width="0.2" height="15.0" fill="rgb(217,56,13)" rx="2" ry="2" />
+<text  x="772.14" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::SwissTable::run_comparisons(int,.unsigned (652 samples, 9.33%)</title><rect x="768.1" y="325" width="110.1" height="15.0" fill="rgb(223,87,20)" rx="2" ry="2" />
+<text  x="771.13" y="335.5" >libarrow_comp..</text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::ProjectNode::ToStringExtra(int) (1 samples, 0.01%)</title><rect x="1188.0" y="389" width="0.1" height="15.0" fill="rgb(219,64,15)" rx="2" ry="2" />
+<text  x="1190.97" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::ModifyExpression&lt;arrow::compute::Canonicalize(arrow::compute::Expression,.arrow::compute::ExecContext*)::$_1, (1 samples, 0.01%)</title><rect x="31.8" y="309" width="0.2" height="15.0" fill="rgb(220,73,17)" rx="2" ry="2" />
+<text  x="34.79" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::(anonymous.namespace)::SystemAllocator::AllocateAligned(long (1 samples, 0.01%)</title><rect x="39.7" y="277" width="0.2" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="42.72" y="287.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`free_tiny (1 samples, 0.01%)</title><rect x="879.4" y="261" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="882.42" y="271.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::Datum::Datum(std::shared_ptr&lt;arrow::Array&gt;.const&amp;) (1 samples, 0.01%)</title><rect x="40.1" y="325" width="0.1" height="15.0" fill="rgb(251,213,51)" rx="2" ry="2" />
+<text  x="43.06" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::vector&lt;arrow::ArraySpan&gt;::__init_with_size[abi:ne200100]&lt;arrow::ArraySpan*,.arrow::ArraySpan*&gt;(arrow::ArraySpan*, (1 samples, 0.01%)</title><rect x="36.3" y="341" width="0.2" height="15.0" fill="rgb(252,217,52)" rx="2" ry="2" />
+<text  x="39.35" y="351.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::chrono::steady_clock::now() (1 samples, 0.01%)</title><rect x="19.3" y="245" width="0.2" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="22.29" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::bit_util::bits_to_indexes_internal&lt;0,.false&gt;(long (11 samples, 0.16%)</title><rect x="883.0" y="325" width="1.8" height="15.0" fill="rgb(207,13,3)" rx="2" ry="2" />
+<text  x="885.97" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::StartProducing() (6 samples, 0.09%)</title><rect x="1188.1" y="405" width="1.1" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="1191.14" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::detail::MarkNextFinished&lt;arrow::Future&lt;std::optional&lt;int&gt;&gt;,.arrow::Future&lt;std::optional&lt;int&gt;&gt;, (2 samples, 0.03%)</title><rect x="20.5" y="133" width="0.3" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="23.47" y="143.5" ></text>
+</g>
+<g >
+<title>bench_dbms`arrow::Future&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;::SetResult(arrow::Result&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;)::'lambda'(void*)::__invoke(void*) (1 samples, 0.01%)</title><rect x="23.5" y="197" width="0.2" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="26.51" y="207.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::PushGenerator&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;::Producer::Push(arrow::Result&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;) (6 samples, 0.09%)</title><rect x="23.5" y="293" width="1.0" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="26.51" y="303.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (1 samples, 0.01%)</title><rect x="1189.3" y="485" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="1192.32" y="495.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`__bzero (1 samples, 0.01%)</title><rect x="16.2" y="373" width="0.2" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="19.25" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_malloc_zone_memalign (3 samples, 0.04%)</title><rect x="878.9" y="213" width="0.5" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="881.91" y="223.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_memalign (3 samples, 0.04%)</title><rect x="878.9" y="197" width="0.5" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="881.91" y="207.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1186.1" y="293" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1189.12" y="303.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::mutex::lock() (2 samples, 0.03%)</title><rect x="20.5" y="69" width="0.3" height="15.0" fill="rgb(233,129,30)" rx="2" ry="2" />
+<text  x="23.47" y="79.5" ></text>
+</g>
+<g >
+<title>bench_dbms`&lt;deduplicated_symbol&gt; (1 samples, 0.01%)</title><rect x="18.8" y="501" width="0.2" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="21.78" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::(anonymous.namespace)::GuaranteeConjunctionMembers(arrow::compute::Expression (1 samples, 0.01%)</title><rect x="30.1" y="357" width="0.2" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="33.10" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::BaseMemoryPoolImpl&lt;arrow::(anonymous.namespace)::SystemAllocator&gt;::Free(unsigned (1 samples, 0.01%)</title><rect x="35.2" y="293" width="0.1" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="38.16" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::ExecNode::~ExecNode() (1 samples, 0.01%)</title><rect x="16.6" y="421" width="0.2" height="15.0" fill="rgb(228,108,25)" rx="2" ry="2" />
+<text  x="19.59" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::SwissTable::early_filter(int,.unsigned (2,923 samples, 41.83%)</title><rect x="151.4" y="341" width="493.6" height="15.0" fill="rgb(247,197,47)" rx="2" ry="2" />
+<text  x="154.36" y="351.5" >libarrow_compute.2200.0.0`arrow::compute::SwissTable::early_filter(..</text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::RunOrScheduleCallback(std::shared_ptr&lt;arrow::FutureImpl&gt;.const&amp;, (13 samples, 0.19%)</title><rect x="19.1" y="373" width="2.2" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="22.12" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::compute::ExecSpan::ExecSpan(arrow::compute::ExecBatch.const&amp;) (3 samples, 0.04%)</title><rect x="1179.0" y="373" width="0.5" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="1182.02" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::BaseMemoryPoolImpl&lt;arrow::(anonymous.namespace)::SystemAllocator&gt;::Free(unsigned (1 samples, 0.01%)</title><rect x="879.4" y="277" width="0.2" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="882.42" y="287.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memset (1 samples, 0.01%)</title><rect x="21.0" y="165" width="0.1" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="23.98" y="175.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::construct_at[abi:ne200100]&lt;arrow::SimpleRecordBatch,.std::shared_ptr&lt;arrow::Schema&gt;, (1 samples, 0.01%)</title><rect x="19.0" y="485" width="0.1" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="21.95" y="495.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::~GroupByNode() (8 samples, 0.11%)</title><rect x="16.4" y="453" width="1.4" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="19.42" y="463.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::DoMarkFinishedOrFailed(arrow::FutureState) (3 samples, 0.04%)</title><rect x="19.5" y="213" width="0.5" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="22.46" y="223.5" ></text>
+</g>
+<g >
+<title>all (6,987 samples, 100%)</title><rect x="10.0" y="725" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="735.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (13 samples, 0.19%)</title><rect x="19.1" y="389" width="2.2" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="22.12" y="399.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (2 samples, 0.03%)</title><rect x="1186.5" y="357" width="0.3" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1189.45" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::compute::ExecBatch::ExecBatch(std::vector&lt;arrow::Datum&gt;,.long (2 samples, 0.03%)</title><rect x="32.1" y="373" width="0.4" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="35.12" y="383.5" ></text>
+</g>
+<g >
+<title>bench_dbms`DB::tests::(anonymous.namespace)::GetOrCreateDataset(DB::tests::(anonymous (22 samples, 0.31%)</title><rect x="10.2" y="565" width="3.7" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="13.17" y="575.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (12 samples, 0.17%)</title><rect x="19.3" y="277" width="2.0" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="22.29" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ArraySpan::SetMembers(arrow::ArrayData.const&amp;) (1 samples, 0.01%)</title><rect x="35.7" y="341" width="0.1" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="38.67" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`rack_get_thread_index (1 samples, 0.01%)</title><rect x="1179.4" y="293" width="0.1" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="1182.36" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;0ul&gt;::__dispatch[abi:ne200100]&lt;std::__variant_detail::__visitation::__variant::__value_visitor&lt;arrow::FieldRef::FindAll(std::vector&lt;std::shared_ptr&lt;arrow::Field&gt;&gt; (1 samples, 0.01%)</title><rect x="1185.1" y="325" width="0.2" height="15.0" fill="rgb(233,130,31)" rx="2" ry="2" />
+<text  x="1188.10" y="335.5" ></text>
+</g>
+<g >
+<title>bench_dbms`DB::TiForth::toArrowArray(DB::IColumn.const&amp;, (4 samples, 0.06%)</title><rect x="10.7" y="533" width="0.7" height="15.0" fill="rgb(238,156,37)" rx="2" ry="2" />
+<text  x="13.68" y="543.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::TempVectorStack::alloc(unsigned.int, (8 samples, 0.11%)</title><rect x="880.8" y="341" width="1.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="883.77" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::PushGenerator&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;::operator()().const (3 samples, 0.04%)</title><rect x="1182.4" y="437" width="0.5" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="1185.40" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`&lt;deduplicated_symbol&gt; (2 samples, 0.03%)</title><rect x="26.0" y="325" width="0.4" height="15.0" fill="rgb(224,87,20)" rx="2" ry="2" />
+<text  x="29.04" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;::MakeFinished(arrow::Result&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;) (1 samples, 0.01%)</title><rect x="1182.6" y="405" width="0.1" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="1185.57" y="415.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_free_no_lock (1 samples, 0.01%)</title><rect x="18.1" y="437" width="0.2" height="15.0" fill="rgb(230,117,27)" rx="2" ry="2" />
+<text  x="21.11" y="447.5" ></text>
+</g>
+<g >
+<title>bench_dbms`DB::TiForth::toArrowRecordBatch(DB::Block.const&amp;, (4 samples, 0.06%)</title><rect x="10.7" y="549" width="0.7" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="13.68" y="559.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;0ul&gt;::__dispatch[abi:ne200100]&lt;std::__variant_detail::__visitation::__variant::__value_visitor&lt;arrow::FieldRef::hash() (1 samples, 0.01%)</title><rect x="31.3" y="293" width="0.1" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="34.28" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::MakeAggregateNodeArgs(std::shared_ptr&lt;arrow::Schema&gt;.const&amp;, (13 samples, 0.19%)</title><rect x="1185.1" y="373" width="2.2" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="1188.10" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::SourceNode::StartProducing()::'lambda'()::operator()() (1 samples, 0.01%)</title><rect x="19.1" y="277" width="0.2" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="22.12" y="287.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="17.4" y="389" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="20.43" y="399.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::__shared_weak_count::__release_weak() (1 samples, 0.01%)</title><rect x="17.8" y="453" width="0.1" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="20.77" y="463.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="19.8" y="165" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="22.80" y="175.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::__optional_destruct_base&lt;arrow::compute::ExecBatch,.false&gt;::~__optional_destruct_base[abi:ne200100]() (1 samples, 0.01%)</title><rect x="23.5" y="181" width="0.2" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="26.51" y="191.5" ></text>
+</g>
+<g >
+<title>bench_dbms`benchmark::internal::BenchmarkRunner::DoNIterations() (6,985 samples, 99.97%)</title><rect x="10.2" y="629" width="1179.6" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="13.17" y="639.5" >bench_dbms`benchmark::internal::BenchmarkRunner::DoNIterations()</text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Reserve(long.long) (3 samples, 0.04%)</title><rect x="878.9" y="277" width="0.5" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="881.91" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Resize(long.long, (1 samples, 0.01%)</title><rect x="25.0" y="309" width="0.2" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="28.03" y="319.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (1 samples, 0.01%)</title><rect x="885.0" y="325" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="887.99" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::internal::HashAggregateFinalize(arrow::compute::KernelContext*,.arrow::Datum*) (3 samples, 0.04%)</title><rect x="25.9" y="357" width="0.5" height="15.0" fill="rgb(251,213,50)" rx="2" ry="2" />
+<text  x="28.88" y="367.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::mutex::lock() (1 samples, 0.01%)</title><rect x="14.7" y="485" width="0.2" height="15.0" fill="rgb(233,129,30)" rx="2" ry="2" />
+<text  x="17.73" y="495.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`szone_malloc_should_clear (1 samples, 0.01%)</title><rect x="1189.7" y="469" width="0.1" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="1192.66" y="479.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`free_tiny (1 samples, 0.01%)</title><rect x="25.4" y="277" width="0.1" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="28.37" y="287.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="18.3" y="501" width="0.1" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="21.28" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::AsyncGeneratorEnd&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;() (1 samples, 0.01%)</title><rect x="1182.6" y="421" width="0.1" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="1185.57" y="431.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (3 samples, 0.04%)</title><rect x="35.8" y="341" width="0.5" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="38.84" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::construct_at[abi:ne200100]&lt;arrow::Schema,.std::vector&lt;std::shared_ptr&lt;arrow::Field&gt;&gt;, (1 samples, 0.01%)</title><rect x="1184.3" y="341" width="0.1" height="15.0" fill="rgb(222,79,19)" rx="2" ry="2" />
+<text  x="1187.26" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (1 samples, 0.01%)</title><rect x="1182.2" y="437" width="0.2" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="1185.23" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::FutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (1 samples, 0.01%)</title><rect x="1187.8" y="373" width="0.2" height="15.0" fill="rgb(221,75,17)" rx="2" ry="2" />
+<text  x="1190.80" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::FieldPathGetImpl::Get&lt;arrow::NestedSelector&lt;arrow::Field,.false&gt;, (1 samples, 0.01%)</title><rect x="1185.1" y="309" width="0.2" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="1188.10" y="319.5" ></text>
+</g>
+<g >
+<title>bench_dbms`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;0ul&gt;::__dispatch[abi:ne200100]&lt;void (1 samples, 0.01%)</title><rect x="1186.1" y="309" width="0.2" height="15.0" fill="rgb(228,108,25)" rx="2" ry="2" />
+<text  x="1189.12" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::RunOrScheduleCallback(std::shared_ptr&lt;arrow::FutureImpl&gt;.const&amp;, (5 samples, 0.07%)</title><rect x="23.5" y="245" width="0.9" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="26.51" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::util::(anonymous.namespace)::AsyncTaskSchedulerImpl::AddTask(std::unique_ptr&lt;arrow::util::AsyncTaskScheduler::Task&gt;) (1 samples, 0.01%)</title><rect x="19.6" y="149" width="0.2" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="22.63" y="159.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::InputFinished(arrow::acero::ExecNode*,.int) (20 samples, 0.29%)</title><rect x="23.2" y="405" width="3.4" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="26.17" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::Datum::Datum(bool) (2 samples, 0.03%)</title><rect x="32.1" y="357" width="0.4" height="15.0" fill="rgb(249,202,48)" rx="2" ry="2" />
+<text  x="35.12" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;0ul&gt;::__dispatch[abi:ne200100]&lt;std::__variant_detail::__dtor&lt;std::__variant_detail::__traits&lt;arrow::Datum, (1 samples, 0.01%)</title><rect x="33.6" y="357" width="0.2" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="36.64" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::AlignedStorage&lt;arrow::compute::ExecBatch&gt;::destroy() (1 samples, 0.01%)</title><rect x="1179.5" y="373" width="0.2" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="1182.53" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::ExecBatch::ToRecordBatch(std::shared_ptr&lt;arrow::Schema&gt;,.arrow::MemoryPool*) (2 samples, 0.03%)</title><rect x="23.8" y="149" width="0.4" height="15.0" fill="rgb(236,146,35)" rx="2" ry="2" />
+<text  x="26.85" y="159.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::default_exec_factory_registry()::DefaultRegistry::GetFactory(std::basic_string&lt;char&gt;.const&amp;) (1 samples, 0.01%)</title><rect x="1184.8" y="405" width="0.1" height="15.0" fill="rgb(236,143,34)" rx="2" ry="2" />
+<text  x="1187.76" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ArrayData::~ArrayData() (4 samples, 0.06%)</title><rect x="1179.7" y="357" width="0.7" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="1182.70" y="367.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`free_tiny (1 samples, 0.01%)</title><rect x="26.4" y="357" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="29.38" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::ProjectNode::ProcessBatch(arrow::compute::ExecBatch) (26 samples, 0.37%)</title><rect x="28.2" y="389" width="4.4" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="31.24" y="399.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::ArrowComputeAggTransformOp::NextOutputBatch() (6,895 samples, 98.68%)</title><rect x="18.8" y="517" width="1164.4" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="21.78" y="527.5" >bench_dbms`tiforth::ArrowComputeAggTransformOp::NextOutputBatch()</text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::TempVectorStack::alloc(unsigned.int, (3 samples, 0.04%)</title><rect x="148.5" y="325" width="0.5" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="151.49" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="1181.2" y="373" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="1184.22" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_malloc_zone_memalign (1 samples, 0.01%)</title><rect x="26.2" y="197" width="0.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="29.21" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_c`clock_gettime (1 samples, 0.01%)</title><rect x="19.3" y="229" width="0.2" height="15.0" fill="rgb(207,12,3)" rx="2" ry="2" />
+<text  x="22.29" y="239.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::basic_streambuf&lt;char&gt;::xsputn(char.const*, (1 samples, 0.01%)</title><rect x="1189.0" y="341" width="0.2" height="15.0" fill="rgb(230,116,27)" rx="2" ry="2" />
+<text  x="1191.99" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::vector&lt;arrow::compute::ExecValue&gt;::__append(unsigned.long) (1 samples, 0.01%)</title><rect x="1179.4" y="357" width="0.1" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="1182.36" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::(anonymous.namespace)::SystemAllocator::ReallocateAligned(long (1 samples, 0.01%)</title><rect x="1178.0" y="277" width="0.2" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="1181.01" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;arrow::internal::Empty&gt;::MarkFinished&lt;arrow::internal::Empty,.void&gt;(arrow::Status) (1 samples, 0.01%)</title><rect x="19.5" y="165" width="0.1" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="22.46" y="175.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::Make(arrow::acero::ExecPlan*,.std::vector&lt;arrow::acero::ExecNode*&gt;, (14 samples, 0.20%)</title><rect x="1184.9" y="389" width="2.4" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="1187.93" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`&lt;deduplicated_symbol&gt; (1 samples, 0.01%)</title><rect x="33.6" y="325" width="0.2" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="36.64" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::Grouper::Make(std::vector&lt;arrow::TypeHolder&gt;.const&amp;, (4 samples, 0.06%)</title><rect x="34.5" y="341" width="0.7" height="15.0" fill="rgb(215,50,11)" rx="2" ry="2" />
+<text  x="37.49" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_c`clock_gettime (1 samples, 0.01%)</title><rect x="1189.8" y="597" width="0.2" height="15.0" fill="rgb(207,12,3)" rx="2" ry="2" />
+<text  x="1192.83" y="607.5" ></text>
+</g>
+<g >
+<title>libc++abi`DYLD-STUB$$malloc_type_malloc (1 samples, 0.01%)</title><rect x="36.5" y="325" width="0.2" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="39.51" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::QueryContext::ScheduleTask(std::function&lt;arrow::Status.()&gt;, (1 samples, 0.01%)</title><rect x="20.8" y="181" width="0.2" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="23.81" y="191.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::ExecNode::~ExecNode() (1 samples, 0.01%)</title><rect x="16.2" y="437" width="0.2" height="15.0" fill="rgb(228,108,25)" rx="2" ry="2" />
+<text  x="19.25" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GetKernel(arrow::compute::ExecContext*,.arrow::compute::Aggregate (4 samples, 0.06%)</title><rect x="1185.3" y="341" width="0.6" height="15.0" fill="rgb(250,208,49)" rx="2" ry="2" />
+<text  x="1188.27" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::KeyCompare::NullUpdateColumnToRow&lt;false&gt;(unsigned.int, (1 samples, 0.01%)</title><rect x="871.3" y="277" width="0.2" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="874.31" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__function::__func&lt;arrow::acero::(anonymous.namespace)::SourceNode::SliceAndDeliverMorsel(arrow::compute::ExecBatch (6,842 samples, 97.92%)</title><rect x="26.6" y="421" width="1155.5" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="29.55" y="431.5" >libarrow_acero.2200.0.0`std::__function::__func&lt;arrow::acero::(anonymous.namespace)::SourceNode::SliceAndDeliverMorsel(arrow::compute::ExecBatch</text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::TracedNode::TraceInputReceived(arrow::compute::ExecBatch.const&amp;) (1 samples, 0.01%)</title><rect x="33.8" y="373" width="0.2" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="36.81" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Reserve(long.long) (1 samples, 0.01%)</title><rect x="1178.0" y="309" width="0.2" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="1181.01" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::util::(anonymous.namespace)::AsyncTaskSchedulerImpl::MaybeEndUnlocked(std::unique_lock&lt;std::mutex&gt;&amp;&amp;) (2 samples, 0.03%)</title><rect x="22.5" y="341" width="0.3" height="15.0" fill="rgb(205,2,0)" rx="2" ry="2" />
+<text  x="25.50" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;std::optional&lt;int&gt;&gt;::DoMarkFinished(arrow::Result&lt;std::optional&lt;int&gt;&gt;) (13 samples, 0.19%)</title><rect x="19.1" y="325" width="2.2" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="22.12" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::compute::Aggregate::~Aggregate() (1 samples, 0.01%)</title><rect x="16.8" y="421" width="0.1" height="15.0" fill="rgb(206,8,1)" rx="2" ry="2" />
+<text  x="19.76" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::Declaration::AddToPlan(arrow::acero::ExecPlan*,.arrow::acero::ExecFactoryRegistry*) (18 samples, 0.26%)</title><rect x="1184.3" y="437" width="3.0" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="1187.26" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::Hashing32::HashMultiColumn(std::vector&lt;arrow::compute::KeyColumnArray&gt;.const&amp;, (642 samples, 9.19%)</title><rect x="41.2" y="341" width="108.5" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="44.24" y="351.5" >libarrow_comp..</text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::MakeExecNode(std::basic_string&lt;char&gt;.const&amp;, (3 samples, 0.04%)</title><rect x="1184.3" y="405" width="0.5" height="15.0" fill="rgb(218,59,14)" rx="2" ry="2" />
+<text  x="1187.26" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::MapNode::InputReceived(arrow::acero::ExecNode*,.arrow::compute::ExecBatch) (6,832 samples, 97.78%)</title><rect x="28.2" y="405" width="1153.9" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="31.24" y="415.5" >libarrow_acero.2200.0.0`arrow::acero::MapNode::InputReceived(arrow::acero::ExecNode*,.arrow::compute::ExecBatch)</text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::internal::CountSetBits(unsigned.char (51 samples, 0.73%)</title><rect x="645.5" y="325" width="8.6" height="15.0" fill="rgb(233,129,30)" rx="2" ry="2" />
+<text  x="648.51" y="335.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::Task::Create(std::vector&lt;std::unique_ptr&lt;tiforth::TransformOp&gt;&gt;) (1 samples, 0.01%)</title><rect x="14.2" y="549" width="0.2" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="17.22" y="559.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::TempVectorStack::alloc(unsigned.int, (3 samples, 0.04%)</title><rect x="871.5" y="277" width="0.5" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="874.48" y="287.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`malloc_type_malloc (1 samples, 0.01%)</title><rect x="1015.2" y="309" width="0.2" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="1018.20" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::(anonymous.namespace)::ArrayRangeEquals(arrow::Array (3 samples, 0.04%)</title><rect x="38.9" y="341" width="0.5" height="15.0" fill="rgb(243,177,42)" rx="2" ry="2" />
+<text  x="41.88" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::detail::DispatchExactImpl(arrow::compute::Function.const*, (2 samples, 0.03%)</title><rect x="1185.3" y="309" width="0.3" height="15.0" fill="rgb(231,123,29)" rx="2" ry="2" />
+<text  x="1188.27" y="319.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="19.5" y="133" width="0.1" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="22.46" y="143.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__put_character_sequence[abi:ne200100]&lt;char&gt;(std::basic_ostream&lt;char&gt;&amp;,.char (1 samples, 0.01%)</title><rect x="1188.0" y="373" width="0.1" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="1190.97" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_malloc_zone_memalign (1 samples, 0.01%)</title><rect x="39.7" y="245" width="0.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="42.72" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::DoMarkFinishedOrFailed(arrow::FutureState) (6 samples, 0.09%)</title><rect x="23.5" y="261" width="1.0" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="26.51" y="271.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="14.1" y="517" width="0.1" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="17.05" y="527.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::OutputNthBatch(long.long) (8 samples, 0.11%)</title><rect x="23.2" y="341" width="1.3" height="15.0" fill="rgb(237,149,35)" rx="2" ry="2" />
+<text  x="26.17" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (1 samples, 0.01%)</title><rect x="39.9" y="309" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="42.89" y="319.5" ></text>
+</g>
+<g >
+<title>libc++abi`DYLD-STUB$$free (1 samples, 0.01%)</title><rect x="1179.9" y="341" width="0.1" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="1182.87" y="351.5" ></text>
+</g>
+<g >
+<title>libc++abi`DYLD-STUB$$free (1 samples, 0.01%)</title><rect x="17.3" y="389" width="0.1" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="20.26" y="399.5" ></text>
+</g>
+<g >
+<title>bench_dbms`benchmark::internal::BenchmarkInstance::Run(unsigned.long (6,985 samples, 99.97%)</title><rect x="10.2" y="597" width="1179.6" height="15.0" fill="rgb(253,222,53)" rx="2" ry="2" />
+<text  x="13.17" y="607.5" >bench_dbms`benchmark::internal::BenchmarkInstance::Run(unsigned.long</text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`std::__shared_ptr_emplace&lt;arrow::NumericArray&lt;arrow::UInt32Type&gt;&gt;::__on_zero_shared() (1 samples, 0.01%)</title><rect x="40.4" y="325" width="0.2" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="43.40" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::RunOrScheduleCallback(std::shared_ptr&lt;arrow::FutureImpl&gt;.const&amp;, (13 samples, 0.19%)</title><rect x="19.1" y="293" width="2.2" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="22.12" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::(anonymous.namespace)::GrouperFastImpl::ConsumeImpl(arrow::compute::ExecSpan (1 samples, 0.01%)</title><rect x="1180.9" y="373" width="0.1" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="1183.88" y="383.5" ></text>
+</g>
+<g >
+<title>Thread_37605233 (1 samples, 0.01%)</title><rect x="1189.8" y="709" width="0.2" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="1192.83" y="719.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::internal::(anonymous.namespace)::GroupedReducingAggregator&lt;arrow::Int64Type, (2 samples, 0.03%)</title><rect x="26.0" y="341" width="0.4" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="29.04" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::compute::Aggregate::Aggregate(arrow::compute::Aggregate.const&amp;) (1 samples, 0.01%)</title><rect x="1186.1" y="341" width="0.2" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="1189.12" y="351.5" ></text>
+</g>
+<g >
+<title>bench_dbms`arrow::acero::Declaration::~Declaration() (1 samples, 0.01%)</title><rect x="15.6" y="517" width="0.1" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="18.57" y="527.5" ></text>
+</g>
+<g >
+<title>bench_dbms`benchmark::internal::BenchmarkRunner::DoOneRepetition() (6,985 samples, 99.97%)</title><rect x="10.2" y="645" width="1179.6" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="13.17" y="655.5" >bench_dbms`benchmark::internal::BenchmarkRunner::DoOneRepetition()</text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::BufferBuilder::Resize(long.long, (2 samples, 0.03%)</title><rect x="1177.8" y="341" width="0.4" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="1180.84" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (2 samples, 0.03%)</title><rect x="19.5" y="181" width="0.3" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="22.46" y="191.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::TempVectorStack::release(int,.unsigned (2 samples, 0.03%)</title><rect x="872.0" y="277" width="0.3" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="874.99" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__pad_and_output[abi:ne200100]&lt;char&gt;(std::ostreambuf_iterator&lt;char&gt;,.char (3 samples, 0.04%)</title><rect x="1188.5" y="341" width="0.5" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="1191.48" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::MakeArray(std::shared_ptr&lt;arrow::ArrayData&gt;.const&amp;) (1 samples, 0.01%)</title><rect x="39.9" y="341" width="0.2" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="42.89" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::OutputResult(bool) (20 samples, 0.29%)</title><rect x="23.2" y="389" width="3.4" height="15.0" fill="rgb(212,32,7)" rx="2" ry="2" />
+<text  x="26.17" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::ResolveKernels(std::vector&lt;arrow::compute::Aggregate&gt;.const&amp;, (1 samples, 0.01%)</title><rect x="1185.9" y="357" width="0.2" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="1188.95" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;::DoMarkFinished(arrow::Result&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;) (6 samples, 0.09%)</title><rect x="23.5" y="277" width="1.0" height="15.0" fill="rgb(251,212,50)" rx="2" ry="2" />
+<text  x="26.51" y="287.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1189.3" y="501" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1192.32" y="511.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (1 samples, 0.01%)</title><rect x="14.1" y="501" width="0.1" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="17.05" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;std::optional&lt;int&gt;&gt;::DoMarkFinished(arrow::Result&lt;std::optional&lt;int&gt;&gt;) (2 samples, 0.03%)</title><rect x="20.5" y="101" width="0.3" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="23.47" y="111.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::GetLogicalType(arrow::Field.const&amp;) (1 samples, 0.01%)</title><rect x="1183.6" y="469" width="0.2" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="1186.58" y="479.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_malloc_should_clear (3 samples, 0.04%)</title><rect x="35.8" y="309" width="0.5" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="38.84" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;2ul&gt;::__dispatch[abi:ne200100]&lt;std::__variant_detail::__dtor&lt;std::__variant_detail::__traits&lt;arrow::Datum::Empty, (4 samples, 0.06%)</title><rect x="16.9" y="421" width="0.7" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="19.92" y="431.5" ></text>
+</g>
+<g >
+<title>bench_dbms`pingcap::common::MPPProber::run() (1 samples, 0.01%)</title><rect x="1189.8" y="629" width="0.2" height="15.0" fill="rgb(238,156,37)" rx="2" ry="2" />
+<text  x="1192.83" y="639.5" ></text>
+</g>
+<g >
+<title>bench_dbms`arrow::PushGenerator&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;::Producer::Close() (1 samples, 0.01%)</title><rect x="14.7" y="517" width="0.2" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="17.73" y="527.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::detail::MarkNextFinished&lt;arrow::Future&lt;std::optional&lt;int&gt;&gt;,.arrow::Future&lt;std::optional&lt;int&gt;&gt;, (13 samples, 0.19%)</title><rect x="19.1" y="357" width="2.2" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="22.12" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ArrayData::ArrayData(arrow::ArrayData.const&amp;) (2 samples, 0.03%)</title><rect x="27.4" y="373" width="0.3" height="15.0" fill="rgb(249,202,48)" rx="2" ry="2" />
+<text  x="30.40" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_posix_memalign (1 samples, 0.01%)</title><rect x="26.2" y="213" width="0.2" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="29.21" y="223.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::BufferBuilder::Resize(long.long, (1 samples, 0.01%)</title><rect x="1015.2" y="341" width="0.2" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="1018.20" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::AllocateBuffer(long.long, (3 samples, 0.04%)</title><rect x="878.9" y="309" width="0.5" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="881.91" y="319.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::mutex::unlock() (1 samples, 0.01%)</title><rect x="1187.8" y="341" width="0.2" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="1190.80" y="351.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::__optional_destruct_base&lt;arrow::compute::ExecBatch,.false&gt;::~__optional_destruct_base[abi:ne200100]() (1 samples, 0.01%)</title><rect x="20.1" y="245" width="0.2" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="23.13" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::(anonymous.namespace)::RangeDataEqualsImpl::Visit(arrow::BinaryType (3 samples, 0.04%)</title><rect x="38.9" y="309" width="0.5" height="15.0" fill="rgb(243,174,41)" rx="2" ry="2" />
+<text  x="41.88" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::DoMarkFinishedOrFailed(arrow::FutureState) (13 samples, 0.19%)</title><rect x="19.1" y="309" width="2.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="22.12" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`DYLD-STUB$$memcmp (1 samples, 0.01%)</title><rect x="1184.8" y="373" width="0.1" height="15.0" fill="rgb(253,222,53)" rx="2" ry="2" />
+<text  x="1187.76" y="383.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::__call_once(unsigned.long (1 samples, 0.01%)</title><rect x="13.9" y="533" width="0.2" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="16.88" y="543.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_memalign (1 samples, 0.01%)</title><rect x="26.2" y="181" width="0.2" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="29.21" y="191.5" ></text>
+</g>
+<g >
+<title>bench_dbms`benchmark::internal::(anonymous.namespace)::RunInThread(benchmark::internal::BenchmarkInstance (6,985 samples, 99.97%)</title><rect x="10.2" y="613" width="1179.6" height="15.0" fill="rgb(253,221,52)" rx="2" ry="2" />
+<text  x="13.17" y="623.5" >bench_dbms`benchmark::internal::(anonymous.namespace)::RunInThread(benchmark::internal::BenchmarkInstance</text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::QueryContext::ScheduleTask(std::function&lt;arrow::Status.()&gt;, (1 samples, 0.01%)</title><rect x="19.6" y="165" width="0.2" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="22.63" y="175.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__function::__func&lt;arrow::acero::internal::RegisterAggregateNode(arrow::acero::ExecFactoryRegistry*)::$_0,.arrow::Result&lt;arrow::acero::ExecNode*&gt; (14 samples, 0.20%)</title><rect x="1184.9" y="405" width="2.4" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="1187.93" y="415.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.delete(void*) (1 samples, 0.01%)</title><rect x="24.4" y="245" width="0.1" height="15.0" fill="rgb(246,192,45)" rx="2" ry="2" />
+<text  x="27.36" y="255.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::compute::ExecBatch::ExecBatch() (1 samples, 0.01%)</title><rect x="1184.9" y="341" width="0.2" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="1187.93" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="16.8" y="405" width="0.1" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="19.76" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`&lt;deduplicated_symbol&gt; (1 samples, 0.01%)</title><rect x="24.0" y="85" width="0.2" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="27.02" y="95.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;1ul&gt;::__dispatch[abi:ne200100]&lt;std::__variant_detail::__dtor&lt;std::__variant_detail::__traits&lt;arrow::Datum::Empty, (1 samples, 0.01%)</title><rect x="24.7" y="357" width="0.2" height="15.0" fill="rgb(218,64,15)" rx="2" ry="2" />
+<text  x="27.69" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::AllocateBuffer(long.long, (1 samples, 0.01%)</title><rect x="25.0" y="325" width="0.2" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="28.03" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::Declaration::AddToPlan(arrow::acero::ExecPlan*,.arrow::acero::ExecFactoryRegistry*) (18 samples, 0.26%)</title><rect x="1184.3" y="453" width="3.0" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="1187.26" y="463.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::Declaration::~Declaration() (2 samples, 0.03%)</title><rect x="1187.3" y="453" width="0.3" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="1190.30" y="463.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::vector&lt;arrow::FieldRef&gt;::__init_with_size[abi:ne200100]&lt;arrow::FieldRef*,.arrow::FieldRef*&gt;(arrow::FieldRef*, (1 samples, 0.01%)</title><rect x="1186.1" y="325" width="0.2" height="15.0" fill="rgb(223,83,20)" rx="2" ry="2" />
+<text  x="1189.12" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_szone_free (1 samples, 0.01%)</title><rect x="1178.5" y="357" width="0.2" height="15.0" fill="rgb(226,96,23)" rx="2" ry="2" />
+<text  x="1181.52" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::TryAddCallback(std::function&lt;arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (1 samples, 0.01%)</title><rect x="19.6" y="133" width="0.2" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="22.63" y="143.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_free (1 samples, 0.01%)</title><rect x="1181.9" y="389" width="0.2" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="1184.89" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (4 samples, 0.06%)</title><rect x="20.5" y="197" width="0.6" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="23.47" y="207.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;2ul&gt;::__dispatch[abi:ne200100]&lt;std::__variant_detail::__dtor&lt;std::__variant_detail::__traits&lt;arrow::Datum::Empty, (4 samples, 0.06%)</title><rect x="1179.7" y="373" width="0.7" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="1182.70" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::vector&lt;arrow::Datum&gt;::reserve(unsigned.long) (1 samples, 0.01%)</title><rect x="33.3" y="357" width="0.2" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="36.31" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`&lt;deduplicated_symbol&gt; (1 samples, 0.01%)</title><rect x="38.7" y="341" width="0.2" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="41.71" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;1ul&gt;::__dispatch[abi:ne200100]&lt;std::__variant_detail::__dtor&lt;std::__variant_detail::__traits&lt;arrow::Datum::Empty, (1 samples, 0.01%)</title><rect x="33.6" y="341" width="0.2" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="36.64" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Reserve(long.long) (2 samples, 0.03%)</title><rect x="39.6" y="309" width="0.3" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="42.55" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::TempVectorStack::alloc(unsigned.int, (1 samples, 0.01%)</title><rect x="877.7" y="293" width="0.2" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="880.73" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::bit_util::bits_to_indexes(int,.long (12 samples, 0.17%)</title><rect x="882.8" y="341" width="2.0" height="15.0" fill="rgb(222,78,18)" rx="2" ry="2" />
+<text  x="885.80" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_malloc_should_clear (1 samples, 0.01%)</title><rect x="1187.6" y="357" width="0.2" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="1190.64" y="367.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_free (1 samples, 0.01%)</title><rect x="25.2" y="341" width="0.2" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="28.20" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::SourceNode::StartProducing()::'lambda'()::operator()() (8 samples, 0.11%)</title><rect x="20.0" y="261" width="1.3" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="22.96" y="271.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::~PoolBuffer() (1 samples, 0.01%)</title><rect x="17.1" y="373" width="0.2" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="20.09" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::__sift_up[abi:ne200100]&lt;std::_ClassicAlgPolicy,.std::__wrap_iter&lt;arrow::internal::(anonymous (1 samples, 0.01%)</title><rect x="20.8" y="85" width="0.2" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="23.81" y="95.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::BaseMemoryPoolImpl&lt;arrow::(anonymous.namespace)::SystemAllocator&gt;::Allocate(long (1 samples, 0.01%)</title><rect x="39.7" y="293" width="0.2" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="42.72" y="303.5" ></text>
+</g>
+<g >
+<title>libsystem_pthread`pthread_mutex_lock (1 samples, 0.01%)</title><rect x="1182.4" y="389" width="0.2" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="1185.40" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::BaseMemoryPoolImpl&lt;arrow::(anonymous.namespace)::SystemAllocator&gt;::Allocate(long (1 samples, 0.01%)</title><rect x="25.0" y="277" width="0.2" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="28.03" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::BaseMemoryPoolImpl&lt;arrow::(anonymous.namespace)::SystemAllocator&gt;::Allocate(long (3 samples, 0.04%)</title><rect x="878.9" y="261" width="0.5" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="881.91" y="271.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::bit_util::bits_to_indexes_internal&lt;0,.false&gt;(long (6 samples, 0.09%)</title><rect x="872.5" y="261" width="1.0" height="15.0" fill="rgb(207,13,3)" rx="2" ry="2" />
+<text  x="875.50" y="271.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::deque&lt;std::shared_ptr&lt;arrow::RecordBatch&gt;&gt;::__add_back_capacity() (2 samples, 0.03%)</title><rect x="1189.5" y="501" width="0.3" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="1192.49" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::MutableBuffer::MutableBuffer(unsigned.char*, (1 samples, 0.01%)</title><rect x="39.4" y="309" width="0.2" height="15.0" fill="rgb(237,149,35)" rx="2" ry="2" />
+<text  x="42.39" y="319.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`free_medium (1 samples, 0.01%)</title><rect x="35.2" y="277" width="0.1" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="38.16" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::(anonymous.namespace)::GrouperFastImpl::GetUniques() (3 samples, 0.04%)</title><rect x="24.9" y="357" width="0.5" height="15.0" fill="rgb(224,91,21)" rx="2" ry="2" />
+<text  x="27.86" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::DoMarkFinishedOrFailed(arrow::FutureState) (3 samples, 0.04%)</title><rect x="22.3" y="389" width="0.5" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="25.33" y="399.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`malloc_type_malloc (1 samples, 0.01%)</title><rect x="1185.8" y="277" width="0.1" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="1188.78" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::priority_queue&lt;arrow::internal::(anonymous.namespace)::QueuedTask, (2 samples, 0.03%)</title><rect x="21.5" y="437" width="0.3" height="15.0" fill="rgb(251,211,50)" rx="2" ry="2" />
+<text  x="24.48" y="447.5" ></text>
+</g>
+<g >
+<title>libc++abi`DYLD-STUB$$free (1 samples, 0.01%)</title><rect x="22.5" y="245" width="0.2" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="25.50" y="255.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::mutex::lock() (1 samples, 0.01%)</title><rect x="23.7" y="117" width="0.1" height="15.0" fill="rgb(233,129,30)" rx="2" ry="2" />
+<text  x="26.68" y="127.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memset (1 samples, 0.01%)</title><rect x="1179.2" y="341" width="0.2" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="1182.19" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::FnOnce&lt;arrow::Status.(arrow::util::AsyncTaskScheduler*)&gt;::FnImpl&lt;arrow::acero::(anonymous (8 samples, 0.11%)</title><rect x="1187.8" y="421" width="1.4" height="15.0" fill="rgb(210,27,6)" rx="2" ry="2" />
+<text  x="1190.80" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::FutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (13 samples, 0.19%)</title><rect x="19.1" y="405" width="2.2" height="15.0" fill="rgb(221,75,17)" rx="2" ry="2" />
+<text  x="22.12" y="415.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::Engine::Create(tiforth::EngineOptions) (1 samples, 0.01%)</title><rect x="13.9" y="565" width="0.2" height="15.0" fill="rgb(244,181,43)" rx="2" ry="2" />
+<text  x="16.88" y="575.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::vector&lt;arrow::compute::Aggregate&gt;::reserve(unsigned.long) (1 samples, 0.01%)</title><rect x="18.4" y="517" width="0.2" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="21.44" y="527.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::~PoolBuffer() (1 samples, 0.01%)</title><rect x="879.4" y="309" width="0.2" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="882.42" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::ExecPlanImpl::~ExecPlanImpl() (12 samples, 0.17%)</title><rect x="16.2" y="469" width="2.1" height="15.0" fill="rgb(205,1,0)" rx="2" ry="2" />
+<text  x="19.25" y="479.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Loop&lt;arrow::acero::(anonymous.namespace)::SourceNode::StartProducing()::'lambda'(), (3 samples, 0.04%)</title><rect x="19.5" y="261" width="0.5" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="22.46" y="271.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::FieldRef::FindAll(arrow::Schema.const&amp;) (1 samples, 0.01%)</title><rect x="1185.1" y="341" width="0.2" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="1188.10" y="351.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="18.6" y="501" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="21.61" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::KeyCompare::CompareColumnsToRows(unsigned.int, (640 samples, 9.16%)</title><rect x="769.6" y="293" width="108.1" height="15.0" fill="rgb(217,56,13)" rx="2" ry="2" />
+<text  x="772.65" y="303.5" >libarrow_comp..</text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (2 samples, 0.03%)</title><rect x="884.8" y="341" width="0.4" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="887.82" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::(anonymous.namespace)::SystemAllocator::AllocateAligned(long (1 samples, 0.01%)</title><rect x="25.0" y="261" width="0.2" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="28.03" y="271.5" ></text>
+</g>
+<g >
+<title>libsystem_c`clock_gettime_nsec_np (1 samples, 0.01%)</title><rect x="1189.8" y="581" width="0.2" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="1192.83" y="591.5" ></text>
+</g>
+<g >
+<title>bench_dbms`DYLD-STUB$$operator.new(unsigned (1 samples, 0.01%)</title><rect x="14.2" y="517" width="0.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="17.22" y="527.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`malloc_type_malloc (1 samples, 0.01%)</title><rect x="18.6" y="485" width="0.2" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="21.61" y="495.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::__function::__func&lt;arrow::PushGenerator&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt;,.arrow::Future&lt;std::optional&lt;arrow::compute::ExecBatch&gt;&gt; (1 samples, 0.01%)</title><rect x="15.7" y="517" width="0.2" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="18.74" y="527.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::num_put&lt;char,.std::ostreambuf_iterator&lt;char&gt;&gt;::__do_put_integral[abi:ne190102]&lt;long&gt;(std::ostreambuf_iterator&lt;char&gt;, (1 samples, 0.01%)</title><rect x="10.0" y="597" width="0.2" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="13.00" y="607.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::MakeUnique(arrow::MemoryPool*,.long (1 samples, 0.01%)</title><rect x="39.4" y="325" width="0.2" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="42.39" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`std::__shared_ptr_pointer&lt;arrow::Buffer*&gt;::__on_zero_shared_weak() (1 samples, 0.01%)</title><rect x="879.6" y="309" width="0.2" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="882.59" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::vector&lt;arrow::compute::ExecValue&gt;::__emplace_back_slow_path&lt;arrow::ArrayData&amp;&gt;(arrow::ArrayData&amp;) (4 samples, 0.06%)</title><rect x="35.7" y="357" width="0.6" height="15.0" fill="rgb(216,54,13)" rx="2" ry="2" />
+<text  x="38.67" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::ToStringExtra(int).const (6 samples, 0.09%)</title><rect x="1188.1" y="389" width="1.1" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="1191.14" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (5 samples, 0.07%)</title><rect x="23.5" y="229" width="0.9" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="26.51" y="239.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::default_delete&lt;tiforth::ArrowComputeAggTransformOp::ExecState&gt;::operator()[abi:ne200100](tiforth::ArrowComputeAggTransformOp::ExecState*).const (15 samples, 0.21%)</title><rect x="15.9" y="517" width="2.5" height="15.0" fill="rgb(222,78,18)" rx="2" ry="2" />
+<text  x="18.91" y="527.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (2 samples, 0.03%)</title><rect x="22.8" y="389" width="0.4" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="25.84" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::RunOrScheduleCallback(std::shared_ptr&lt;arrow::FutureImpl&gt;.const&amp;, (4 samples, 0.06%)</title><rect x="20.5" y="213" width="0.6" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="23.47" y="223.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_malloc_should_clear (2 samples, 0.03%)</title><rect x="879.1" y="181" width="0.3" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="882.08" y="191.5" ></text>
+</g>
+<g >
+<title>dyld`start (6,986 samples, 99.99%)</title><rect x="10.0" y="693" width="1179.8" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="13.00" y="703.5" >dyld`start</text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::(anonymous.namespace)::SystemAllocator::AllocateAligned(long (1 samples, 0.01%)</title><rect x="26.2" y="229" width="0.2" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="29.21" y="239.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::vector&lt;arrow::compute::ExecValue&gt;::__append(unsigned.long) (1 samples, 0.01%)</title><rect x="1180.7" y="373" width="0.2" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="1183.71" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`DYLD-STUB$$arrow::ArrayData::Make(std::shared_ptr&lt;arrow::DataType&gt;,.long (1 samples, 0.01%)</title><rect x="24.9" y="341" width="0.1" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="27.86" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ArraySpan::SetMembers(arrow::ArrayData.const&amp;) (2 samples, 0.03%)</title><rect x="1179.0" y="357" width="0.4" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="1182.02" y="367.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::ArrowComputeAggTransformOp::TransformImpl(std::shared_ptr&lt;arrow::RecordBatch&gt;*) (6,957 samples, 99.57%)</title><rect x="14.6" y="533" width="1174.9" height="15.0" fill="rgb(251,212,50)" rx="2" ry="2" />
+<text  x="17.56" y="543.5" >bench_dbms`tiforth::ArrowComputeAggTransformOp::TransformImpl(std::shared_ptr&lt;arrow::RecordBatch&gt;*)</text>
+</g>
+<g >
+<title>bench_dbms`std::__murmur2_or_cityhash&lt;unsigned.long, (3 samples, 0.04%)</title><rect x="12.2" y="549" width="0.5" height="15.0" fill="rgb(251,211,50)" rx="2" ry="2" />
+<text  x="15.20" y="559.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.delete(void*) (1 samples, 0.01%)</title><rect x="38.7" y="325" width="0.2" height="15.0" fill="rgb(246,192,45)" rx="2" ry="2" />
+<text  x="41.71" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::Consume(arrow::compute::ExecSpan) (6,780 samples, 97.04%)</title><rect x="34.0" y="373" width="1145.0" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="36.98" y="383.5" >libarrow_acero.2200.0.0`arrow::acero::aggregate::GroupByNode::Consume(arrow::compute::ExecSpan)</text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::internal::(anonymous.namespace)::GroupedCountImpl::Consume(arrow::compute::ExecSpan (766 samples, 10.96%)</title><rect x="885.7" y="357" width="129.3" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="888.67" y="367.5" >libarrow_compute..</text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::bit_util::bits_to_indexes(int,.long (7 samples, 0.10%)</title><rect x="872.3" y="277" width="1.2" height="15.0" fill="rgb(222,78,18)" rx="2" ry="2" />
+<text  x="875.33" y="287.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`szone_malloc_should_clear (1 samples, 0.01%)</title><rect x="1187.6" y="373" width="0.2" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="1190.64" y="383.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`DYLD-STUB$$operator.new(unsigned (1 samples, 0.01%)</title><rect x="33.5" y="325" width="0.1" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="36.48" y="335.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="30.1" y="341" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="33.10" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::(anonymous.namespace)::RegisterComputeKernels() (1 samples, 0.01%)</title><rect x="13.9" y="485" width="0.2" height="15.0" fill="rgb(233,129,30)" rx="2" ry="2" />
+<text  x="16.88" y="495.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel`_kernelrpc_mach_vm_map_trap (1 samples, 0.01%)</title><rect x="39.7" y="165" width="0.2" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="42.72" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`malloc_type_malloc (1 samples, 0.01%)</title><rect x="19.6" y="85" width="0.2" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="22.63" y="95.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::SinkNode::InputReceived(arrow::acero::ExecNode*, (6 samples, 0.09%)</title><rect x="23.5" y="325" width="1.0" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="26.51" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::AddCallback(arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (2 samples, 0.03%)</title><rect x="20.5" y="165" width="0.3" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="23.47" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (1 samples, 0.01%)</title><rect x="1186.1" y="277" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="1189.12" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ArrayData::Slice(long.long, (4 samples, 0.06%)</title><rect x="27.1" y="389" width="0.6" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="30.06" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::internal::(anonymous.namespace)::GroupedReducingAggregator&lt;arrow::Int64Type, (964 samples, 13.80%)</title><rect x="1015.4" y="357" width="162.8" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="1018.37" y="367.5" >libarrow_compute.220..</text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;std::optional&lt;int&gt;&gt;::MarkFinished(arrow::Result&lt;std::optional&lt;int&gt;&gt;) (13 samples, 0.19%)</title><rect x="19.1" y="341" width="2.2" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="22.12" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::internal::HashAggregateInit&lt;arrow::compute::internal::(anonymous.namespace)::GroupedCountImpl&gt;(arrow::compute::KernelContext*, (1 samples, 0.01%)</title><rect x="34.3" y="309" width="0.2" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="37.32" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::vector&lt;arrow::Datum&gt;::__init_with_size[abi:ne200100]&lt;arrow::Datum*,.arrow::Datum*&gt;(arrow::Datum*, (1 samples, 0.01%)</title><rect x="27.7" y="389" width="0.2" height="15.0" fill="rgb(228,110,26)" rx="2" ry="2" />
+<text  x="30.73" y="399.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`small_malloc_from_free_list (1 samples, 0.01%)</title><rect x="15.2" y="437" width="0.2" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="18.24" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::internal::SerialExecutor::SpawnReal(arrow::internal::TaskHints,.arrow::internal::FnOnce&lt;void (1 samples, 0.01%)</title><rect x="20.8" y="101" width="0.2" height="15.0" fill="rgb(207,9,2)" rx="2" ry="2" />
+<text  x="23.81" y="111.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="1180.2" y="341" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="1183.20" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::Expression::Bind(arrow::Schema.const&amp;, (1 samples, 0.01%)</title><rect x="1183.8" y="485" width="0.1" height="15.0" fill="rgb(250,207,49)" rx="2" ry="2" />
+<text  x="1186.75" y="495.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::vector&lt;arrow::TypeHolder&gt;::reserve(unsigned.long) (1 samples, 0.01%)</title><rect x="1185.8" y="309" width="0.1" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="1188.78" y="319.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_posix_memalign (1 samples, 0.01%)</title><rect x="39.7" y="261" width="0.2" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="42.72" y="271.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::compute::(anonymous.namespace)::BindImpl&lt;arrow::Schema&gt;(arrow::compute::Expression, (1 samples, 0.01%)</title><rect x="1183.8" y="469" width="0.1" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="1186.75" y="479.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::Future&lt;arrow::internal::Empty&gt;::DoMarkFinished(arrow::Result&lt;arrow::internal::Empty&gt;) (5 samples, 0.07%)</title><rect x="22.3" y="405" width="0.9" height="15.0" fill="rgb(246,192,45)" rx="2" ry="2" />
+<text  x="25.33" y="415.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::util::(anonymous.namespace)::AsyncTaskSchedulerImpl::OnTaskFinished(arrow::Status (2 samples, 0.03%)</title><rect x="22.5" y="357" width="0.3" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="25.50" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::util::tracing::Span::Span() (1 samples, 0.01%)</title><rect x="32.6" y="373" width="0.2" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="35.63" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="1180.5" y="357" width="0.2" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="1183.54" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`std::__function::__func&lt;arrow::acero::(anonymous.namespace)::DeclarationToRecordBatchGenerator(arrow::acero::Declaration, (5 samples, 0.07%)</title><rect x="1182.2" y="469" width="0.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1185.23" y="479.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memset (1 samples, 0.01%)</title><rect x="1178.3" y="341" width="0.2" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="1181.35" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::FnOnce&lt;void.(arrow::FutureImpl (13 samples, 0.19%)</title><rect x="19.1" y="421" width="2.2" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="22.12" y="431.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::util::Mutex::Lock() (1 samples, 0.01%)</title><rect x="14.7" y="501" width="0.2" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="17.73" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::SwissTable::init(long.long, (1 samples, 0.01%)</title><rect x="34.8" y="325" width="0.2" height="15.0" fill="rgb(231,123,29)" rx="2" ry="2" />
+<text  x="37.83" y="335.5" ></text>
+</g>
+<g >
+<title>bench_dbms`std::vector&lt;std::basic_string&lt;char&gt;&gt;::reserve(unsigned.long) (1 samples, 0.01%)</title><rect x="18.6" y="517" width="0.2" height="15.0" fill="rgb(238,154,37)" rx="2" ry="2" />
+<text  x="21.61" y="527.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (1 samples, 0.01%)</title><rect x="879.8" y="293" width="0.1" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="882.76" y="303.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::ExecPlan::AddNode(std::unique_ptr&lt;arrow::acero::ExecNode&gt;) (2 samples, 0.03%)</title><rect x="1184.4" y="357" width="0.4" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="1187.43" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`DYLD-STUB$$operator.delete(void*) (1 samples, 0.01%)</title><rect x="33.1" y="373" width="0.2" height="15.0" fill="rgb(212,33,8)" rx="2" ry="2" />
+<text  x="36.14" y="383.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`malloc_type_malloc (1 samples, 0.01%)</title><rect x="27.7" y="357" width="0.2" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="30.73" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::MapNode::InputFinished(arrow::acero::ExecNode*,.int) (20 samples, 0.29%)</title><rect x="23.2" y="421" width="3.4" height="15.0" fill="rgb(217,58,13)" rx="2" ry="2" />
+<text  x="26.17" y="431.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (2 samples, 0.03%)</title><rect x="36.5" y="341" width="0.4" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="39.51" y="351.5" ></text>
+</g>
+<g >
+<title>libsystem_c`clock_gettime_nsec_np (1 samples, 0.01%)</title><rect x="19.3" y="213" width="0.2" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="22.29" y="223.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::__pad_and_output[abi:ne190102]&lt;char&gt;(std::ostreambuf_iterator&lt;char&gt;,.char (1 samples, 0.01%)</title><rect x="10.0" y="581" width="0.2" height="15.0" fill="rgb(231,121,28)" rx="2" ry="2" />
+<text  x="13.00" y="591.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_free_no_lock (1 samples, 0.01%)</title><rect x="25.5" y="277" width="0.2" height="15.0" fill="rgb(230,117,27)" rx="2" ry="2" />
+<text  x="28.54" y="287.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::Resize(long.long, (2 samples, 0.03%)</title><rect x="26.0" y="277" width="0.4" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="29.04" y="287.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="32.3" y="341" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="35.29" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::acero::(anonymous.namespace)::ExecPlanImpl::ExecPlanImpl(arrow::acero::QueryOptions, (1 samples, 0.01%)</title><rect x="1187.6" y="437" width="0.2" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="1190.64" y="447.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::~PoolBuffer() (1 samples, 0.01%)</title><rect x="17.1" y="389" width="0.2" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="20.09" y="399.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memset (1 samples, 0.01%)</title><rect x="18.3" y="485" width="0.1" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="21.28" y="495.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel`mach_continuous_time (1 samples, 0.01%)</title><rect x="19.3" y="197" width="0.2" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="22.29" y="207.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::__shared_ptr_emplace&lt;std::variant&lt;arrow::Datum,.arrow::compute::Expression::Parameter, (1 samples, 0.01%)</title><rect x="24.5" y="357" width="0.2" height="15.0" fill="rgb(217,58,13)" rx="2" ry="2" />
+<text  x="27.52" y="367.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`arrow::internal::IterateSynchronously&lt;std::shared_ptr&lt;arrow::RecordBatch&gt;&gt;(arrow::internal::FnOnce&lt;arrow::Result&lt;std::function&lt;arrow::Future&lt;std::shared_ptr&lt;arrow::RecordBatch&gt;&gt;.()&gt;&gt; (30 samples, 0.43%)</title><rect x="1184.3" y="501" width="5.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1187.26" y="511.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::(anonymous.namespace)::GrouperFastImpl::ConsumeImpl(arrow::compute::ExecSpan (2 samples, 0.03%)</title><rect x="40.9" y="341" width="0.3" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="43.91" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::internal::CountSetBits(unsigned.char (2 samples, 0.03%)</title><rect x="768.8" y="309" width="0.3" height="15.0" fill="rgb(233,129,30)" rx="2" ry="2" />
+<text  x="771.80" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`std::__hash_table&lt;std::__hash_value_type&lt;arrow::FieldRef,.arrow::Datum&gt;&gt;::find&lt;arrow::FieldRef&gt;(arrow::FieldRef (1 samples, 0.01%)</title><rect x="31.3" y="325" width="0.1" height="15.0" fill="rgb(249,205,49)" rx="2" ry="2" />
+<text  x="34.28" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_tiny_check_and_zero_inline_meta_from_freelist (1 samples, 0.01%)</title><rect x="36.0" y="277" width="0.2" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="39.01" y="287.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="1182.7" y="405" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="1185.74" y="415.5" ></text>
+</g>
+<g >
+<title>bench_dbms`tiforth::Pipeline::CreateTask().const (2 samples, 0.03%)</title><rect x="14.1" y="565" width="0.3" height="15.0" fill="rgb(243,174,41)" rx="2" ry="2" />
+<text  x="17.05" y="575.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`&lt;deduplicated_symbol&gt; (1 samples, 0.01%)</title><rect x="16.9" y="389" width="0.2" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="19.92" y="399.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel`mach_vm_map (1 samples, 0.01%)</title><rect x="39.7" y="181" width="0.2" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="42.72" y="191.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::AllocateResizableBuffer(long.long, (1 samples, 0.01%)</title><rect x="34.7" y="309" width="0.1" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="37.66" y="319.5" ></text>
+</g>
+<g >
+<title>libc++.1`std::basic_ostream&lt;char&gt;::operator&lt;&lt;(int) (1 samples, 0.01%)</title><rect x="10.0" y="613" width="0.2" height="15.0" fill="rgb(217,58,13)" rx="2" ry="2" />
+<text  x="13.00" y="623.5" ></text>
+</g>
+<g >
+<title>libsystem_c`__sfvwrite (1 samples, 0.01%)</title><rect x="10.0" y="549" width="0.2" height="15.0" fill="rgb(231,120,28)" rx="2" ry="2" />
+<text  x="13.00" y="559.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`small_free_list_add_ptr (1 samples, 0.01%)</title><rect x="1189.7" y="421" width="0.1" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="1192.66" y="431.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`_nanov2_free (1 samples, 0.01%)</title><rect x="1182.1" y="437" width="0.1" height="15.0" fill="rgb(236,147,35)" rx="2" ry="2" />
+<text  x="1185.06" y="447.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="27.7" y="373" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="30.73" y="383.5" ></text>
+</g>
+<g >
+<title>bench_dbms`DB::ColumnString::insert(DB::Field.const&amp;) (3 samples, 0.04%)</title><rect x="10.2" y="549" width="0.5" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="13.17" y="559.5" ></text>
+</g>
+<g >
+<title>libsystem_platform`_platform_memset (1 samples, 0.01%)</title><rect x="34.8" y="309" width="0.2" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="37.83" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`&lt;deduplicated_symbol&gt; (1 samples, 0.01%)</title><rect x="1184.8" y="389" width="0.1" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="1187.76" y="399.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::util::TempVectorStack::release(int,.unsigned (4 samples, 0.06%)</title><rect x="882.1" y="341" width="0.7" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="885.12" y="351.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::PoolBuffer::~PoolBuffer() (1 samples, 0.01%)</title><rect x="35.2" y="325" width="0.1" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="38.16" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow_acero.2200.0.0`decltype(auto).std::__variant_detail::__visitation::__base::__dispatcher&lt;2ul&gt;::__dispatch[abi:ne200100]&lt;std::__variant_detail::__dtor&lt;std::__variant_detail::__traits&lt;arrow::Datum::Empty, (2 samples, 0.03%)</title><rect x="1181.6" y="389" width="0.3" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="1184.56" y="399.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`nanov2_malloc_type (1 samples, 0.01%)</title><rect x="32.1" y="309" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="35.12" y="319.5" ></text>
+</g>
+<g >
+<title>libarrow_compute.2200.0.0`arrow::compute::internal::RegisterScalarTemporalUnary(arrow::compute::FunctionRegistry*) (1 samples, 0.01%)</title><rect x="13.9" y="469" width="0.2" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="16.88" y="479.5" ></text>
+</g>
+<g >
+<title>libc++abi`operator.new(unsigned (1 samples, 0.01%)</title><rect x="39.9" y="325" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="42.89" y="335.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc`tiny_free_list_add_ptr (1 samples, 0.01%)</title><rect x="1178.9" y="325" width="0.1" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="1181.85" y="335.5" ></text>
+</g>
+<g >
+<title>libarrow.2200.0.0`arrow::ConcreteFutureImpl::DoWait() (1 samples, 0.01%)</title><rect x="19.3" y="261" width="0.2" height="15.0" fill="rgb(252,216,51)" rx="2" ry="2" />
+<text  x="22.29" y="271.5" ></text>
+</g>
+</g>
+</svg>
