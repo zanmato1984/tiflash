@@ -2,14 +2,13 @@
 
 - Author(s): TBD
 - Last Updated: 2026-01-19
-- Status: In progress
+- Status: Implemented (baseline) + streaming update
 
 ## Summary
 
 Add a **TiForth pipeline operator** that performs **GROUP BY + aggregates** using **Apache Arrow compute primitives**, primarily:
 
-- `arrow::compute::Grouper` for group-id assignment and unique key materialization.
-- Arrow hash-aggregate kernels via `arrow::compute::CallFunction("hash_*", ...)` for grouped aggregates.
+- Arrow Acero execution plans (`source` + `aggregate`), because Arrow grouped hash-aggregate kernels are exposed through Acero plan nodes.
 
 Then add **Google Benchmark** coverage in TiFlash to compare:
 
@@ -24,8 +23,8 @@ This milestone is explicitly a **rapid validation / performance baseline** and t
 
 - Provide a TiForth transform operator that:
   - consumes input batches until EOS,
-  - computes grouped results using Arrow compute,
-  - emits a single output `arrow::RecordBatch` + EOS.
+  - computes grouped results using Arrow Acero,
+  - emits aggregated output batches + EOS.
 - Support a minimal aggregate set using Arrow public APIs:
   - `count_all`, `count`, `sum`, `mean`, `min`, `max`
   - multi-key group-by.
@@ -38,7 +37,8 @@ This milestone is explicitly a **rapid validation / performance baseline** and t
 
 - Parity with TiFlash aggregation semantics and all function coverage.
 - External / spilled aggregation.
-- Incremental / streaming aggregation (this operator may buffer all input).
+- Full expression support for group keys / aggregate args (follow-up To Do: add a pre-projection stage).
+- Host-managed executor integration for Acero (current implementation uses Arrow's CPU thread pool via `QueryOptions.use_threads=true` so the plan can run while the pipeline is feeding input).
 - Wiring this operator into TiFlash DAG→pipeline translation (benchmark uses manual pipeline construction).
 
 ## Design
@@ -47,28 +47,28 @@ This milestone is explicitly a **rapid validation / performance baseline** and t
 
 High-level behavior:
 
-1. On first input batch: validate schema, bind/compile key & arg expressions, create `arrow::compute::Grouper`.
+1. On first input batch:
+   - validate the input schema,
+   - bind key / aggregate argument `Expr` to Arrow `FieldRef` (currently only `FieldRef` supported),
+   - build an Acero plan:
+     - `source` node backed by an `AsyncGenerator<std::optional<arrow::compute::ExecBatch>>`,
+     - `aggregate` node using `arrow::acero::AggregateNodeOptions`.
+   - materialize a `arrow::RecordBatchReader` via `arrow::acero::DeclarationToReader`.
 2. For each input batch:
-   - evaluate key expressions into arrays,
-   - `grouper->Consume(keys)` to produce a `UInt32` group-id array,
-   - evaluate aggregate argument expressions (if any),
-   - buffer `{group_ids, agg_args}` by chunk.
+   - convert `arrow::RecordBatch` → `arrow::compute::ExecBatch`,
+   - push the batch into a `arrow::PushGenerator` feeding the Acero `source` node.
 3. On EOS:
-   - `grouper->GetUniques()` to obtain the grouped key columns,
-   - for each aggregate, call Arrow hash-aggregate function:
-     - `hash_count_all(group_ids)`
-     - `hash_count(values, group_ids)`
-     - `hash_sum(values, group_ids)`
-     - `hash_mean(values, group_ids)`
-     - `hash_min(values, group_ids)`
-     - `hash_max(values, group_ids)`
-   - build an output schema `{keys..., aggs...}` and emit one output batch.
+   - close the generator producer,
+   - drain `RecordBatchReader::ReadNext` and forward each aggregated batch downstream,
+   - forward EOS once the reader is exhausted.
 
 Notes:
 
 - All compute runs on the task’s `arrow::compute::ExecContext` backed by the engine’s `arrow::MemoryPool`.
 - Input schema must remain stable across batches; operator errors on mismatch.
-- No spill: all chunk state kept in-memory until EOS.
+- The operator does not materialize input into an `arrow::Table` (no full input buffering); any state is internal to Acero aggregation.
+- Output order is not stable; tests and benchmarks must not assume group ordering.
+- No spill: all aggregation state kept in-memory until EOS.
 
 ### TiFlash benchmark
 
@@ -96,10 +96,10 @@ Data generation is done once per benchmark instance (outside the timed loop). Sp
 TiForth:
 
 - Add `include/tiforth/operators/arrow_compute_agg.h` + `src/tiforth/operators/arrow_compute_agg.cc`.
-- Implement the operator using `arrow::compute::Grouper` + `CallFunction("hash_*")`.
+- Implement the operator using Arrow Acero (`source` + `aggregate`) and a `RecordBatchReader` result stream.
 - Add unit tests:
   - correctness on a few types (int keys + numeric values; include NULLs; multi-batch input)
-  - validate EOS behavior (single output batch + EOS).
+  - validate EOS behavior (output batches + EOS) without assuming output order.
 
 TiFlash:
 
@@ -109,11 +109,10 @@ TiFlash:
 
 ## Validation
 
-- TiForth: `cmake --build /Users/zanmato/dev/tiforth/build-debug && ctest --test-dir /Users/zanmato/dev/tiforth/build-debug`
+- TiForth: `cmake --preset debug && cmake --build --preset debug && ctest --preset debug`
 - TiFlash: `ninja -C cmake-build-debug gtests_dbms bench_dbms`
 - Benchmark: `cmake-build-debug/dbms/bench_dbms --benchmark_filter='.*ArrowComputeAgg.*' --benchmark_min_time=0.2`
 
 ## Status / Notes
 
 - Status will be updated with commit SHAs and benchmark summary once implementation lands.
-
