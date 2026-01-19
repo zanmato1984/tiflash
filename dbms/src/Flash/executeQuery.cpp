@@ -224,8 +224,16 @@ QueryExecutorPtr executeAsTiForth(Context & context, bool internal)
 
     FAIL_POINT_TRIGGER_EXCEPTION(FailPoints::random_interpreter_failpoint);
 
-    if (!isTiForthPassThroughDag(dag_context.dag_request))
-        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "TiForth executor supports only pass-through DAG requests for now");
+    // Today TiForthQueryExecutor is a pass-through wrapper around a native stream pipeline.
+    // Allow non-pass-through DAGs only when we intentionally opt in for TiForth-backed compute
+    // inside the native plan (e.g. ArrowComputeAgg integration).
+    const bool allow_non_passthrough = context.getSettingsRef().enable_tiforth_arrow_compute_agg;
+    if (!allow_non_passthrough && !isTiForthPassThroughDag(dag_context.dag_request))
+    {
+        throw Exception(
+            ErrorCodes::NOT_IMPLEMENTED,
+            "TiForth executor supports only pass-through DAG requests for now (enable `enable_tiforth_arrow_compute_agg` to opt in)");
+    }
 
     Planner planner{context};
     auto stream = planner.execute();

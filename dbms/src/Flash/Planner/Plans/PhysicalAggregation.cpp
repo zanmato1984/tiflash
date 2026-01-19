@@ -33,8 +33,184 @@
 #include <Operators/AutoPassThroughAggregateTransform.h>
 #include <Operators/LocalAggregateTransform.h>
 
+#if defined(TIFLASH_ENABLE_TIFORTH)
+#include <DataStreams/UnionBlockInputStream.h>
+#include <DataTypes/DataTypeNullable.h>
+#include <Flash/TiForth/TiForthAggBlockInputStream.h>
+
+#include <arrow/memory_pool.h>
+
+#include <algorithm>
+#include <optional>
+#include <unordered_set>
+
+#include "tiforth/engine.h"
+#include "tiforth/expr.h"
+#include "tiforth/operators/arrow_compute_agg.h"
+#include "tiforth/operators/hash_agg.h"
+#include "tiforth/pipeline.h"
+#endif // defined(TIFLASH_ENABLE_TIFORTH)
+
 namespace DB
 {
+
+#if defined(TIFLASH_ENABLE_TIFORTH)
+namespace
+{
+
+bool containsStringGroupKeys(const Block & header, const Names & keys)
+{
+    for (const auto & key : keys)
+    {
+        const auto & type = header.getByName(key).type;
+        if (removeNullable(type)->isStringOrFixedString())
+            return true;
+    }
+    return false;
+}
+
+std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
+    const Context & context,
+    const LoggerPtr & log,
+    const DAGPipeline & pipeline,
+    const Block & before_agg_header,
+    const Names & aggregation_keys,
+    const KeyRefAggFuncMap & key_ref_agg_func,
+    const AggregateDescriptions & aggregate_descriptions,
+    const ExpressionActionsPtr & expr_after_agg)
+{
+    if (!context.getSettingsRef().enable_tiforth_executor)
+        return std::nullopt;
+    if (!context.getSettingsRef().enable_tiforth_arrow_compute_agg)
+        return std::nullopt;
+    if (expr_after_agg == nullptr)
+        return std::nullopt;
+    if (!key_ref_agg_func.empty())
+        return std::nullopt;
+
+    const auto output_cols = expr_after_agg->getRequiredColumnsWithTypes();
+    if (output_cols.empty())
+        return std::nullopt;
+
+    tiforth::EngineOptions engine_options;
+    engine_options.memory_pool = arrow::default_memory_pool();
+    auto engine_res = tiforth::Engine::Create(engine_options);
+    if (!engine_res.ok())
+    {
+        LOG_WARNING(log, "TiForthAgg: failed to create engine, fallback to native agg: {}", engine_res.status().ToString());
+        return std::nullopt;
+    }
+    auto engine = std::move(engine_res).ValueOrDie();
+
+    auto builder_res = tiforth::PipelineBuilder::Create(engine.get());
+    if (!builder_res.ok())
+    {
+        LOG_WARNING(
+            log,
+            "TiForthAgg: failed to create pipeline builder, fallback to native agg: {}",
+            builder_res.status().ToString());
+        return std::nullopt;
+    }
+    auto builder = std::move(builder_res).ValueOrDie();
+
+    std::vector<tiforth::AggKey> keys;
+    keys.reserve(aggregation_keys.size());
+    for (const auto & key : aggregation_keys)
+    {
+        if (!before_agg_header.has(key))
+            return std::nullopt;
+        const auto & type = before_agg_header.getByName(key).type;
+        if (type == nullptr)
+            return std::nullopt;
+        keys.push_back({key, tiforth::MakeFieldRef(key)});
+    }
+
+    std::vector<tiforth::AggFunc> aggs;
+    aggs.reserve(aggregate_descriptions.size());
+    for (const auto & desc : aggregate_descriptions)
+    {
+        if (desc.function == nullptr)
+            return std::nullopt;
+        const auto func = desc.function->getName();
+        if (func == "count" && desc.argument_names.empty())
+        {
+            aggs.push_back({desc.column_name, "count_all", nullptr});
+            continue;
+        }
+        if (func != "count" && func != "sum" && func != "avg" && func != "min" && func != "max")
+            return std::nullopt;
+        if (desc.argument_names.size() != 1)
+            return std::nullopt;
+        if (!before_agg_header.has(desc.argument_names[0]))
+            return std::nullopt;
+        const auto & type = before_agg_header.getByName(desc.argument_names[0]).type;
+        if (type == nullptr)
+            return std::nullopt;
+        aggs.push_back({desc.column_name, func, tiforth::MakeFieldRef(desc.argument_names[0])});
+    }
+
+    std::unordered_set<String> produced_names;
+    produced_names.reserve(keys.size() + aggs.size());
+    for (const auto & key : keys)
+        produced_names.insert(key.name);
+    for (const auto & agg : aggs)
+        produced_names.insert(agg.name);
+    if (produced_names.size() != output_cols.size())
+        return std::nullopt;
+    for (const auto & out : output_cols)
+    {
+        if (produced_names.find(out.name) == produced_names.end())
+            return std::nullopt;
+    }
+
+    const bool has_string_key = containsStringGroupKeys(before_agg_header, aggregation_keys);
+    const bool use_arrow_compute = !aggregation_keys.empty() && !has_string_key;
+
+    size_t max_threads = static_cast<size_t>(context.getSettingsRef().max_threads);
+    if (max_threads == 0)
+        max_threads = pipeline.streams.size();
+    max_threads = std::min(max_threads, pipeline.streams.size());
+    max_threads = std::max<size_t>(1, max_threads);
+
+    const BlockInputStreamPtr input_stream
+        = pipeline.streams.size() == 1
+        ? pipeline.streams.front()
+        : std::make_shared<UnionBlockInputStream<>>(
+            pipeline.streams,
+            BlockInputStreams{},
+            max_threads,
+            context.getSettingsRef().max_buffered_bytes_in_executor,
+            log->identifier());
+
+    auto append_status = builder->AppendTransform(
+        [engine = engine.get(), keys, aggs, use_arrow_compute]() -> arrow::Result<tiforth::TransformOpPtr> {
+            if (use_arrow_compute)
+                return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs);
+            return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+        });
+    if (!append_status.ok())
+        return std::nullopt;
+
+    auto pipeline_res = builder->Finalize();
+    if (!pipeline_res.ok())
+        return std::nullopt;
+
+    if (has_string_key)
+        LOG_DEBUG(log, "TiForthAgg: string group keys detected, fallback to TiForth HashAgg");
+
+    return std::make_shared<DB::TiForth::TiForthAggBlockInputStream>(
+        input_stream,
+        std::move(engine),
+        std::move(pipeline_res).ValueOrDie(),
+        output_cols,
+        /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
+        arrow::default_memory_pool(),
+        before_agg_header);
+}
+
+} // namespace
+#endif // defined(TIFLASH_ENABLE_TIFORTH)
+
 PhysicalPlanNodePtr PhysicalAggregation::build(
     const Context & context,
     const String & executor_id,
@@ -124,6 +300,29 @@ void PhysicalAggregation::buildBlockInputStreamImpl(DAGPipeline & pipeline, Cont
     child->buildBlockInputStream(pipeline, context, max_streams);
 
     executeExpression(pipeline, before_agg_actions, log, "before aggregation");
+
+#if defined(TIFLASH_ENABLE_TIFORTH)
+    if (is_final_agg && !fine_grained_shuffle.enabled() && !auto_pass_through_switcher.enabled())
+    {
+        const auto before_agg_header = pipeline.firstStream()->getHeader();
+        if (auto tiforth_stream = tryBuildTiForthAggStream(
+                context,
+                log,
+                pipeline,
+                before_agg_header,
+                aggregation_keys,
+                key_ref_agg_func,
+                aggregate_descriptions,
+                expr_after_agg))
+        {
+            pipeline.streams.resize(1);
+            pipeline.firstStream() = std::move(*tiforth_stream);
+            RUNTIME_CHECK(expr_after_agg && !expr_after_agg->getActions().empty());
+            executeExpression(pipeline, expr_after_agg, log, "expr after aggregation");
+            return;
+        }
+    }
+#endif // defined(TIFLASH_ENABLE_TIFORTH)
 
     Block before_agg_header = pipeline.firstStream()->getHeader();
     AggregationInterpreterHelper::fillArgColumnNumbers(aggregate_descriptions, before_agg_header);
