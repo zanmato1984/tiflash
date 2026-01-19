@@ -44,7 +44,7 @@ public:
         std::unique_ptr<tiforth::Pipeline> pipeline_,
         const NamesAndTypesList & output_columns_,
         const std::unordered_map<String, ColumnOptions> & input_options_by_name_,
-        arrow::MemoryPool * pool_,
+        std::shared_ptr<arrow::MemoryPool> pool_holder_,
         const Block & sample_input_block_);
 
     String getName() const override { return "TiForthAgg"; }
@@ -66,7 +66,7 @@ private:
     std::unique_ptr<tiforth::Pipeline> pipeline;
     NamesAndTypesList output_columns;
     std::unordered_map<String, ColumnOptions> input_options_by_name;
-    arrow::MemoryPool * pool = nullptr;
+    std::shared_ptr<arrow::MemoryPool> pool_holder;
     Block sample_input_block;
 
     BlocksList output_blocks;
@@ -79,4 +79,3 @@ private:
 } // namespace DB::TiForth
 
 #endif // defined(TIFLASH_ENABLE_TIFORTH)
-

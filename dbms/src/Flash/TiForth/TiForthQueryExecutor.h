@@ -21,6 +21,8 @@
 
 #include <arrow/memory_pool.h>
 
+#include <memory>
+
 namespace tiforth
 {
 class Engine;
@@ -47,7 +49,8 @@ public:
         const BlockInputStreamPtr & input_stream_,
         std::unique_ptr<tiforth::Engine> engine_,
         std::unique_ptr<tiforth::Pipeline> pipeline_,
-        std::unordered_map<String, ColumnOptions> input_options_by_name_);
+        std::unordered_map<String, ColumnOptions> input_options_by_name_,
+        std::shared_ptr<arrow::MemoryPool> pool_holder_);
 
     ~TiForthQueryExecutor() override;
 
@@ -57,7 +60,7 @@ public:
         const String & req_id,
         const BlockInputStreamPtr & input_stream,
         const std::unordered_map<String, ColumnOptions> & input_options_by_name,
-        arrow::MemoryPool * pool);
+        std::shared_ptr<arrow::MemoryPool> pool);
 
     String toString() const override;
 
@@ -79,6 +82,7 @@ private:
     std::unique_ptr<tiforth::Engine> engine;
     std::unique_ptr<tiforth::Pipeline> pipeline;
     std::unordered_map<String, ColumnOptions> input_options_by_name;
+    std::shared_ptr<arrow::MemoryPool> pool_holder;
     Block sample_block;
 };
 

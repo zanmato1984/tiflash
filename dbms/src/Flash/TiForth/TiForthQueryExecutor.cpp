@@ -49,16 +49,19 @@ TiForthQueryExecutor::TiForthQueryExecutor(
     const BlockInputStreamPtr & input_stream_,
     std::unique_ptr<tiforth::Engine> engine_,
     std::unique_ptr<tiforth::Pipeline> pipeline_,
-    std::unordered_map<String, ColumnOptions> input_options_by_name_)
+    std::unordered_map<String, ColumnOptions> input_options_by_name_,
+    std::shared_ptr<arrow::MemoryPool> pool_holder_)
     : DB::QueryExecutor(memory_tracker_, context_, req_id)
     , input_stream(input_stream_)
     , engine(std::move(engine_))
     , pipeline(std::move(pipeline_))
     , input_options_by_name(std::move(input_options_by_name_))
+    , pool_holder(std::move(pool_holder_))
 {
     RUNTIME_CHECK_MSG(input_stream != nullptr, "input stream must not be null");
     RUNTIME_CHECK_MSG(engine != nullptr, "tiforth engine must not be null");
     RUNTIME_CHECK_MSG(pipeline != nullptr, "tiforth pipeline must not be null");
+    RUNTIME_CHECK_MSG(pool_holder != nullptr, "arrow memory pool must not be null");
     sample_block = input_stream->getHeader();
 }
 
@@ -70,14 +73,16 @@ arrow::Result<std::unique_ptr<TiForthQueryExecutor>> TiForthQueryExecutor::Creat
     const String & req_id,
     const BlockInputStreamPtr & input_stream,
     const std::unordered_map<String, ColumnOptions> & input_options_by_name,
-    arrow::MemoryPool * pool)
+    std::shared_ptr<arrow::MemoryPool> pool)
 {
-    ARROW_RETURN_NOT_OK(ensurePool(pool));
+    if (pool == nullptr)
+        return arrow::Status::Invalid("memory pool must not be null");
+    ARROW_RETURN_NOT_OK(ensurePool(pool.get()));
     if (input_stream == nullptr)
         return arrow::Status::Invalid("input stream must not be null");
 
     tiforth::EngineOptions engine_options;
-    engine_options.memory_pool = pool;
+    engine_options.memory_pool = pool.get();
     ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(engine_options));
     if (engine == nullptr)
         return arrow::Status::Invalid("tiforth engine must not be null");
@@ -102,7 +107,8 @@ arrow::Result<std::unique_ptr<TiForthQueryExecutor>> TiForthQueryExecutor::Creat
         input_stream,
         std::move(engine),
         std::move(pipeline),
-        input_options_by_name);
+        input_options_by_name,
+        std::move(pool));
 }
 
 ExecutionResult TiForthQueryExecutor::execute(ResultHandler && result_handler)

@@ -50,20 +50,20 @@ TiForthAggBlockInputStream::TiForthAggBlockInputStream(
     std::unique_ptr<tiforth::Pipeline> pipeline_,
     const NamesAndTypesList & output_columns_,
     const std::unordered_map<String, ColumnOptions> & input_options_by_name_,
-    arrow::MemoryPool * pool_,
+    std::shared_ptr<arrow::MemoryPool> pool_holder_,
     const Block & sample_input_block_)
     : input_stream(input_stream_)
     , engine(std::move(engine_))
     , pipeline(std::move(pipeline_))
     , output_columns(output_columns_)
     , input_options_by_name(input_options_by_name_)
-    , pool(pool_)
+    , pool_holder(std::move(pool_holder_))
     , sample_input_block(sample_input_block_)
 {
     RUNTIME_CHECK_MSG(input_stream != nullptr, "input stream must not be null");
     RUNTIME_CHECK_MSG(engine != nullptr, "tiforth engine must not be null");
     RUNTIME_CHECK_MSG(pipeline != nullptr, "tiforth pipeline must not be null");
-    RUNTIME_CHECK_MSG(pool != nullptr, "arrow memory pool must not be null");
+    RUNTIME_CHECK_MSG(pool_holder != nullptr, "arrow memory pool must not be null");
     children.push_back(input_stream);
     output_it = output_blocks.begin();
 }
@@ -107,7 +107,7 @@ void TiForthAggBlockInputStream::initOnce()
         *pipeline,
         input_blocks,
         input_options_by_name,
-        pool,
+        pool_holder.get(),
         /*sample_block=*/&sample_input_block);
     if (!outputs_res.ok())
         throw Exception(outputs_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);

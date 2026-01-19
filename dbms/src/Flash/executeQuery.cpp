@@ -26,6 +26,7 @@
 #include <Flash/Planner/Planner.h>
 #if defined(TIFLASH_ENABLE_TIFORTH)
 #include <Flash/TiForth/TiForthQueryExecutor.h>
+#include <Flash/TiForth/TiFlashMemoryPool.h>
 #endif
 #include <Flash/executeQuery.h>
 #include <Interpreters/Context.h>
@@ -238,13 +239,14 @@ QueryExecutorPtr executeAsTiForth(Context & context, bool internal)
     Planner planner{context};
     auto stream = planner.execute();
 
+    auto arrow_pool = DB::TiForth::MakeTiFlashMemoryPool(memory_tracker, arrow::default_memory_pool());
     auto tiforth_executor = DB::TiForth::TiForthQueryExecutor::CreatePassThrough(
         memory_tracker,
         context,
         logger->identifier(),
         stream,
         /*input_options_by_name=*/{},
-        arrow::default_memory_pool());
+        std::move(arrow_pool));
     if (!tiforth_executor.ok())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Failed to create TiForth query executor: {}", tiforth_executor.status().ToString());
     return std::move(tiforth_executor).ValueOrDie();

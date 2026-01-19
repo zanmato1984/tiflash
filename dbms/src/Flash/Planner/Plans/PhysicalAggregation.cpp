@@ -37,6 +37,7 @@
 #include <DataStreams/UnionBlockInputStream.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <Flash/TiForth/TiForthAggBlockInputStream.h>
+#include <Flash/TiForth/TiFlashMemoryPool.h>
 
 #include <arrow/memory_pool.h>
 
@@ -92,8 +93,10 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
     if (output_cols.empty())
         return std::nullopt;
 
+    auto pool_holder = DB::TiForth::MakeCurrentMemoryTrackerPoolOrDefault(arrow::default_memory_pool());
+
     tiforth::EngineOptions engine_options;
-    engine_options.memory_pool = arrow::default_memory_pool();
+    engine_options.memory_pool = pool_holder.get();
     auto engine_res = tiforth::Engine::Create(engine_options);
     if (!engine_res.ok())
     {
@@ -204,7 +207,7 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
         std::move(pipeline_res).ValueOrDie(),
         output_cols,
         /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
-        arrow::default_memory_pool(),
+        std::move(pool_holder),
         before_agg_header);
 }
 
