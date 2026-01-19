@@ -1,0 +1,114 @@
+# TiForth MS16: Arrow HashAgg Parity GTests (vs TiFlash Aggregator, No Collation)
+
+- Author(s): TBD
+- Last Updated: 2026-01-19
+- Status: Planned
+- Related design: `docs/design/2026-01-14-tiforth.md`
+- Related milestone: `docs/design/2026-01-14-tiforth-milestone-15-arrow-hash-agg-operator.md`
+- Discussion PR: TBD
+- Tracking Issue: TBD
+
+## Summary
+
+Add **extensive parity gtests in TiFlash** to validate that Arrow-compute native grouped **`hash_*`** aggregation kernels
+(as used by TiForth’s `ArrowHashAggTransformOp`) are **semantically compatible** with TiFlash native aggregation for the
+supported subset.
+
+Scope explicitly **ignores collation** for now (treat string keys as binary or exclude them).
+
+## Motivation / Problem
+
+TiForth’s long-term direction is to use Arrow-style abstractions (notably `arrow::compute::Grouper`) while remaining
+compatible with TiFlash/TiDB semantics.
+
+Even if the grouping infrastructure is sound, the aggregate function semantics must match TiFlash for correctness.
+Arrow grouped kernels can differ subtly in:
+
+- NULL handling (`skip_nulls`, `min_count`, empty groups)
+- integer overflow / type promotion rules
+- floating NaN/Inf handling
+- output type selection (e.g. sum type widening)
+
+MS16 creates a test suite that makes these differences explicit and prevents accidental drift as TiForth evolves.
+
+## Goals
+
+- Add a parity test suite that compares results between:
+  - **TiFlash native**: `DB::Aggregator` (no spill), and
+  - **Arrow grouped kernels**: via TiForth `ArrowHashAggTransformOp` (or direct kernel driving) using the same input.
+- Cover the aggregate set intended to be supported by `ArrowHashAggTransformOp`:
+  - `count_all`, `count`, `sum`, `min`, `max` (and `mean`/`avg` if enabled).
+- Cover representative key/value types and common distributions, across multiple batches.
+- Compare results without relying on group output ordering (treat results as sets keyed by group-by columns).
+
+## Non-goals
+
+- Collation-sensitive group-by semantics (handled by a future custom grouper / sort-key pipeline).
+- Spill/external aggregation.
+- Full coverage of every TiFlash aggregate function; focus on the subset implemented by the Arrow-kernel-backed path.
+
+## Design
+
+### Test harness shape
+
+For each test case:
+
+1. Generate a deterministic dataset (in-memory) that can be fed both to:
+   - TiFlash native aggregation (as `DB::Block` input), and
+   - TiForth/Arrow aggregation (as `arrow::RecordBatch` input).
+2. Run aggregation with the same logical query shape:
+   - `GROUP BY keys` + a fixed aggregate list.
+3. Normalize outputs:
+   - Convert both results into a canonical map keyed by serialized group key values (binary compare only).
+   - Compare aggregate columns for equality under the chosen semantics (exact for integers; well-defined for floats).
+
+### Suggested coverage matrix
+
+- **Key types**:
+  - `Int32`, `Int64`
+  - optional: binary string keys (`String`) with binary collation only
+  - multi-key combos (e.g. `Int32 + Int64`)
+- **Value types**:
+  - `Int64`, `Float64`
+- **Distributions** (reuse `bench_dbms` shapes where possible):
+  - single group
+  - uniform low cardinality (e.g. 16 groups)
+  - uniform high cardinality (unique keys)
+  - skewed (Zipf-like hot keys)
+- **NULL patterns**:
+  - no NULLs
+  - NULLs in value columns
+  - NULLs in key columns (ensure NULLs group together)
+- **Batching**:
+  - single batch
+  - multiple batches (schema stable across batches)
+
+### Compatibility rules (initial)
+
+To avoid ambiguous comparisons, MS16 should start with constraints that are known to be comparable:
+
+- Use integer ranges that do not overflow the target sum type (unless overflow behavior is being tested explicitly).
+- Avoid NaN-heavy inputs unless NaN semantics are being tested explicitly and clearly defined.
+
+As divergences are found, either:
+
+- adjust TiForth operator options to match TiFlash (e.g. `skip_nulls`), or
+- document and gate the Arrow-kernel-backed path as “not supported” for that semantic corner.
+
+## Implementation Plan (Checklist)
+
+- Add a new TiFlash gtest file under `dbms/src/Flash/tests/` (name TBD) implementing the parity matrix above.
+- Reuse/centralize data generation so benchmarks and tests share the same shapes (preferred).
+- Add helpers to:
+  - run TiFlash native aggregation with a fixed plan fragment,
+  - run TiForth Arrow-hash-agg (MS15) on the equivalent Arrow input,
+  - normalize output into comparable canonical form (unordered map keyed by group key bytes).
+- Integrate into CI `gtests_dbms` target.
+
+## Validation
+
+- `ninja -C cmake-build-debug gtests_dbms`
+
+## Status / Notes
+
+- MS16 is the correctness gate for enabling `ArrowHashAggTransformOp` in more TiFlash integration paths.
