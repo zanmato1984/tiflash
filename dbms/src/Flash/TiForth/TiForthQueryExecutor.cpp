@@ -19,13 +19,17 @@
 #include <Common/Exception.h>
 #include <Common/FmtUtils.h>
 #include <DataStreams/IProfilingBlockInputStream.h>
+#include <Flash/TiForth/ArrowTypeMapping.h>
 
 #include <arrow/result.h>
 #include <arrow/status.h>
 
+#include <ext/scope_guard.h>
+
 #include "tiforth/engine.h"
 #include "tiforth/operators/pass_through.h"
 #include "tiforth/pipeline.h"
+#include "tiforth/task.h"
 
 namespace DB::TiForth
 {
@@ -119,25 +123,95 @@ ExecutionResult TiForthQueryExecutor::execute(ResultHandler && result_handler)
         RUNTIME_CHECK_MSG(pipeline != nullptr, "tiforth pipeline must not be null");
         RUNTIME_CHECK_MSG(engine != nullptr, "tiforth engine must not be null");
 
-        std::vector<Block> input_blocks;
         input_stream->readPrefix();
-        while (Block block = input_stream->read())
-            input_blocks.push_back(std::move(block));
-        input_stream->readSuffix();
+        SCOPE_EXIT({ input_stream->readSuffix(); });
 
-        auto outputs_res
-            = RunTiForthPipelineOnBlocks(*pipeline, input_blocks, input_options_by_name, engine->memory_pool(), &sample_block);
-        if (!outputs_res.ok())
-            throw Exception(outputs_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-        auto outputs = std::move(outputs_res).ValueOrDie();
+        auto task_res = pipeline->CreateTask();
+        if (!task_res.ok())
+            throw Exception(task_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+        auto task = std::move(task_res).ValueOrDie();
+        if (task == nullptr)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "tiforth task must not be null");
 
-        if (result_handler)
+        bool input_closed = false;
+        bool pushed_any_input = false;
+
+        while (true)
         {
-            for (auto & out : outputs)
-                result_handler(out.block);
-        }
+            auto state_res = task->Step();
+            if (!state_res.ok())
+                throw Exception(state_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
 
-        return ExecutionResult::success();
+            const auto state = state_res.ValueOrDie();
+            switch (state)
+            {
+            case tiforth::TaskState::kNeedInput:
+            {
+                if (input_closed)
+                    throw Exception(ErrorCodes::LOGICAL_ERROR, "tiforth task asked for input after CloseInput()");
+
+                if (Block block = input_stream->read())
+                {
+                    auto batch_res = toArrowRecordBatch(block, input_options_by_name, pool_holder.get());
+                    if (!batch_res.ok())
+                        throw Exception(batch_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+                    pushed_any_input = true;
+
+                    auto st = task->PushInput(batch_res.ValueOrDie());
+                    if (!st.ok())
+                        throw Exception(st.ToString(), ErrorCodes::LOGICAL_ERROR);
+                }
+                else
+                {
+                    if (!pushed_any_input)
+                    {
+                        auto batch_res = toArrowRecordBatch(sample_block, input_options_by_name, pool_holder.get());
+                        if (!batch_res.ok())
+                            throw Exception(batch_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+                        pushed_any_input = true;
+
+                        auto st = task->PushInput(batch_res.ValueOrDie());
+                        if (!st.ok())
+                            throw Exception(st.ToString(), ErrorCodes::LOGICAL_ERROR);
+                    }
+
+                    auto st = task->CloseInput();
+                    if (!st.ok())
+                        throw Exception(st.ToString(), ErrorCodes::LOGICAL_ERROR);
+                    input_closed = true;
+                }
+                break;
+            }
+            case tiforth::TaskState::kHasOutput:
+            {
+                auto batch_res = task->PullOutput();
+                if (!batch_res.ok())
+                    throw Exception(batch_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+                const auto out_batch = std::move(batch_res).ValueOrDie();
+                if (out_batch == nullptr)
+                    throw Exception(ErrorCodes::LOGICAL_ERROR, "expected non-null output batch");
+
+                auto out_res = fromArrowRecordBatch(out_batch);
+                if (!out_res.ok())
+                    throw Exception(out_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+                const auto out = std::move(out_res).ValueOrDie();
+                if (result_handler)
+                    result_handler(out.block);
+                break;
+            }
+            case tiforth::TaskState::kFinished:
+                return ExecutionResult::success();
+            case tiforth::TaskState::kCancelled:
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "tiforth task is cancelled");
+            case tiforth::TaskState::kWaiting:
+            case tiforth::TaskState::kWaitForNotify:
+            case tiforth::TaskState::kIOIn:
+            case tiforth::TaskState::kIOOut:
+                throw Exception(
+                    ErrorCodes::NOT_IMPLEMENTED,
+                    "tiforth task is blocked (IO/await/notify not wired into TiFlash scheduling)");
+            }
+        }
     }
     catch (...)
     {
