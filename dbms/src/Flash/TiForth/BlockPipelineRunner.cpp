@@ -38,6 +38,35 @@ arrow::Status ensurePool(arrow::MemoryPool * pool)
     return arrow::Status::OK();
 }
 
+arrow::Result<tiforth::TaskState> driveBlockedTask(tiforth::Task & task, tiforth::TaskState state)
+{
+    while (true)
+    {
+        switch (state)
+        {
+        case tiforth::TaskState::kIOIn:
+        case tiforth::TaskState::kIOOut:
+        {
+            ARROW_ASSIGN_OR_RAISE(state, task.ExecuteIO());
+            break;
+        }
+        case tiforth::TaskState::kWaiting:
+        {
+            ARROW_ASSIGN_OR_RAISE(state, task.Await());
+            break;
+        }
+        case tiforth::TaskState::kWaitForNotify:
+        {
+            ARROW_RETURN_NOT_OK(task.Notify());
+            ARROW_ASSIGN_OR_RAISE(state, task.Step());
+            break;
+        }
+        default:
+            return state;
+        }
+    }
+}
+
 template <typename CreateTaskFn>
 arrow::Result<std::vector<BlockConversionResult>> RunTiForthOnBlocksImpl(
     CreateTaskFn && create_task,
@@ -89,7 +118,8 @@ arrow::Result<std::vector<BlockConversionResult>> RunTiForthOnBlocksImpl(
 
     while (true)
     {
-        ARROW_ASSIGN_OR_RAISE(const auto state, task->Step());
+        ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
+        ARROW_ASSIGN_OR_RAISE(state, driveBlockedTask(*task, state));
         switch (state)
         {
         case tiforth::TaskState::kNeedInput:
@@ -123,7 +153,7 @@ arrow::Result<std::vector<BlockConversionResult>> RunTiForthOnBlocksImpl(
         case tiforth::TaskState::kWaitForNotify:
         case tiforth::TaskState::kIOIn:
         case tiforth::TaskState::kIOOut:
-            return arrow::Status::NotImplemented("task is blocked (IO/await/notify not wired)");
+            return arrow::Status::Invalid("unexpected blocked task state after driveBlockedTask");
         }
     }
 }

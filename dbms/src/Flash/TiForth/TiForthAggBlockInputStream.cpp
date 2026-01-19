@@ -67,6 +67,47 @@ const char * taskStateName(const tiforth::TaskState state)
     return "Unknown";
 }
 
+tiforth::TaskState driveBlockedTaskOrThrow(tiforth::Task & task, tiforth::TaskState state)
+{
+    while (true)
+    {
+        switch (state)
+        {
+        case tiforth::TaskState::kIOIn:
+        case tiforth::TaskState::kIOOut:
+        {
+            auto st = task.ExecuteIO();
+            if (!st.ok())
+                throw Exception(st.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+            state = st.ValueOrDie();
+            break;
+        }
+        case tiforth::TaskState::kWaiting:
+        {
+            auto st = task.Await();
+            if (!st.ok())
+                throw Exception(st.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+            state = st.ValueOrDie();
+            break;
+        }
+        case tiforth::TaskState::kWaitForNotify:
+        {
+            auto st = task.Notify();
+            if (!st.ok())
+                throw Exception(st.ToString(), ErrorCodes::LOGICAL_ERROR);
+
+            auto step = task.Step();
+            if (!step.ok())
+                throw Exception(step.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+            state = step.ValueOrDie();
+            break;
+        }
+        default:
+            return state;
+        }
+    }
+}
+
 } // namespace
 
 TiForthAggBlockInputStream::TiForthAggBlockInputStream(
@@ -138,7 +179,8 @@ Block TiForthAggBlockInputStream::readImpl()
         if (!state_res.ok())
             throw Exception(state_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
 
-        const auto state = state_res.ValueOrDie();
+        auto state = state_res.ValueOrDie();
+        state = driveBlockedTaskOrThrow(*task, state);
         switch (state)
         {
         case tiforth::TaskState::kNeedInput:
@@ -218,8 +260,8 @@ Block TiForthAggBlockInputStream::readImpl()
         case tiforth::TaskState::kIOIn:
         case tiforth::TaskState::kIOOut:
             throw Exception(
-                ErrorCodes::NOT_IMPLEMENTED,
-                "TiForthAggBlockInputStream task is blocked (state={}): TiFlash scheduling integration not wired",
+                ErrorCodes::LOGICAL_ERROR,
+                "Unexpected blocked task state after driveBlockedTaskOrThrow (state={})",
                 taskStateName(state));
         }
     }
