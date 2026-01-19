@@ -614,9 +614,12 @@ TiDB::ColumnInfos mockColumnInfosToTiDBColumnInfos(const MockColumnInfoVec & moc
         column_info.tp = mock_column_info.type;
         column_info.collate = mock_column_info.collate;
         column_info.id = col_id++;
-        // TODO: find a way to assign decimal field's flen.
         if (column_info.tp == TiDB::TP::TypeNewDecimal)
-            column_info.flen = 65;
+        {
+            // Preserve legacy defaults when the test doesn't specify a precision/scale.
+            column_info.flen = mock_column_info.decimal_precision > 0 ? mock_column_info.decimal_precision : 65;
+            column_info.decimal = mock_column_info.decimal_scale >= 0 ? mock_column_info.decimal_scale : 0;
+        }
         if (!mock_column_info.nullable)
             column_info.setNotNullFlag();
         ret.push_back(std::move(column_info));

@@ -14,11 +14,13 @@
 
 #include <AggregateFunctions/AggregateFunctionFactory.h>
 #include <AggregateFunctions/AggregateFunctionUniq.h>
+#include <Common/Decimal.h>
 #include <Debug/MockExecutor/AggregationBinder.h>
 #include <Debug/MockExecutor/AstToPB.h>
 #include <Debug/MockExecutor/ExchangeReceiverBinder.h>
 #include <Debug/MockExecutor/ExchangeSenderBinder.h>
 #include <Debug/MockExecutor/FuncSigMap.h>
+#include <Flash/Coprocessor/DAGContext.h>
 #include <Parsers/ASTIdentifier.h>
 #include <fmt/core.h>
 
@@ -215,9 +217,45 @@ void AggregationBinder::buildAggFunc(tipb::Expr * agg_func, const ASTFunction * 
 
         const auto & child_ft = agg_func->children(0).field_type();
         auto * ft = agg_func->mutable_field_type();
-        ft->set_tp(TiDB::TypeLongLong);
-        // Preserve unsigned; always clear not-null for SUM.
+        if (child_ft.tp() == TiDB::TypeNewDecimal)
+        {
+            auto [result_prec, result_scale] = SumDecimalInferer::infer(child_ft.flen(), child_ft.decimal());
+            ft->set_tp(TiDB::TypeNewDecimal);
+            ft->set_flen(static_cast<Int32>(result_prec));
+            ft->set_decimal(static_cast<Int32>(result_scale));
+        }
+        else if (child_ft.tp() == TiDB::TypeFloat || child_ft.tp() == TiDB::TypeDouble)
+        {
+            ft->set_tp(TiDB::TypeDouble);
+        }
+        else
+        {
+            ft->set_tp(TiDB::TypeLongLong);
+        }
+        // Preserve unsigned (when meaningful); always clear not-null for SUM.
         ft->set_flag((child_ft.flag() & TiDB::ColumnFlagUnsigned) & (~TiDB::ColumnFlagNotNull));
+    }
+    else if (agg_sig == tipb::ExprType::Avg)
+    {
+        if (agg_func->children_size() != 1)
+            throw Exception(fmt::format("Agg function({}) only accept 1 argument", func->name));
+
+        const auto & child_ft = agg_func->children(0).field_type();
+        auto * ft = agg_func->mutable_field_type();
+        if (child_ft.tp() == TiDB::TypeNewDecimal)
+        {
+            auto [result_prec, result_scale]
+                = AvgDecimalInferer::inferResultType(child_ft.flen(), child_ft.decimal(), DEFAULT_DIV_PRECISION_INCREMENT);
+            ft->set_tp(TiDB::TypeNewDecimal);
+            ft->set_flen(static_cast<Int32>(result_prec));
+            ft->set_decimal(static_cast<Int32>(result_scale));
+        }
+        else
+        {
+            ft->set_tp(TiDB::TypeDouble);
+        }
+        // AVG never returns NOT NULL; clear unsigned for float return types.
+        ft->set_flag(child_ft.flag() & (~(TiDB::ColumnFlagNotNull | TiDB::ColumnFlagUnsigned)));
     }
     else if (agg_sig == tipb::ExprType::Min || agg_sig == tipb::ExprType::Max || agg_sig == tipb::ExprType::First)
     {
@@ -290,10 +328,53 @@ ExecutorBinderPtr compileAggregation(
                 if (children_ci.size() != 1)
                     throw Exception(fmt::format("Agg function({}) only accept 1 argument", func->name));
 
-                ci.tp = TiDB::TypeLongLong;
-                ci.flag = children_ci[0].flag & TiDB::ColumnFlagUnsigned;
+                const auto & child_ci = children_ci[0];
+                if (child_ci.tp == TiDB::TypeNewDecimal)
+                {
+                    auto [result_prec, result_scale]
+                        = SumDecimalInferer::infer(static_cast<PrecType>(child_ci.flen), static_cast<ScaleType>(child_ci.decimal));
+                    ci = child_ci;
+                    ci.tp = TiDB::TypeNewDecimal;
+                    ci.flen = static_cast<Int32>(result_prec);
+                    ci.decimal = static_cast<Int32>(result_scale);
+                    ci.flag = (child_ci.flag & TiDB::ColumnFlagUnsigned) & (~TiDB::ColumnFlagNotNull);
+                }
+                else if (child_ci.tp == TiDB::TypeFloat || child_ci.tp == TiDB::TypeDouble)
+                {
+                    ci.tp = TiDB::TypeDouble;
+                    ci.flag = 0;
+                }
+                else
+                {
+                    ci.tp = TiDB::TypeLongLong;
+                    ci.flag = child_ci.flag & TiDB::ColumnFlagUnsigned;
+                }
             }
-            else if (func->name == "max" || func->name == "min" || func->name == "first_row" || func->name == "avg")
+            else if (func->name == "avg")
+            {
+                if (children_ci.size() != 1)
+                    throw Exception(fmt::format("Agg function({}) only accept 1 argument", func->name));
+
+                const auto & child_ci = children_ci[0];
+                if (child_ci.tp == TiDB::TypeNewDecimal)
+                {
+                    auto [result_prec, result_scale] = AvgDecimalInferer::inferResultType(
+                        static_cast<PrecType>(child_ci.flen),
+                        static_cast<ScaleType>(child_ci.decimal),
+                        DEFAULT_DIV_PRECISION_INCREMENT);
+                    ci = child_ci;
+                    ci.tp = TiDB::TypeNewDecimal;
+                    ci.flen = static_cast<Int32>(result_prec);
+                    ci.decimal = static_cast<Int32>(result_scale);
+                    ci.flag &= ~(TiDB::ColumnFlagNotNull | TiDB::ColumnFlagUnsigned);
+                }
+                else
+                {
+                    ci.tp = TiDB::TypeDouble;
+                    ci.flag = 0;
+                }
+            }
+            else if (func->name == "max" || func->name == "min" || func->name == "first_row")
             {
                 ci = children_ci[0];
                 ci.flag &= ~TiDB::ColumnFlagNotNull;

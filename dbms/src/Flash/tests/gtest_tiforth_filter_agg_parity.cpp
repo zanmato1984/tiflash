@@ -3,8 +3,11 @@
 #if defined(TIFLASH_ENABLE_TIFORTH)
 
 #include <Core/Block.h>
+#include <DataTypes/DataTypeDecimal.h>
+#include <DataTypes/DataTypeNullable.h>
 #include <Flash/TiForth/BlockPipelineRunner.h>
 #include <TestUtils/ExecutorTestUtils.h>
+#include <TestUtils/FunctionTestUtils.h>
 
 #include <arrow/result.h>
 #include <arrow/scalar.h>
@@ -27,6 +30,8 @@
 namespace DB::tests {
 
 namespace {
+
+using DecimalField128 = DecimalField<Decimal128>;
 
 arrow::Result<ColumnsWithTypeAndName> RunTiForthPipelineOnBlock(
     const Block& input, const std::unordered_map<String, TiForth::ColumnOptions>& options_by_name,
@@ -123,6 +128,31 @@ class TiForthFilterAggParityTestRunner : public ExecutorTest {
                                     Int32(3), Int32(4)}),
          toNullableVec<Int32>("v", {Int32(10), std::optional<Int32>{}, Int32(20), Int32(1), Int32(7),
                                     std::optional<Int32>{}, std::optional<Int32>{}})});
+
+    context.addMockTable(
+        {"default", "tiforth_agg_parity_floats"},
+        {{"k", TiDB::TP::TypeLong}, {"f32", TiDB::TP::TypeFloat}, {"f64", TiDB::TP::TypeDouble}},
+        {toNullableVec<Int32>("k", {Int32(1), Int32(1), Int32(2), Int32(2), std::optional<Int32>{},
+                                    Int32(3)}),
+         toNullableVec<Float32>("f32", {Float32(1.0F), std::optional<Float32>{}, Float32(2.5F),
+                                        Float32(-0.5F), Float32(3.0F), std::optional<Float32>{}}),
+         toNullableVec<Float64>("f64", {Float64(10.0), Float64(2.0), std::optional<Float64>{},
+                                        Float64(1.0), Float64(7.0), std::optional<Float64>{}})});
+
+    context.addMockTable(
+        {"default", "tiforth_agg_parity_decimal"},
+        {{"k", TiDB::TP::TypeLong}, {"d", TiDB::TP::TypeNewDecimal, true, Poco::Dynamic::Var{}, 20, 2}},
+        {toNullableVec<Int32>("k", {Int32(1), Int32(1), Int32(2), Int32(2), Int32(2),
+                                    std::optional<Int32>{}, Int32(3)}),
+         createColumn<Nullable<Decimal128>>(std::make_tuple(20, 2),
+                                            {DecimalField128(Int128(123), 2),
+                                             {},
+                                             DecimalField128(Int128(100), 2),
+                                             DecimalField128(Int128(200), 2),
+                                             DecimalField128(Int128(200), 2),
+                                             DecimalField128(Int128(-50), 2),
+                                             {}},
+                                            "d")});
 
     context.addMockTable(
         {"default", "tiforth_filter_truthy"},
@@ -311,6 +341,7 @@ try
         keys[0].expr = tiforth::MakeFieldRef(0);
         aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
         aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
         aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
 
@@ -327,10 +358,11 @@ try
               {Count(lit(Field(static_cast<UInt64>(1)))),
                Count(col("v")),
                Sum(col("v")),
+               Avg(col("v")),
                Min(col("v")),
                Max(col("v"))},
               {col("k")})
-          .project({"count(1)", "count(v)", "sum(v)", "min(v)", "max(v)", "k"})
+          .project({"count(1)", "count(v)", "sum(v)", "avg(v)", "min(v)", "max(v)", "k"})
           .build(context),
       /*concurrency=*/1);
   ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
@@ -352,6 +384,7 @@ try
         aggs.push_back({"cnt_all", "count_all", nullptr});
         aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
         aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
         aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
 
@@ -390,10 +423,217 @@ try
               {Count(lit(Field(static_cast<UInt64>(1)))),
                Count(col("v")),
                Sum(col("v")),
+               Avg(col("v")),
                Min(col("v")),
                Max(col("v"))},
               {col("k")})
-          .project({"count(1)", "count(v)", "sum(v)", "min(v)", "max(v)", "k"})
+          .project({"count(1)", "count(v)", "sum(v)", "avg(v)", "min(v)", "max(v)", "k"})
+          .build(context),
+      /*concurrency=*/1);
+  ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
+}
+CATCH
+
+TEST_F(TiForthFilterAggParityTestRunner, HashAggGroupByFloatDouble)
+try
+{
+  const auto scan_cols =
+      executeRawQuery("select k, f32, f64 from default.tiforth_agg_parity_floats");
+  const Block scan_block(scan_cols);
+
+  const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+  auto actual = RunTiForthPipelineOnBlock(
+      scan_block, options_by_name,
+      [](const tiforth::Engine* engine, tiforth::PipelineBuilder* builder) -> arrow::Status {
+        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+        std::vector<tiforth::AggFunc> aggs;
+        aggs.push_back({"sum_f32", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"min_f32", "min", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"max_f32", "max", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"sum_f64", "sum", tiforth::MakeFieldRef(2)});
+        aggs.push_back({"min_f64", "min", tiforth::MakeFieldRef(2)});
+        aggs.push_back({"max_f64", "max", tiforth::MakeFieldRef(2)});
+
+        return builder->AppendTransform(
+            [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
+              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+            });
+      });
+  ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+
+  const auto expected = executeStreams(
+      context.scan("default", "tiforth_agg_parity_floats")
+          .aggregation(
+              {Sum(col("f32")),
+               Min(col("f32")),
+               Max(col("f32")),
+               Sum(col("f64")),
+               Min(col("f64")),
+               Max(col("f64"))},
+              {col("k")})
+          .project({"sum(f32)", "min(f32)", "max(f32)", "sum(f64)", "min(f64)", "max(f64)",
+                    "k"})
+          .build(context),
+      /*concurrency=*/1);
+  ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
+}
+CATCH
+
+TEST_F(TiForthFilterAggParityTestRunner, HashAggBreakerGroupByFloatDouble)
+try
+{
+  const auto scan_cols =
+      executeRawQuery("select k, f32, f64 from default.tiforth_agg_parity_floats");
+  const Block scan_block(scan_cols);
+
+  const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+  auto actual = RunTiForthPlanOnBlock(
+      scan_block, options_by_name,
+      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
+        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+        std::vector<tiforth::AggFunc> aggs;
+        aggs.push_back({"sum_f32", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"min_f32", "min", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"max_f32", "max", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"sum_f64", "sum", tiforth::MakeFieldRef(2)});
+        aggs.push_back({"min_f64", "min", tiforth::MakeFieldRef(2)});
+        aggs.push_back({"max_f64", "max", tiforth::MakeFieldRef(2)});
+
+        ARROW_ASSIGN_OR_RAISE(
+            const auto ctx_id,
+            builder->AddBreakerState<tiforth::HashAggContext>(
+                [engine, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+                  return std::make_shared<tiforth::HashAggContext>(engine, keys, aggs);
+                }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->SetStageSink(
+            build_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
+                                    ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggBuildSinkOp>(std::move(agg_ctx));
+            }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto convergent_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->SetStageSource(
+            convergent_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
+                                    ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggConvergentSourceOp>(
+                  std::move(agg_ctx), /*max_output_rows=*/1 << 30);
+            }));
+
+        ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, convergent_stage));
+        return arrow::Status::OK();
+      });
+  ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+
+  const auto expected = executeStreams(
+      context.scan("default", "tiforth_agg_parity_floats")
+          .aggregation(
+              {Sum(col("f32")),
+               Min(col("f32")),
+               Max(col("f32")),
+               Sum(col("f64")),
+               Min(col("f64")),
+               Max(col("f64"))},
+              {col("k")})
+          .project({"sum(f32)", "min(f32)", "max(f32)", "sum(f64)", "min(f64)", "max(f64)",
+                    "k"})
+          .build(context),
+      /*concurrency=*/1);
+  ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
+}
+CATCH
+
+TEST_F(TiForthFilterAggParityTestRunner, HashAggGroupByDecimal)
+try
+{
+  const auto scan_cols = executeRawQuery("select k, d from default.tiforth_agg_parity_decimal");
+  const Block scan_block(scan_cols);
+
+  const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+  auto actual = RunTiForthPipelineOnBlock(
+      scan_block, options_by_name,
+      [](const tiforth::Engine* engine, tiforth::PipelineBuilder* builder) -> arrow::Status {
+        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+        std::vector<tiforth::AggFunc> aggs;
+        aggs.push_back({"sum_d", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"avg_d", "avg", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"min_d", "min", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"max_d", "max", tiforth::MakeFieldRef(1)});
+
+        return builder->AppendTransform(
+            [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
+              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+            });
+      });
+  ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+
+  const auto expected = executeStreams(
+      context.scan("default", "tiforth_agg_parity_decimal")
+          .aggregation({Sum(col("d")), Avg(col("d")), Min(col("d")), Max(col("d"))}, {col("k")})
+          .project({"sum(d)", "avg(d)", "min(d)", "max(d)", "k"})
+          .build(context),
+      /*concurrency=*/1);
+  ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
+}
+CATCH
+
+TEST_F(TiForthFilterAggParityTestRunner, HashAggBreakerGroupByDecimal)
+try
+{
+  const auto scan_cols = executeRawQuery("select k, d from default.tiforth_agg_parity_decimal");
+  const Block scan_block(scan_cols);
+
+  const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+  auto actual = RunTiForthPlanOnBlock(
+      scan_block, options_by_name,
+      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
+        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+        std::vector<tiforth::AggFunc> aggs;
+        aggs.push_back({"sum_d", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"avg_d", "avg", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"min_d", "min", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"max_d", "max", tiforth::MakeFieldRef(1)});
+
+        ARROW_ASSIGN_OR_RAISE(
+            const auto ctx_id,
+            builder->AddBreakerState<tiforth::HashAggContext>(
+                [engine, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+                  return std::make_shared<tiforth::HashAggContext>(engine, keys, aggs);
+                }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->SetStageSink(
+            build_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
+                                    ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggBuildSinkOp>(std::move(agg_ctx));
+            }));
+
+        ARROW_ASSIGN_OR_RAISE(const auto convergent_stage, builder->AddStage());
+        ARROW_RETURN_NOT_OK(builder->SetStageSource(
+            convergent_stage,
+            [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+              ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
+                                    ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+              return std::make_unique<tiforth::HashAggConvergentSourceOp>(
+                  std::move(agg_ctx), /*max_output_rows=*/1 << 30);
+            }));
+
+        ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, convergent_stage));
+        return arrow::Status::OK();
+      });
+  ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+
+  const auto expected = executeStreams(
+      context.scan("default", "tiforth_agg_parity_decimal")
+          .aggregation({Sum(col("d")), Avg(col("d")), Min(col("d")), Max(col("d"))}, {col("k")})
+          .project({"sum(d)", "avg(d)", "min(d)", "max(d)", "k"})
           .build(context),
       /*concurrency=*/1);
   ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
@@ -669,6 +909,7 @@ try
         aggs.push_back({"cnt_all", "count_all", nullptr});
         aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
         aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
         aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
 
@@ -686,10 +927,11 @@ try
               {Count(lit(Field(static_cast<UInt64>(1)))),
                Count(col("v")),
                Sum(col("v")),
+               Avg(col("v")),
                Min(col("v")),
                Max(col("v"))},
               {})
-          .project({"count(1)", "count(v)", "sum(v)", "min(v)", "max(v)"})
+          .project({"count(1)", "count(v)", "sum(v)", "avg(v)", "min(v)", "max(v)"})
           .build(context),
       /*concurrency=*/1);
   ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
@@ -715,6 +957,7 @@ try
         aggs.push_back({"cnt_all", "count_all", nullptr});
         aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
         aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
         aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
 
@@ -759,10 +1002,11 @@ try
               {Count(lit(Field(static_cast<UInt64>(1)))),
                Count(col("v")),
                Sum(col("v")),
+               Avg(col("v")),
                Min(col("v")),
                Max(col("v"))},
               {})
-          .project({"count(1)", "count(v)", "sum(v)", "min(v)", "max(v)"})
+          .project({"count(1)", "count(v)", "sum(v)", "avg(v)", "min(v)", "max(v)"})
           .build(context),
       /*concurrency=*/1);
   ASSERT_TRUE(DB::tests::columnsEqual(expected, actual.ValueOrDie(), /*restrict=*/false));
@@ -784,6 +1028,7 @@ try
         aggs.push_back({"cnt_all", "count_all", nullptr});
         aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
         aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
         aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
 
@@ -800,6 +1045,7 @@ try
               {Count(lit(Field(static_cast<UInt64>(1)))),
                Count(col("v")),
                Sum(col("v")),
+               Avg(col("v")),
                Min(col("v")),
                Max(col("v"))},
               {})
@@ -824,6 +1070,7 @@ try
         aggs.push_back({"cnt_all", "count_all", nullptr});
         aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+        aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
         aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
         aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
 
@@ -862,6 +1109,7 @@ try
               {Count(lit(Field(static_cast<UInt64>(1)))),
                Count(col("v")),
                Sum(col("v")),
+               Avg(col("v")),
                Min(col("v")),
                Max(col("v"))},
               {})

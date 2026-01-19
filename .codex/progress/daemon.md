@@ -7,11 +7,11 @@
 
 # Work in Progress
 
-- TiForth: expand aggregate function coverage/types towards TiFlash semantics (at least: `avg`, `sum` for float/decimal, `min/max` for float/decimal; keep collation/decimal/time rules).
+- (none)
 
 # To Do
 
-- TiFlash: extend parity gtests to cover new agg functions/types (pin bumped separately) and ensure breaker path still matches TiFlash results.
+- (none)
 
 # Completed
 
@@ -23,3 +23,5 @@
 - Objectives review (2026-01-19): MS1-11 + semantics/type contract + Arrow-pool routing are in place and parity-tested for the common DAG path. Remaining gaps are mostly engineering/coverage: aggregation is still a minimal subset vs TiFlash’s full `Aggregator` (aggregate function set + specialized aggregation methods), and should be ported next as a dedicated milestone to avoid drifting semantics/perf.
 - MS12 design (2026-01-19): added dedicated “full aggregation core” milestone to keep TiForth hash aggregation aligned with TiFlash `Aggregator` shape (method selection + optimized hash tables + broader aggregate coverage). Files: `docs/design/2026-01-14-tiforth.md`, `docs/design/2026-01-14-tiforth-milestone-12-full-aggregation.md`.
 - MS12A keying/hash tables (TiForth `0eeb174`): added TiFlash-shaped one-key aggregation methods: dense direct-map for bool/i8/u8/i16/u16, open-addressing fixed-key table for int/uint/float/double (normalized to `uint64_t`), and single-string-key fast path with collation normalization (binary/pad-binary avoid extra sort-key allocation). Multi-key still uses serialized normalized bytes via `detail::KeyHashTable`. Added `detail::FixedKeyHashTable` + gtests. TiFlash pin bumped to `0eeb174`. Tests: `cmake --build /Users/zanmato/dev/tiforth/build-debug && ctest --test-dir /Users/zanmato/dev/tiforth/build-debug`; `ninja -C cmake-build-debug gtests_dbms && LOG_LEVEL=error cmake-build-debug/dbms/gtests_dbms --gtest_filter='TiForthPipelineTranslateTest.*:TiForthFilterAggParityTestRunner.*'`. Files: (tiforth) `include/tiforth/detail/fixed_key_hash_table.h`, `include/tiforth/operators/hash_agg.h`, `src/tiforth/operators/hash_agg.cc`, `tests/tiforth_fixed_key_hash_table_test.cpp`, `tests/CMakeLists.txt`; (tiflash) `libs/CMakeLists.txt`.
+- TiForth hash agg aggregate coverage (TiForth `1824213`): added TiFlash decimal inference for `sum`/`avg` (output decimal precision/scale + decimal128/256 selection), implemented decimal avg state/finalization, aligned float min/max NaN behavior with TiFlash, and made `WithLogicalTypeMetadata` upsert keys to avoid duplicate metadata conflicts. Tests: `cmake --build /Users/zanmato/dev/tiforth/build-debug && ctest --test-dir /Users/zanmato/dev/tiforth/build-debug`. Files: (tiforth) `include/tiforth/operators/hash_agg.h`, `src/tiforth/operators/hash_agg.cc`, `tests/tiforth_hash_agg_test.cpp`, `src/tiforth/type_metadata.cc`, `docs/operators_and_functions.md`.
+- TiFlash parity gtests for `avg`/float/decimal (2026-01-19): pinned TiForth to `1824213`, extended `gtest_tiforth_filter_agg_parity` with `avg` + float/decimal cases (including breaker), and fixed MockExecutor aggregation type binding: set `field_type` for `avg` and compute correct `sum/avg` return types for float+decimal. Also fixed mock decimal schema by allowing `MockColumnInfo` to carry decimal precision/scale (avoid legacy `flen=65, scale=0`). Tests: `ninja -C cmake-build-debug gtests_dbms && LOG_LEVEL=error cmake-build-debug/dbms/gtests_dbms --gtest_filter='TiForthPipelineTranslateTest.*:TiForthFilterAggParityTestRunner.*'`. Files: `.codex/progress/daemon.md`, `libs/CMakeLists.txt`, `dbms/src/Flash/tests/gtest_tiforth_filter_agg_parity.cpp`, `dbms/src/Debug/MockExecutor/AggregationBinder.cpp`, `dbms/src/Debug/MockStorage.{h,cpp}`.

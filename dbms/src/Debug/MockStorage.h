@@ -40,6 +40,9 @@ struct MockColumnInfo
     TiDB::TP type;
     bool nullable = true;
     Poco::Dynamic::Var collate{}; // default empty means no collation.
+    // Only meaningful for TypeNewDecimal. When unset, mock storage falls back to legacy defaults.
+    Int32 decimal_precision = -1;
+    Int32 decimal_scale = -1;
 };
 using MockColumnInfoVec = std::vector<MockColumnInfo>;
 using TableInfo = TiDB::TableInfo;
