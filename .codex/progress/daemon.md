@@ -7,8 +7,6 @@
 
 # Work in Progress
 
-- Push current `tiforth` branch to its upstream remote.
-
 # To Do
 
 - Wire `enable_tiforth_arrow_compute_agg` into real TiFlash TiForth executor once non-pass-through DAG→TiForth translation is enabled (today only test harness translation).
@@ -27,3 +25,4 @@
 - RELEASE benchmark rerun (streaming Acero, 2026-01-19): `cmake-build-release/dbms/bench_dbms --benchmark_filter='^ArrowComputeAgg/.*' --benchmark_min_time=0.2`. Results (items/s, TiForth/Native): int32/int64 single-group 148.0M vs 126.1M (~0.85x); int32/int64 uniform_low(16) 181.8M vs 194.6M (~1.07x); int32/int64 uniform_high 20.6M vs 24.7M (~1.20x); int32/int64 zipf(1024) 167.0M vs 201.1M (~1.20x); int64/float64 uniform_low(16) 185.1M vs 206.4M (~1.11x); int64/float64 zipf(1024) 167.2M vs 202.1M (~1.21x); string/int64 uniform_low(16) 158.2M vs 70.7M (~0.45x); string/int64 zipf(1024) 123.9M vs 58.0M (~0.47x). Notes: similar profile as prior run; string-key cases still ~2x slower for TiForth Arrow-compute agg. Files: `.codex/progress/daemon.md`.
 - String-key slowdown investigation (2026-01-19): added `ArrowComputeAgg/TiForthDictKey/*` benchmarks that feed a **shared-dictionary** `DictionaryArray` key column into TiForth `ArrowComputeAggTransformOp` (built once per dataset, outside timed loop). Found Arrow/Acero currently errors on multi-batch inputs with *differing* dictionaries (`NotImplemented: Unifying differing dictionaries`), so per-batch `dictionary_encode` is not viable; using a shared dictionary across all batches works. RELEASE results (items/s): string uniform_low Native 161.7M vs TiForth 72.4M (~0.45x) vs TiForthDictKey 199.5M (~1.23x); string zipf Native 123.8M vs TiForth 58.1M (~0.47x) vs TiForthDictKey 193.9M (~1.57x). Files: `dbms/src/Flash/tests/bench_tiforth_arrow_compute_agg.cpp`, `.codex/progress/daemon.md`.
 - Detailed benchmark report (2026-01-19): wrote a standalone markdown report for `bench_dbms` `^ArrowComputeAgg/.*` including environment, methodology, and result tables for Native vs TiForth vs TiForthDictKey (string shared dictionary) and notes on Arrow dictionary unification limitations. Files: `docs/design/2026-01-19-arrow-compute-agg-benchmark-report.md`, `.codex/progress/daemon.md`.
+- Pushed `tiforth` branch (2026-01-19): pushed commits to upstream `ruoxi/tiforth` (remote `https://github.com/zanmato1984/tiflash.git`). Notes: includes TiFlash A/B switch + parity gtest + benchmark reruns + dict-key benchmark + benchmark report. Files: `.codex/progress/daemon.md`.
