@@ -1,8 +1,8 @@
 # TiForth MS16: Arrow HashAgg Parity GTests (vs TiFlash Aggregator, No Collation)
 
-- Author(s): TBD
-- Last Updated: 2026-01-19
-- Status: Planned
+- Author(s): zanmato
+- Last Updated: 2026-01-20
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-15-arrow-hash-agg-operator.md`
 - Discussion PR: TBD
@@ -97,18 +97,16 @@ As divergences are found, either:
 
 ## Implementation Plan (Checklist)
 
-- Add a new TiFlash gtest file under `dbms/src/Flash/tests/` (name TBD) implementing the parity matrix above.
-- Reuse/centralize data generation so benchmarks and tests share the same shapes (preferred).
-- Add helpers to:
-  - run TiFlash native aggregation with a fixed plan fragment,
-  - run TiForth Arrow-hash-agg (MS15) on the equivalent Arrow input,
-  - normalize output into comparable canonical form (unordered map keyed by group key bytes).
-- Integrate into CI `gtests_dbms` target.
+- [x] Add a new TiFlash gtest file under `dbms/src/Flash/tests/` implementing a parity matrix.
+- [x] Add helpers to run native `DB::Aggregator` and TiForth `ArrowHashAggTransformOp`, normalize outputs (unordered map keyed by group key bytes) and compare.
+- [x] Integrate into `gtests_dbms` (auto via `gtest*.cpp` glob).
 
 ## Validation
 
 - `ninja -C cmake-build-debug gtests_dbms`
+- `gtests_dbms '--gtest_filter=TiForthArrowHashAggParityTest.*'`
 
 ## Status / Notes
 
-- MS16 is the correctness gate for enabling `ArrowHashAggTransformOp` in more TiFlash integration paths.
+- Implemented parity test: `dbms/src/Flash/tests/gtest_tiforth_arrow_hash_agg_parity.cpp`.
+- Coverage includes: int32/int64 keys; int64/float64/decimal values; single/low-card/high-card/zipf distributions; null keys + null values (including an “all-null group” case to validate sum/min/max nullability).
