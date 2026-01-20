@@ -55,7 +55,10 @@ enum class KeyType {
 };
 
 enum class ValueType {
+    kInt32,
     kInt64,
+    kUInt64,
+    kFloat32,
     kFloat64,
     kDecimal128, // Decimal(precision=20, scale=2)
 };
@@ -154,10 +157,12 @@ std::optional<Float64> FieldToFloat64(const Field & field) {
 }
 
 struct CanonicalRow {
+    Field cnt_all;
     Field cnt_v;
     Field sum_v;
     Field min_v;
     Field max_v;
+    Field avg_v;
 };
 
 using CanonicalMap = std::unordered_map<std::string, CanonicalRow>;
@@ -173,6 +178,11 @@ arrow::Result<CanonicalMap> Canonicalize(
             if (!inserted)
                 return arrow::Status::Invalid("duplicate group key in output: ", key);
 
+            {
+                Field f;
+                block.getByName("cnt_all").column->get(row, f);
+                it->second.cnt_all = std::move(f);
+            }
             {
                 Field f;
                 block.getByName("cnt_v").column->get(row, f);
@@ -193,9 +203,38 @@ arrow::Result<CanonicalMap> Canonicalize(
                 block.getByName("max_v").column->get(row, f);
                 it->second.max_v = std::move(f);
             }
+            {
+                Field f;
+                block.getByName("avg_v").column->get(row, f);
+                it->second.avg_v = std::move(f);
+            }
         }
     }
     return out;
+}
+
+arrow::Status CompareOutputTypes(
+    const std::vector<Block> & expected_blocks,
+    const std::vector<Block> & actual_blocks,
+    const std::vector<std::string_view> & column_names) {
+    if (expected_blocks.empty() || actual_blocks.empty())
+        return arrow::Status::OK();
+
+    const auto & expected = expected_blocks.front();
+    const auto & actual = actual_blocks.front();
+    for (const auto & name : column_names) {
+        if (!expected.has(String(name)) || !actual.has(String(name)))
+            return arrow::Status::Invalid("missing output column: ", name);
+        const auto & exp_type = expected.getByName(String(name)).type;
+        const auto & got_type = actual.getByName(String(name)).type;
+        if (exp_type == nullptr || got_type == nullptr)
+            return arrow::Status::Invalid("output column type must not be null: ", name);
+        if (exp_type->getName() != got_type->getName()) {
+            return arrow::Status::Invalid(
+                fmt::format("output type mismatch for {}: {} vs {}", name, exp_type->getName(), got_type->getName()));
+        }
+    }
+    return arrow::Status::OK();
 }
 
 arrow::Status CompareCanonical(
@@ -226,8 +265,20 @@ arrow::Status CompareCanonical(
             return arrow::Status::Invalid(fmt::format("{} nullability mismatch", name));
         if (!va.has_value())
             return arrow::Status::OK();
+        if (std::isnan(*va) && std::isnan(*vb))
+            return arrow::Status::OK();
+        if (std::isnan(*va) != std::isnan(*vb))
+            return arrow::Status::Invalid(fmt::format("{} NaN mismatch", name));
+        if (std::isinf(*va) || std::isinf(*vb)) {
+            if (*va != *vb)
+                return arrow::Status::Invalid(fmt::format("{} inf mismatch: {} vs {}", name, *va, *vb));
+            return arrow::Status::OK();
+        }
+        if (*va == 0.0 && *vb == 0.0 && std::signbit(*va) != std::signbit(*vb))
+            return arrow::Status::Invalid(fmt::format("{} signed zero mismatch", name));
         const double diff = std::abs(*va - *vb);
-        if (diff > 1e-9)
+        const double tol = 1e-9;
+        if (diff > tol)
             return arrow::Status::Invalid(fmt::format("{} mismatch: {} vs {} (diff={})", name, *va, *vb, diff));
         return arrow::Status::OK();
     };
@@ -246,23 +297,86 @@ arrow::Status CompareCanonical(
             return arrow::Status::Invalid("missing group key in actual: ", key);
 
         const auto & got = it->second;
-        ARROW_RETURN_NOT_OK(compare_int(exp.cnt_v, got.cnt_v, "cnt_v"));
+        {
+            const auto st = compare_int(exp.cnt_all, got.cnt_all, "cnt_all");
+            if (!st.ok())
+                return arrow::Status::Invalid("group=", key, " ", st.ToString());
+        }
+        {
+            const auto st = compare_int(exp.cnt_v, got.cnt_v, "cnt_v");
+            if (!st.ok())
+                return arrow::Status::Invalid("group=", key, " ", st.ToString());
+        }
 
         switch (cfg.value_type) {
+        case ValueType::kInt32:
         case ValueType::kInt64:
-            ARROW_RETURN_NOT_OK(compare_int(exp.sum_v, got.sum_v, "sum_v"));
-            ARROW_RETURN_NOT_OK(compare_int(exp.min_v, got.min_v, "min_v"));
-            ARROW_RETURN_NOT_OK(compare_int(exp.max_v, got.max_v, "max_v"));
+        case ValueType::kUInt64:
+            {
+                const auto st = compare_int(exp.sum_v, got.sum_v, "sum_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
+            {
+                const auto st = compare_int(exp.min_v, got.min_v, "min_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
+            {
+                const auto st = compare_int(exp.max_v, got.max_v, "max_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
+            {
+                const auto st = compare_float(exp.avg_v, got.avg_v, "avg_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
             break;
+        case ValueType::kFloat32:
         case ValueType::kFloat64:
-            ARROW_RETURN_NOT_OK(compare_float(exp.sum_v, got.sum_v, "sum_v"));
-            ARROW_RETURN_NOT_OK(compare_float(exp.min_v, got.min_v, "min_v"));
-            ARROW_RETURN_NOT_OK(compare_float(exp.max_v, got.max_v, "max_v"));
+            {
+                const auto st = compare_float(exp.sum_v, got.sum_v, "sum_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
+            {
+                const auto st = compare_float(exp.min_v, got.min_v, "min_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
+            {
+                const auto st = compare_float(exp.max_v, got.max_v, "max_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
+            {
+                const auto st = compare_float(exp.avg_v, got.avg_v, "avg_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
             break;
         case ValueType::kDecimal128:
-            ARROW_RETURN_NOT_OK(compare_decimal(exp.sum_v, got.sum_v, "sum_v"));
-            ARROW_RETURN_NOT_OK(compare_decimal(exp.min_v, got.min_v, "min_v"));
-            ARROW_RETURN_NOT_OK(compare_decimal(exp.max_v, got.max_v, "max_v"));
+            {
+                const auto st = compare_decimal(exp.sum_v, got.sum_v, "sum_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
+            {
+                const auto st = compare_decimal(exp.min_v, got.min_v, "min_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
+            {
+                const auto st = compare_decimal(exp.max_v, got.max_v, "max_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
+            {
+                const auto st = compare_decimal(exp.avg_v, got.avg_v, "avg_v");
+                if (!st.ok())
+                    return arrow::Status::Invalid("group=", key, " ", st.ToString());
+            }
             break;
         }
     }
@@ -282,8 +396,17 @@ DataTypePtr MakeKeyType(const ParityConfig & cfg) {
 DataTypePtr MakeValueType(const ParityConfig & cfg) {
     DataTypePtr nested;
     switch (cfg.value_type) {
+    case ValueType::kInt32:
+        nested = std::make_shared<DataTypeInt32>();
+        break;
     case ValueType::kInt64:
         nested = std::make_shared<DataTypeInt64>();
+        break;
+    case ValueType::kUInt64:
+        nested = std::make_shared<DataTypeUInt64>();
+        break;
+    case ValueType::kFloat32:
+        nested = std::make_shared<DataTypeFloat32>();
         break;
     case ValueType::kFloat64:
         nested = std::make_shared<DataTypeFloat64>();
@@ -297,8 +420,14 @@ DataTypePtr MakeValueType(const ParityConfig & cfg) {
 
 DataTypePtr MakeNestedValueType(ValueType t) {
     switch (t) {
+    case ValueType::kInt32:
+        return std::make_shared<DataTypeInt32>();
     case ValueType::kInt64:
         return std::make_shared<DataTypeInt64>();
+    case ValueType::kUInt64:
+        return std::make_shared<DataTypeUInt64>();
+    case ValueType::kFloat32:
+        return std::make_shared<DataTypeFloat32>();
     case ValueType::kFloat64:
         return std::make_shared<DataTypeFloat64>();
     case ValueType::kDecimal128:
@@ -399,12 +528,25 @@ Dataset MakeDataset(const ParityConfig & cfg) {
                 cfg.null_values
                 && ((row % 17 == 0) || (cfg.all_null_group && cfg.dist == KeyDist::kUniformLowCard && key_id == 0));
 
-            if (cfg.value_type == ValueType::kInt64) {
+            switch (cfg.value_type) {
+            case ValueType::kInt32:
+                AppendNullable(value_col, value_is_null, Field(static_cast<Int64>(static_cast<Int32>(row))));
+                break;
+            case ValueType::kInt64:
                 AppendNullable(value_col, value_is_null, Field(static_cast<Int64>(row)));
-            } else if (cfg.value_type == ValueType::kFloat64) {
+                break;
+            case ValueType::kUInt64:
+                AppendNullable(value_col, value_is_null, Field(static_cast<UInt64>(row)));
+                break;
+            case ValueType::kFloat32:
+                AppendNullable(value_col, value_is_null, Field(static_cast<Float64>(static_cast<Float32>(row) * 0.1f)));
+                break;
+            case ValueType::kFloat64:
                 AppendNullable(value_col, value_is_null, Field(static_cast<Float64>(row) * 0.1));
-            } else {
+                break;
+            case ValueType::kDecimal128:
                 AppendNullable(value_col, value_is_null, Field(DecimalField128(Int128(static_cast<Int64>(row)), 2)));
+                break;
             }
         }
 
@@ -415,49 +557,72 @@ Dataset MakeDataset(const ParityConfig & cfg) {
         global_row += rows;
     }
 
-    out.header = out.blocks.at(0).cloneEmpty();
+    if (!out.blocks.empty())
+        out.header = out.blocks.at(0).cloneEmpty();
+    else
+    {
+        Block header;
+        header.insert({key_type->createColumn(), key_type, "k"});
+        header.insert({value_type->createColumn(), value_type, "v"});
+        out.header = std::move(header);
+    }
     return out;
 }
 
 std::unique_ptr<Aggregator::Params> BuildAggregatorParams(
     const ContextPtr & context,
-    const Block & header) {
+    const Block & header,
+    const ColumnNumbers & keys) {
     if (!AggregateFunctionFactory::instance().isAggregateFunctionName("sum"))
         ::DB::registerAggregateFunctions();
 
+    const auto arg_col = header.getPositionByName("v");
     const auto value_type = header.getByName("v").type;
 
     AggregateDescriptions aggregates;
     aggregates.push_back(AggregateDescription{
+        .function = AggregateFunctionFactory::instance().get(*context, "count", {}),
+        .parameters = {},
+        .arguments = {},
+        .argument_names = {},
+        .column_name = "cnt_all",
+    });
+    aggregates.push_back(AggregateDescription{
         .function = AggregateFunctionFactory::instance().get(*context, "count", {value_type}),
         .parameters = {},
-        .arguments = {1},
+        .arguments = {arg_col},
         .argument_names = {"v"},
         .column_name = "cnt_v",
     });
     aggregates.push_back(AggregateDescription{
         .function = AggregateFunctionFactory::instance().get(*context, "sum", {value_type}),
         .parameters = {},
-        .arguments = {1},
+        .arguments = {arg_col},
         .argument_names = {"v"},
         .column_name = "sum_v",
     });
     aggregates.push_back(AggregateDescription{
         .function = AggregateFunctionFactory::instance().get(*context, "min", {value_type}),
         .parameters = {},
-        .arguments = {1},
+        .arguments = {arg_col},
         .argument_names = {"v"},
         .column_name = "min_v",
     });
     aggregates.push_back(AggregateDescription{
         .function = AggregateFunctionFactory::instance().get(*context, "max", {value_type}),
         .parameters = {},
-        .arguments = {1},
+        .arguments = {arg_col},
         .argument_names = {"v"},
         .column_name = "max_v",
     });
+    aggregates.push_back(AggregateDescription{
+        .function = AggregateFunctionFactory::instance().get(*context, "avg", {value_type}),
+        .parameters = {},
+        .arguments = {arg_col},
+        .argument_names = {"v"},
+        .column_name = "avg_v",
+    });
 
-    ColumnNumbers keys{0};
     KeyRefAggFuncMap key_ref_agg_func;
     AggFuncRefKeyMap agg_func_ref_key;
 
@@ -486,11 +651,11 @@ std::unique_ptr<Aggregator::Params> BuildAggregatorParams(
     return params;
 }
 
-arrow::Result<std::vector<Block>> RunNativeAggregator(const Dataset & dataset) {
+arrow::Result<std::vector<Block>> RunNativeAggregatorWithKeys(const Dataset & dataset, const ColumnNumbers & keys) {
     auto context = TiFlashTestEnv::getContext();
     if (context == nullptr)
         return arrow::Status::Invalid("TiFlashTestEnv::getContext returned null");
-    auto params = BuildAggregatorParams(context, dataset.header);
+    auto params = BuildAggregatorParams(context, dataset.header, keys);
 
     RegisterOperatorSpillContext register_operator_spill_context;
     auto aggregator = std::make_shared<Aggregator>(
@@ -511,6 +676,8 @@ arrow::Result<std::vector<Block>> RunNativeAggregator(const Dataset & dataset) {
 
     std::vector<AggregatedDataVariantsPtr> variants{data_variants};
     auto merging_buckets = aggregator->mergeAndConvertToBlocks(variants, /*final=*/true, /*max_threads=*/1);
+    if (!merging_buckets)
+        return std::vector<Block>{};
     std::vector<Block> out;
     for (;;) {
         auto block = merging_buckets->getData(0);
@@ -521,16 +688,22 @@ arrow::Result<std::vector<Block>> RunNativeAggregator(const Dataset & dataset) {
     return out;
 }
 
+arrow::Result<std::vector<Block>> RunNativeAggregator(const Dataset & dataset) {
+    return RunNativeAggregatorWithKeys(dataset, ColumnNumbers{0});
+}
+
 arrow::Result<std::vector<Block>> RunTiForthArrowHashAgg(const Dataset & dataset) {
     ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
     ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
 
     const std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
     std::vector<tiforth::AggFunc> aggs;
+    aggs.push_back({"cnt_all", "count_all", nullptr});
     aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
     aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
     aggs.push_back({"min_v", "min", tiforth::MakeFieldRef("v")});
     aggs.push_back({"max_v", "max", tiforth::MakeFieldRef("v")});
+    aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef("v")});
 
     ARROW_RETURN_NOT_OK(builder->AppendTransform(
         [engine_ptr = engine.get(), keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
@@ -541,7 +714,50 @@ arrow::Result<std::vector<Block>> RunTiForthArrowHashAgg(const Dataset & dataset
     const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
     ARROW_ASSIGN_OR_RAISE(
         auto outputs,
-        TiForth::RunTiForthPipelineOnBlocks(*pipeline, dataset.blocks, options_by_name, arrow::default_memory_pool()));
+        TiForth::RunTiForthPipelineOnBlocks(
+            *pipeline,
+            dataset.blocks,
+            options_by_name,
+            arrow::default_memory_pool(),
+            /*sample_block=*/&dataset.header));
+
+    std::vector<Block> out_blocks;
+    out_blocks.reserve(outputs.size());
+    for (auto & out : outputs) {
+        out_blocks.push_back(std::move(out.block));
+    }
+    return out_blocks;
+}
+
+arrow::Result<std::vector<Block>> RunTiForthArrowHashAggWithKeys(
+    const Dataset & dataset,
+    const std::vector<tiforth::AggKey> & keys) {
+    ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
+    ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+
+    std::vector<tiforth::AggFunc> aggs;
+    aggs.push_back({"cnt_all", "count_all", nullptr});
+    aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
+    aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
+    aggs.push_back({"min_v", "min", tiforth::MakeFieldRef("v")});
+    aggs.push_back({"max_v", "max", tiforth::MakeFieldRef("v")});
+    aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef("v")});
+
+    ARROW_RETURN_NOT_OK(builder->AppendTransform(
+        [engine_ptr = engine.get(), keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
+            return std::make_unique<tiforth::ArrowHashAggTransformOp>(engine_ptr, keys, aggs);
+        }));
+
+    ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+    const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+    ARROW_ASSIGN_OR_RAISE(
+        auto outputs,
+        TiForth::RunTiForthPipelineOnBlocks(
+            *pipeline,
+            dataset.blocks,
+            options_by_name,
+            arrow::default_memory_pool(),
+            /*sample_block=*/&dataset.header));
 
     std::vector<Block> out_blocks;
     out_blocks.reserve(outputs.size());
@@ -557,6 +773,10 @@ arrow::Status RunParityCase(const ParityConfig & cfg) {
     ARROW_ASSIGN_OR_RAISE(auto tiforth_blocks, RunTiForthArrowHashAgg(dataset));
 
     const std::vector<std::string_view> key_names = {"k"};
+    ARROW_RETURN_NOT_OK(CompareOutputTypes(
+        native_blocks,
+        tiforth_blocks,
+        /*column_names=*/{"cnt_all", "cnt_v", "sum_v", "min_v", "max_v", "avg_v", "k"}));
     ARROW_ASSIGN_OR_RAISE(auto expected, Canonicalize(native_blocks, key_names));
     ARROW_ASSIGN_OR_RAISE(auto actual, Canonicalize(tiforth_blocks, key_names));
     return CompareCanonical(expected, actual, cfg);
@@ -578,6 +798,14 @@ TEST(TiForthArrowHashAggParityTest, NativeVsArrowHashAggMatrix)
         // Decimal values (nulls + high-card).
         {"i64_dec_low_nulls", KeyType::kInt64, ValueType::kDecimal128, KeyDist::kUniformLowCard, 4096, 512, 16, true, true, true},
         {"i64_dec_high_no_null", KeyType::kInt64, ValueType::kDecimal128, KeyDist::kUniformHighCard, 4096, 512, 0, false, false, false},
+
+        // Additional numeric coverage (types + empty input).
+        {"i32_i32_low_nulls", KeyType::kInt32, ValueType::kInt32, KeyDist::kUniformLowCard, 4096, 512, 16, true, true, true},
+        {"i64_u64_zipf_no_null", KeyType::kInt64, ValueType::kUInt64, KeyDist::kZipfSkew, 8192, 512, 128, false, false, false},
+        {"i32_f32_low_no_null", KeyType::kInt32, ValueType::kFloat32, KeyDist::kUniformLowCard, 4096, 512, 16, false, false, false},
+
+        // Empty input (group-by should return empty output).
+        {"i32_i64_empty", KeyType::kInt32, ValueType::kInt64, KeyDist::kUniformLowCard, 0, 512, 16, false, false, false},
     };
 
     for (const auto & cfg : cases) {
@@ -585,6 +813,188 @@ TEST(TiForthArrowHashAggParityTest, NativeVsArrowHashAggMatrix)
         const auto st = RunParityCase(cfg);
         ASSERT_TRUE(st.ok()) << st.ToString();
     }
+}
+
+TEST(TiForthArrowHashAggParityTest, MultiKeyParity)
+{
+    std::vector<Block> blocks;
+    blocks.reserve(4);
+
+    const auto k0_type = makeNullable(std::make_shared<DataTypeInt32>());
+    const auto k1_type = makeNullable(std::make_shared<DataTypeInt64>());
+    const auto v_type = makeNullable(std::make_shared<DataTypeInt64>());
+
+    size_t global_row = 0;
+    for (size_t b = 0; b < 4; ++b)
+    {
+        MutableColumnPtr k0 = ColumnNullable::create(ColumnInt32::create(), ColumnUInt8::create());
+        MutableColumnPtr k1 = ColumnNullable::create(ColumnInt64::create(), ColumnUInt8::create());
+        MutableColumnPtr v = ColumnNullable::create(ColumnInt64::create(), ColumnUInt8::create());
+
+        const size_t rows = 512;
+        k0->reserve(rows);
+        k1->reserve(rows);
+        v->reserve(rows);
+        for (size_t i = 0; i < rows; ++i)
+        {
+            const size_t row = global_row + i;
+            AppendNullable(k0, /*is_null=*/row % 37 == 0, Field(static_cast<Int64>(row % 16)));
+            AppendNullable(k1, /*is_null=*/row % 53 == 0, Field(static_cast<Int64>(row % 7)));
+            AppendNullable(v, /*is_null=*/row % 17 == 0, Field(static_cast<Int64>(row)));
+        }
+
+        Block block;
+        block.insert({std::move(k0), k0_type, "k0"});
+        block.insert({std::move(k1), k1_type, "k1"});
+        block.insert({std::move(v), v_type, "v"});
+        blocks.push_back(std::move(block));
+        global_row += rows;
+    }
+
+    Dataset dataset;
+    dataset.blocks = std::move(blocks);
+    dataset.header = dataset.blocks.at(0).cloneEmpty();
+
+    const ColumnNumbers keys{0, 1};
+    ASSERT_TRUE(dataset.header.has("k0") && dataset.header.has("k1") && dataset.header.has("v"));
+
+    const auto native_blocks_res = RunNativeAggregatorWithKeys(dataset, keys);
+    ASSERT_TRUE(native_blocks_res.ok()) << native_blocks_res.status().ToString();
+    const auto & native_blocks = native_blocks_res.ValueOrDie();
+
+    const std::vector<tiforth::AggKey> tiforth_keys = {{"k0", tiforth::MakeFieldRef("k0")},
+                                                       {"k1", tiforth::MakeFieldRef("k1")}};
+    const auto tiforth_blocks_res = RunTiForthArrowHashAggWithKeys(dataset, tiforth_keys);
+    ASSERT_TRUE(tiforth_blocks_res.ok()) << tiforth_blocks_res.status().ToString();
+    const auto & tiforth_blocks = tiforth_blocks_res.ValueOrDie();
+
+    const auto type_st = CompareOutputTypes(
+        native_blocks,
+        tiforth_blocks,
+        /*column_names=*/{"cnt_all", "cnt_v", "sum_v", "min_v", "max_v", "avg_v", "k0", "k1"});
+    ASSERT_TRUE(type_st.ok()) << type_st.ToString();
+
+    const std::vector<std::string_view> key_names = {"k0", "k1"};
+    const auto expected_res = Canonicalize(native_blocks, key_names);
+    ASSERT_TRUE(expected_res.ok()) << expected_res.status().ToString();
+    const auto actual_res = Canonicalize(tiforth_blocks, key_names);
+    ASSERT_TRUE(actual_res.ok()) << actual_res.status().ToString();
+
+    ParityConfig cfg;
+    cfg.value_type = ValueType::kInt64;
+    const auto st = CompareCanonical(expected_res.ValueOrDie(), actual_res.ValueOrDie(), cfg);
+    ASSERT_TRUE(st.ok()) << st.ToString();
+}
+
+TEST(TiForthArrowHashAggParityTest, SpecialFloatValues)
+{
+    auto k_col = ColumnInt32::create();
+    auto v_col = ColumnFloat64::create();
+
+    const auto push = [&](Int32 k, Float64 v) {
+        k_col->insert(Field(static_cast<Int64>(k)));
+        v_col->insert(Field(v));
+    };
+
+    push(0, 1.0);
+    push(0, 2.0);
+    push(0, std::numeric_limits<double>::quiet_NaN());
+
+    push(1, std::numeric_limits<double>::quiet_NaN());
+    push(1, 1.0);
+
+    push(2, -0.0);
+    push(3, 0.0);
+
+    push(6, 0.0);
+    push(6, -0.0);
+
+    push(7, -0.0);
+    push(7, 0.0);
+
+    push(4, std::numeric_limits<double>::infinity());
+    push(4, 1.0);
+
+    push(5, -std::numeric_limits<double>::infinity());
+    push(5, 1.0);
+
+    Block block;
+    block.insert({std::move(k_col), std::make_shared<DataTypeInt32>(), "k"});
+    block.insert({std::move(v_col), std::make_shared<DataTypeFloat64>(), "v"});
+    Dataset dataset;
+    dataset.blocks = {std::move(block)};
+    dataset.header = dataset.blocks.at(0).cloneEmpty();
+
+    auto native_blocks_res = RunNativeAggregator(dataset);
+    ASSERT_TRUE(native_blocks_res.ok()) << native_blocks_res.status().ToString();
+    auto tiforth_blocks_res = RunTiForthArrowHashAgg(dataset);
+    ASSERT_TRUE(tiforth_blocks_res.ok()) << tiforth_blocks_res.status().ToString();
+
+    const auto & native_blocks = native_blocks_res.ValueOrDie();
+    const auto & tiforth_blocks = tiforth_blocks_res.ValueOrDie();
+    const auto type_st = CompareOutputTypes(
+        native_blocks,
+        tiforth_blocks,
+        /*column_names=*/{"cnt_all", "cnt_v", "sum_v", "min_v", "max_v", "avg_v", "k"});
+    ASSERT_TRUE(type_st.ok()) << type_st.ToString();
+
+    const std::vector<std::string_view> key_names = {"k"};
+    const auto expected_res = Canonicalize(native_blocks, key_names);
+    ASSERT_TRUE(expected_res.ok()) << expected_res.status().ToString();
+    const auto actual_res = Canonicalize(tiforth_blocks, key_names);
+    ASSERT_TRUE(actual_res.ok()) << actual_res.status().ToString();
+
+    ParityConfig cfg;
+    cfg.value_type = ValueType::kFloat64;
+    const auto st = CompareCanonical(expected_res.ValueOrDie(), actual_res.ValueOrDie(), cfg);
+    ASSERT_TRUE(st.ok()) << st.ToString();
+}
+
+TEST(TiForthArrowHashAggParityTest, Int64Overflow)
+{
+    auto k_col = ColumnInt32::create();
+    auto v_col = ColumnInt64::create();
+
+    const auto push = [&](Int32 k, Int64 v) {
+        k_col->insert(Field(static_cast<Int64>(k)));
+        v_col->insert(Field(v));
+    };
+
+    push(0, std::numeric_limits<Int64>::max());
+    push(0, 1);
+    push(1, std::numeric_limits<Int64>::min());
+    push(1, -1);
+
+    Block block;
+    block.insert({std::move(k_col), std::make_shared<DataTypeInt32>(), "k"});
+    block.insert({std::move(v_col), std::make_shared<DataTypeInt64>(), "v"});
+    Dataset dataset;
+    dataset.blocks = {std::move(block)};
+    dataset.header = dataset.blocks.at(0).cloneEmpty();
+
+    auto native_blocks_res = RunNativeAggregator(dataset);
+    ASSERT_TRUE(native_blocks_res.ok()) << native_blocks_res.status().ToString();
+    auto tiforth_blocks_res = RunTiForthArrowHashAgg(dataset);
+    ASSERT_TRUE(tiforth_blocks_res.ok()) << tiforth_blocks_res.status().ToString();
+
+    const auto & native_blocks = native_blocks_res.ValueOrDie();
+    const auto & tiforth_blocks = tiforth_blocks_res.ValueOrDie();
+    const auto type_st = CompareOutputTypes(
+        native_blocks,
+        tiforth_blocks,
+        /*column_names=*/{"cnt_all", "cnt_v", "sum_v", "min_v", "max_v", "avg_v", "k"});
+    ASSERT_TRUE(type_st.ok()) << type_st.ToString();
+
+    const std::vector<std::string_view> key_names = {"k"};
+    const auto expected_res = Canonicalize(native_blocks, key_names);
+    ASSERT_TRUE(expected_res.ok()) << expected_res.status().ToString();
+    const auto actual_res = Canonicalize(tiforth_blocks, key_names);
+    ASSERT_TRUE(actual_res.ok()) << actual_res.status().ToString();
+
+    ParityConfig cfg;
+    cfg.value_type = ValueType::kInt64;
+    const auto st = CompareCanonical(expected_res.ValueOrDie(), actual_res.ValueOrDie(), cfg);
+    ASSERT_TRUE(st.ok()) << st.ToString();
 }
 
 } // namespace

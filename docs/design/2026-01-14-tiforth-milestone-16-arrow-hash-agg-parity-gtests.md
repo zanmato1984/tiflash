@@ -30,6 +30,8 @@ Arrow grouped kernels can differ subtly in:
 - output type selection (e.g. sum type widening)
 
 MS16 creates a test suite that makes these differences explicit and prevents accidental drift as TiForth evolves.
+As a direct outcome, TiForth now overrides selected Arrow grouped `hash_*` aggregates (via its function registry) to
+match TiFlash semantics where Arrow defaults differ.
 
 ## Goals
 
@@ -69,7 +71,9 @@ For each test case:
   - optional: binary string keys (`String`) with binary collation only
   - multi-key combos (e.g. `Int32 + Int64`)
 - **Value types**:
-  - `Int64`, `Float64`
+  - `Int32`, `Int64`, `UInt64`
+  - `Float32`, `Float64`
+  - `Decimal(20,2)`
 - **Distributions** (reuse `bench_dbms` shapes where possible):
   - single group
   - uniform low cardinality (e.g. 16 groups)
@@ -110,4 +114,11 @@ As divergences are found, either:
 
 - Implemented parity test: `dbms/src/Flash/tests/gtest_tiforth_arrow_hash_agg_parity.cpp`.
 - Coverage includes: int32/int64 keys; int64/float64/decimal values; single/low-card/high-card/zipf distributions; null keys + null values (including an “all-null group” case to validate sum/min/max nullability).
+- Coverage includes: output type/nullability checks; int32/int64 keys; int32/int64/uint64/float32/float64/decimal values;
+  single/low-card/high-card/zipf distributions; null keys + null values (including an “all-null group” case); empty input;
+  multi-key group-by; special float corner cases (NaN/Inf and signed zero); and an explicit Int64 overflow case.
 - TiFlash can now enable this path in planner via `enable_tiforth_arrow_hash_agg` (collation-sensitive string GROUP BY still falls back to TiForth `HashAggTransformOp`).
+- Key mitigations implemented based on parity failures:
+  - `hash_count`/`hash_count_all`: override to UInt64 output (non-nullable) to match TiFlash `count` type contract.
+  - `hash_min`/`hash_max` (float): override float kernels to use `<`/`>` comparisons (order-sensitive) to match TiFlash
+    NaN and signed-zero semantics.

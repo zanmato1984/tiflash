@@ -17,6 +17,9 @@ This operator:
 
 - Reuses Arrow-compute native grouped **`hash_*`** aggregation kernels (e.g. `hash_sum`, `hash_count`, `hash_min`,
   `hash_max`, …) rather than implementing TiForth-owned aggregate math.
+- Drives kernels through the TiForth `Engine`’s **per-engine function registry**, so TiForth can override individual
+  grouped aggregates to match TiFlash semantics (e.g. `count` output type, float NaN/-0 min/max behavior, decimal
+  sum/avg output types) without forking the operator implementation.
 - Makes **grouper creation explicit** so TiForth can provide custom `arrow::compute::Grouper` implementations for:
   - collation-aware grouping (future), and
   - TiFlash-style short-string key optimizations (future).
@@ -147,6 +150,8 @@ TiFlash integration (optional in MS15; required for MS16):
   - no Acero `ExecPlan`; drive `HashAggregateKernel` state directly (`resize`/`consume`/`finalize`)
   - keys/agg args are TiForth expressions (compiled via `CompileExpr`), not restricted to field refs
   - output columns: aggregates first, then grouping keys; output is sliced into `kOutputBatchSize` batches
+  - output schema nullability derived from input schema (`count{,_all}` are non-nullable) to avoid accidental
+    Nullable-widening on the TiFlash Block boundary
   - `GrouperFactory` hook kept to allow future collation/short-string optimized groupers
 - Current limitations:
   - group-by without keys not implemented yet
