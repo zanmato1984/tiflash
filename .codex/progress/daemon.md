@@ -9,6 +9,10 @@
 
 # To Do
 
+- MS17: switch TiForth default HashAgg to ArrowHashAgg (non-Acero); rename current HashAgg to Legacy. Steps: (1) rename current `HashAggTransformOp` to `LegacyHashAggTransformOp` (and keep a temporary alias for migration); (2) promote `ArrowHashAggTransformOp` as the default hash agg op used by TiForth pipelines + TiFlash planner; (3) keep collation-sensitive string GROUP BY on legacy path until MS18; (4) update docs/tests accordingly. Design: `docs/design/2026-01-14-tiforth-milestone-17-default-arrow-hash-agg.md`.
+- MS18: add TiForth custom `arrow::compute::Grouper` optimized for small-string single-key grouping (port TiFlash approach). Steps: (1) define supported input Arrow types (Binary/String) + null semantics + key-size threshold; (2) implement `SmallStringSingleKeyGrouper` + `GrouperFactory` selection; (3) add unit tests + TiFlash parity tests for string/binary keys (binary semantics; collation out of scope); (4) wire as default grouper for single-key small strings. Design: `docs/design/2026-01-14-tiforth-milestone-18-small-string-single-key-grouper.md`.
+- MS19: benchmark new default ArrowHashAgg (with MS18 grouper) vs TiFlash native for small-string single-key GROUP BY; update benchmark report. Steps: (1) add `bench_dbms` benchmarks for small strings (vary length/cardinality/skew/nulls); (2) compare TiFlash native vs TiForth ArrowHashAgg vs TiForth LegacyHashAgg; (3) update `docs/design/2026-01-19-arrow-compute-agg-benchmark-report.md` with results + notes. Design: `docs/design/2026-01-14-tiforth-milestone-19-small-string-hash-agg-benchmarks.md`.
+
 # Completed
 
 - TiForth core + type contract (MS1-13, 2026-01-19): standalone `tiforth` library (Engine/Pipeline/Plan/Task + C ABI skeleton), Arrow logical-type metadata contract (decimal/MyTime/collations), core operators (projection/filter/hash agg/join/sort) with breaker plan semantics + blocked-state model, and optimized hash tables. Key decision: keep TiForth independent (no TiFlash assumptions) while matching Arrow coding style + rigid checks. Files: `libs/tiforth/*`, `docs/design/2026-01-14-tiforth.md`, `docs/design/2026-01-14-tiforth-milestone-*.md`.
