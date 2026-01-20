@@ -6,12 +6,14 @@
 #include <AggregateFunctions/registerAggregateFunctions.h>
 #include <Columns/ColumnDecimal.h>
 #include <Columns/ColumnNullable.h>
+#include <Columns/ColumnString.h>
 #include <Columns/ColumnsNumber.h>
 #include <Common/typeid_cast.h>
 #include <Common/FieldVisitors.h>
 #include <Core/Block.h>
 #include <DataTypes/DataTypeDecimal.h>
 #include <DataTypes/DataTypeNullable.h>
+#include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Debug/TiFlashTestEnv.h>
 #include <Interpreters/Aggregator.h>
@@ -52,6 +54,7 @@ using DecimalField128 = DecimalField<Decimal128>;
 enum class KeyType {
     kInt32,
     kInt64,
+    kString,
 };
 
 enum class ValueType {
@@ -388,8 +391,10 @@ DataTypePtr MakeKeyType(const ParityConfig & cfg) {
     DataTypePtr nested;
     if (cfg.key_type == KeyType::kInt32)
         nested = std::make_shared<DataTypeInt32>();
-    else
+    else if (cfg.key_type == KeyType::kInt64)
         nested = std::make_shared<DataTypeInt64>();
+    else
+        nested = std::make_shared<DataTypeString>();
     return cfg.null_keys ? makeNullable(nested) : nested;
 }
 
@@ -440,14 +445,18 @@ MutableColumnPtr MakeKeyColumn(const ParityConfig & cfg) {
     if (!cfg.null_keys) {
         if (cfg.key_type == KeyType::kInt32)
             return ColumnInt32::create();
-        return ColumnInt64::create();
+        if (cfg.key_type == KeyType::kInt64)
+            return ColumnInt64::create();
+        return ColumnString::create();
     }
 
     MutableColumnPtr nested;
     if (cfg.key_type == KeyType::kInt32)
         nested = ColumnInt32::create();
-    else
+    else if (cfg.key_type == KeyType::kInt64)
         nested = ColumnInt64::create();
+    else
+        nested = ColumnString::create();
     auto null_map = ColumnUInt8::create();
     return ColumnNullable::create(std::move(nested), std::move(null_map));
 }
@@ -520,9 +529,20 @@ Dataset MakeDataset(const ParityConfig & cfg) {
 
             const bool key_is_null = cfg.null_keys && (row % 37 == 0);
             if (cfg.key_type == KeyType::kInt32)
-                AppendNullable(key_col, key_is_null, Field(static_cast<Int64>(static_cast<Int32>(key_id))));
-            else
+            {
+                AppendNullable(
+                    key_col,
+                    key_is_null,
+                    Field(static_cast<Int64>(static_cast<Int32>(key_id))));
+            }
+            else if (cfg.key_type == KeyType::kInt64)
+            {
                 AppendNullable(key_col, key_is_null, Field(static_cast<Int64>(key_id)));
+            }
+            else
+            {
+                AppendNullable(key_col, key_is_null, Field(std::string("k") + std::to_string(key_id)));
+            }
 
             const bool value_is_null =
                 cfg.null_values
@@ -804,8 +824,13 @@ TEST(TiForthArrowHashAggParityTest, NativeVsArrowHashAggMatrix)
         {"i64_u64_zipf_no_null", KeyType::kInt64, ValueType::kUInt64, KeyDist::kZipfSkew, 8192, 512, 128, false, false, false},
         {"i32_f32_low_no_null", KeyType::kInt32, ValueType::kFloat32, KeyDist::kUniformLowCard, 4096, 512, 16, false, false, false},
 
+        // String keys (binary semantics; collation out of scope).
+        {"s_i64_low_nulls", KeyType::kString, ValueType::kInt64, KeyDist::kUniformLowCard, 8192, 512, 16, true, true, true},
+        {"s_i64_high_no_null", KeyType::kString, ValueType::kInt64, KeyDist::kUniformHighCard, 4096, 512, 0, false, false, false},
+
         // Empty input (group-by should return empty output).
         {"i32_i64_empty", KeyType::kInt32, ValueType::kInt64, KeyDist::kUniformLowCard, 0, 512, 16, false, false, false},
+        {"s_i64_empty", KeyType::kString, ValueType::kInt64, KeyDist::kUniformLowCard, 0, 512, 16, false, false, false},
     };
 
     for (const auto & cfg : cases) {

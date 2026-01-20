@@ -1,8 +1,8 @@
 # TiForth MS18: Custom Grouper For Small-String Single-Key GROUP BY
 
 - Author(s): zanmato
-- Last Updated: 2026-01-20
-- Status: Planned
+- Last Updated: 2026-01-21
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-15-arrow-hash-agg-operator.md`
 - Discussion PR: TBD
@@ -58,20 +58,17 @@ TiForth itself may also see `utf8` keys from tests or other callers.
 
 The custom grouper should support:
 
-- `arrow::binary()` and `arrow::utf8()` (and potentially their Large* variants if present later).
+- `arrow::binary()` and `arrow::utf8()` (Large* variants can be added later if needed).
 
 ### Key representation + hashing strategy
 
-Proposed approach:
+Implemented approach:
 
 - For keys with length `<= kInlineBytes`:
   - store bytes inline in a fixed-size key slot (`kInlineBytes` + length tag),
   - hash on the inlined bytes (fast, no heap traffic).
 - For longer keys:
-  - either (A) fall back to Arrow default `Grouper`, or
-  - (B) store an owned copy in an arena buffer and hash on the bytes.
-
-Start with (A) for risk control; switch to (B) if benchmarks show long keys still matter.
+  - store an owned copy in an arena buffer and hash/compare on the bytes (still correct, but not the optimized path).
 
 ### Hash table
 
@@ -91,10 +88,10 @@ TiForth should use `ARROW_DCHECK/ARROW_CHECK` liberally to keep invariants rigid
 
 MS18 wires:
 
-- a default `GrouperFactory` that chooses `SmallStringSingleKeyGrouper` when:
+- a default grouper selection that chooses `SmallStringSingleKeyGrouper` when:
   - `keys.size() == 1`
   - key type is binary/utf8
-  - observed key sizes are within threshold (or “always try, fallback on first oversized key”)
+  - (inline threshold is handled internally; longer keys are stored in the arena)
 
 ### Output uniques
 
@@ -105,13 +102,11 @@ Null group should be emitted as a null slot in the output unique array.
 
 ## Implementation Plan (Checklist)
 
-- [ ] Identify TiFlash “small string key” aggregation method and document the exact algorithm/thresholds being ported.
-- [ ] Implement `SmallStringSingleKeyGrouper : public arrow::compute::Grouper`.
-- [ ] Add a `GrouperFactory` selector utility in TiForth (keep it independent and testable).
-- [ ] Add unit tests:
-  - [ ] correctness: multiple batches, nulls, duplicates, high-cardinality
-  - [ ] corner: empty input, mixed small/oversized keys (ensure fallback behavior is well-defined)
-- [ ] Add/extend TiFlash parity gtests to include small binary/string keys (binary semantics).
+- [x] Identify TiFlash “small string key” aggregation method and port the core approach (open addressing + inline bytes).
+- [x] Implement `SmallStringSingleKeyGrouper : public arrow::compute::Grouper`.
+- [x] Wire as the default grouper for single-key binary/string grouping in `ArrowHashAggTransformOp`.
+- [x] Add unit tests (multiple batches, nulls, duplicates, high-cardinality, reset).
+- [x] Extend TiFlash parity gtests to include string/binary keys (binary semantics; collation out of scope).
 
 ## Validation
 
@@ -123,4 +118,3 @@ Null group should be emitted as a null slot in the output unique array.
 
 - Collation: long-term plan is “group by sort keys + keep original string via payload/first_row”; MS18 is binary-only.
 - This grouper is explicitly a “single-key fast path”; multi-key string grouping can come later.
-

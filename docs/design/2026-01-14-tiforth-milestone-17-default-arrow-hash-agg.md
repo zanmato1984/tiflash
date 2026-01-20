@@ -1,8 +1,8 @@
 # TiForth MS17: Make ArrowHashAgg The Default HashAgg (Rename Legacy HashAgg)
 
 - Author(s): zanmato
-- Last Updated: 2026-01-20
-- Status: Planned
+- Last Updated: 2026-01-21
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-15-arrow-hash-agg-operator.md`
 - Discussion PR: TBD
@@ -52,20 +52,15 @@ To keep TiForth moving toward “Arrow-native compute library”, the Arrow-base
 
 ### Naming / API surface
 
-Proposed naming:
+Implemented naming:
 
 - `ArrowHashAggTransformOp`: stays as-is (it’s the implementation).
-- Rename current TiFlash-port `HashAggTransformOp` to `LegacyHashAggTransformOp`.
-- Add a TiForth-level “default selection” alias/helper:
-  - either a type alias `using HashAggTransformOp = ArrowHashAggTransformOp;` (temporary migration), or
-  - a factory helper `MakeDefaultHashAggTransformOp(...)` returning an `ArrowHashAggTransformOp` by default.
-
-Preference: **factory helper** over type alias to avoid confusing symbol meaning and to keep both implementations
-available by name in the public API.
+- Rename TiFlash-port `HashAggTransformOp` to `LegacyHashAggTransformOp`.
+- Keep `HashAggTransformOp` as a temporary alias to `LegacyHashAggTransformOp` for migration/compat.
 
 ### Default selection rules (host-independent)
 
-In TiForth (library):
+In TiForth (library), the “default” is by convention:
 
 - Default hash agg operator: `ArrowHashAggTransformOp`.
 - Fallback to `LegacyHashAggTransformOp` when:
@@ -75,8 +70,7 @@ In TiForth (library):
 
 In TiFlash integration (planner):
 
-- Keep the existing `enable_tiforth_arrow_hash_agg` / `enable_tiforth_arrow_compute_agg` toggles, but consider flipping
-  the default selection to ArrowHashAgg once MS17 lands.
+- ArrowHashAgg is selected as the default TiForth hash-agg implementation when TiForth aggregation is enabled.
 - Keep collation-sensitive grouping on legacy until MS18+ collation pipeline exists.
 
 ### Tests / parity guardrails
@@ -88,17 +82,15 @@ In TiFlash integration (planner):
 
 TiForth:
 
-- [ ] Rename `HashAggTransformOp` -> `LegacyHashAggTransformOp` (headers, impl, tests, build files).
-- [ ] Introduce a stable default-selection factory/helper (and avoid breaking external names when possible).
-- [ ] Make default pipeline builder helpers choose ArrowHashAgg by default.
-- [ ] Ensure ArrowHashAgg output schema and function registry overrides stay intact.
+- [x] Rename `HashAggTransformOp` -> `LegacyHashAggTransformOp` (headers, impl, tests, build files).
+- [x] Keep `HashAggTransformOp` as a temporary alias for migration.
+- [x] Ensure ArrowHashAgg output schema and function registry overrides stay intact.
 
 TiFlash:
 
-- [ ] Update planner/operator selection logic to treat ArrowHashAgg as the default TiForth hash agg implementation
-  (still respecting explicit settings).
-- [ ] Preserve existing fallback behavior for collation-sensitive GROUP BY.
-- [ ] Update docs and any references to “HashAggTransformOp” to clarify legacy vs default.
+- [x] Update planner/operator selection logic to treat ArrowHashAgg as the default TiForth hash agg implementation.
+- [x] Preserve existing fallback behavior for collation-sensitive GROUP BY.
+- [x] Update docs/tests and references to clarify legacy vs default.
 
 ## Validation
 
@@ -108,6 +100,4 @@ TiFlash:
 
 ## Notes / Open Questions
 
-- API compatibility strategy: keep old name as an alias for one release vs immediate rename.
-- Whether TiFlash should flip the default immediately or behind a setting rollout.
-
+- API compatibility: keep `HashAggTransformOp` as an alias to legacy for one migration window.

@@ -351,7 +351,7 @@ try
 
         return builder->AppendTransform(
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+              return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
             });
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
@@ -401,7 +401,7 @@ try
               if (use_arrow_compute) {
                 return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs);
               }
-              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+              return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
             });
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
@@ -503,7 +503,7 @@ try
 
         return builder->AppendTransform(
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+              return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
             });
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
@@ -614,7 +614,7 @@ try
 
         return builder->AppendTransform(
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+              return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
             });
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
@@ -705,7 +705,7 @@ try
 
         return builder->AppendTransform(
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+              return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
             });
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
@@ -742,7 +742,7 @@ try
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
         return builder->AppendTransform(
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+              return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
             });
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
@@ -839,7 +839,7 @@ try
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(2)});
         return builder->AppendTransform(
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+              return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
             });
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
@@ -876,7 +876,7 @@ try
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
         return builder->AppendTransform(
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+              return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
             });
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
@@ -914,7 +914,7 @@ try
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
         return builder->AppendTransform(
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+              return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
             });
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
@@ -962,7 +962,7 @@ try
 
         return builder->AppendTransform(
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+              return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
             });
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
@@ -1081,7 +1081,7 @@ try
 
         return builder->AppendTransform(
             [engine, keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-              return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+              return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
             });
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();

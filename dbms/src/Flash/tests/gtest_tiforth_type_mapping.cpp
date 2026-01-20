@@ -165,7 +165,7 @@ arrow::Status RunTypeMappingAndOps() {
     std::vector<std::function<arrow::Result<tiforth::TransformOpPtr>(const tiforth::Engine*)>>
         transforms;
     transforms.push_back([keys, aggs](const tiforth::Engine* engine) -> arrow::Result<tiforth::TransformOpPtr> {
-      return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+      return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
     });
     ARROW_ASSIGN_OR_RAISE(auto outputs, RunPipeline(input, std::move(transforms)));
     if (outputs.size() != 1) {
@@ -201,7 +201,7 @@ arrow::Status RunTypeMappingAndOps() {
     std::vector<std::function<arrow::Result<tiforth::TransformOpPtr>(const tiforth::Engine*)>>
         transforms;
     transforms.push_back([keys, aggs](const tiforth::Engine* engine) -> arrow::Result<tiforth::TransformOpPtr> {
-      return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+      return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
     });
     ARROW_ASSIGN_OR_RAISE(auto outputs, RunPipeline(input, std::move(transforms)));
     if (outputs.size() != 1) {
@@ -237,7 +237,7 @@ arrow::Status RunTypeMappingAndOps() {
     std::vector<std::function<arrow::Result<tiforth::TransformOpPtr>(const tiforth::Engine*)>>
         transforms;
     transforms.push_back([keys, aggs](const tiforth::Engine* engine) -> arrow::Result<tiforth::TransformOpPtr> {
-      return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+      return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
     });
     ARROW_ASSIGN_OR_RAISE(auto outputs, RunPipeline(input, std::move(transforms)));
     if (outputs.size() != 1) {

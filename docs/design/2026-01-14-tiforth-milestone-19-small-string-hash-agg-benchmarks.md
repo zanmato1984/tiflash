@@ -1,8 +1,8 @@
 # TiForth MS19: Benchmark Small-String Single-Key HashAgg (ArrowHashAgg vs TiFlash Native)
 
 - Author(s): zanmato
-- Last Updated: 2026-01-20
-- Status: Planned
+- Last Updated: 2026-01-21
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-18-small-string-single-key-grouper.md`
 - Discussion PR: TBD
@@ -74,16 +74,12 @@ Values:
 
 ## Implementation Plan (Checklist)
 
-- [ ] Add new `bench_dbms` benchmark cases for small-string single-key grouping.
-- [ ] Ensure selection toggles exist to force:
-  - TiForth default (ArrowHashAgg)
-  - TiForth legacy
-  - TiFlash native
-- [ ] Run benchmark matrix and capture results.
-- [ ] Update `docs/design/2026-01-19-arrow-compute-agg-benchmark-report.md` with:
-  - new section “Small-string single-key GROUP BY”
+- [x] Add new `bench_dbms` benchmark cases for small-string single-key grouping (`dbms/src/Flash/tests/bench_tiforth_arrow_hash_agg_small_string.cpp`).
+- [x] Compare TiFlash native vs TiForth ArrowHashAgg vs TiForth legacy HashAgg (explicit operators in the benchmark).
+- [x] Run benchmark matrix and capture results.
+- [x] Update `docs/design/2026-01-19-arrow-compute-agg-benchmark-report.md` with:
+  - new section “Small-string single-key GROUP BY (ArrowHashAgg)”
   - raw numbers + key takeaways
-  - decision on default selection + known limitations
 
 ## Validation / Repro
 
@@ -94,4 +90,3 @@ Values:
 
 - The benchmark should treat strings as **binary semantics** (collation out of scope).
 - If results are mixed, keep ArrowHashAgg default behind a setting until confidence is higher.
-

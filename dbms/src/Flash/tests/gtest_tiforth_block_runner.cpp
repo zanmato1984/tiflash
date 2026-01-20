@@ -556,7 +556,7 @@ arrow::Status RunTwoKeyHashAggOnBlocks() {
 
   ARROW_RETURN_NOT_OK(builder->AppendTransform([engine_ptr = engine.get(), keys,
                                                 aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-    return std::make_unique<tiforth::HashAggTransformOp>(engine_ptr, keys, aggs);
+    return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine_ptr, keys, aggs);
   }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
@@ -670,7 +670,7 @@ arrow::Status RunGeneralCiHashAggOnBlocks() {
 
   ARROW_RETURN_NOT_OK(builder->AppendTransform([engine_ptr = engine.get(), keys,
                                                 aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-    return std::make_unique<tiforth::HashAggTransformOp>(engine_ptr, keys, aggs);
+    return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine_ptr, keys, aggs);
   }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());

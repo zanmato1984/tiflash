@@ -180,8 +180,10 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
         && !aggregation_keys.empty()
         && (!has_string_key || allow_arrow_compute_string_keys);
     const bool use_arrow_compute_string_keys = use_arrow_compute && has_string_key;
-    const bool use_arrow_hash_agg = !use_arrow_compute && context.getSettingsRef().enable_tiforth_arrow_hash_agg
-        && !aggregation_keys.empty() && (!has_string_key || allow_binary_string_keys);
+    // MS17: make ArrowHashAgg the default TiForth HashAgg for non-string keys.
+    // MS18: enable ArrowHashAgg for single-key binary string grouping when collation is not required.
+    const bool use_arrow_hash_agg = !use_arrow_compute && !aggregation_keys.empty()
+        && (!has_string_key || (allow_binary_string_keys && aggregation_keys.size() == 1));
 
     size_t max_threads = static_cast<size_t>(context.getSettingsRef().max_threads);
     if (max_threads == 0)
@@ -213,7 +215,7 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
             }
             if (use_arrow_hash_agg)
                 return std::make_unique<tiforth::ArrowHashAggTransformOp>(engine, keys, aggs);
-            return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+            return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
         });
     if (!append_status.ok())
         return std::nullopt;

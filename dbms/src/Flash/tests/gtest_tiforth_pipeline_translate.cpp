@@ -20,6 +20,7 @@
 #include "tiforth/engine.h"
 #include "tiforth/expr.h"
 #include "tiforth/operators/arrow_compute_agg.h"
+#include "tiforth/operators/arrow_hash_agg.h"
 #include "tiforth/operators/filter.h"
 #include "tiforth/operators/hash_agg.h"
 #include "tiforth/operators/hash_join.h"
@@ -293,7 +294,7 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag, cons
             if (use_arrow_compute_agg) {
               return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs);
             }
-            return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
+            return std::make_unique<tiforth::ArrowHashAggTransformOp>(engine, keys, aggs);
           }));
       continue;
     }

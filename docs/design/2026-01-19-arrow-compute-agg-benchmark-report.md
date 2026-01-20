@@ -72,3 +72,58 @@ Notes:
 - For string keys, TiForth with plain `BinaryArray` keys is ~2-3x slower than Native in these runs.
 - Switching string keys to a **shared-dictionary** `DictionaryArray` makes TiForth significantly faster than Native.
 - `TiForthStableDictKey` currently does not help: key encoding (`dictionary_encode` + unification + remap) dominates, so end-to-end is slower than both TiForth(raw) and Native for these cases.
+
+## Small-string single-key GROUP BY (ArrowHashAgg)
+
+This section summarizes `dbms/bench_dbms` benchmarks comparing:
+
+- **NativeAgg**: TiFlash `DB::Aggregator` (spill disabled, `concurrency=1`)
+- **ArrowHashAgg**: TiForth `tiforth::ArrowHashAggTransformOp` (Arrow Grouper + grouped `hash_*` kernels; no Acero)
+- **HashAgg**: TiForth legacy `tiforth::LegacyHashAggTransformOp` (TiFlash-port semantics anchor)
+
+### How to reproduce
+
+```bash
+ninja -C cmake-build-release bench_dbms
+cmake-build-release/dbms/bench_dbms --benchmark_filter='^(ArrowHashAgg|HashAgg|NativeAgg)/SmallStringSingleKey/.*' --benchmark_min_time=0.2
+```
+
+### Benchmark configuration
+
+- Source: `dbms/src/Flash/tests/bench_tiforth_arrow_hash_agg_small_string.cpp`
+- Query shape: `GROUP BY k` with aggregates:
+  - `count_all()`
+  - `count(v)`
+  - `sum(v)`
+- Input sizes:
+  - default: `rows=1<<18` (262144), `rows_per_block=1<<13` (8192)
+  - high-card case: `rows=1<<17` (131072)
+- Key distributions:
+  - `uniform_low`: `key_id = row % groups`
+  - `uniform_high`: unique key per row (`key_id = row`)
+  - `zipf`: Zipf(n=`groups`, s=1.1)
+- Notes:
+  - Block→Arrow conversion for TiForth (`TiForth::toArrowRecordBatch`) is done once per dataset, outside the timed loop.
+  - String semantics are **binary** (no collation).
+
+### Results (items/s)
+
+`items/s` counts **input rows processed** per second (Google Benchmark `items_per_second`). Values below are in **M rows/s**.
+
+| Case | NativeAgg (M/s) | ArrowHashAgg (M/s) | Arrow/Native | HashAgg (M/s) | HashAgg/Native |
+|---|---:|---:|---:|---:|---:|
+| `len4_uniform_low_rows262144_blk8192_groups16_nullk0_nullv0` | 148.5 | 95.4 | 0.64x | 39.1 | 0.26x |
+| `len8_uniform_low_rows262144_blk8192_groups16_nullk0_nullv0` | 138.0 | 85.4 | 0.62x | 40.8 | 0.30x |
+| `len16_uniform_low_rows262144_blk8192_groups256_nullk0_nullv0` | 135.3 | 78.3 | 0.58x | 45.2 | 0.33x |
+| `len24_uniform_low_rows262144_blk8192_groups256_nullk0_nullv0` | 139.3 | 69.5 | 0.50x | 41.1 | 0.30x |
+| `len8_zipf_rows262144_blk8192_groups128_nullk0_nullv0` | 105.9 | 75.9 | 0.72x | 45.7 | 0.43x |
+| `len16_zipf_rows262144_blk8192_groups256_nullk0_nullv0` | 102.9 | 91.0 | 0.88x | 50.5 | 0.49x |
+| `len8_uniform_low_rows262144_blk8192_groups16_nullk1_nullv1` | 60.6 | 87.4 | 1.44x | 42.4 | 0.70x |
+| `len24_zipf_rows262144_blk8192_groups256_nullk1_nullv1` | 56.3 | 80.7 | 1.43x | 47.5 | 0.84x |
+| `len8_uniform_high_rows131072_blk8192_groups0_nullk0_nullv0` | 16.1 | 15.9 | 0.99x | 4.1 | 0.25x |
+
+### Notes
+
+- ArrowHashAgg is consistently faster than legacy HashAgg on string keys in this suite (2–4x vs HashAgg).
+- ArrowHashAgg is still below TiFlash native on the no-null uniform cases (0.5–0.7x), but close to parity on the high-cardinality case (~0.99x).
+- With null keys/values enabled, ArrowHashAgg exceeds native in these runs (1.4–1.6x).
