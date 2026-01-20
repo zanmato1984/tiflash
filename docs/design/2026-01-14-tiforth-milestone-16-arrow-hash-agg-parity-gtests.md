@@ -110,3 +110,4 @@ As divergences are found, either:
 
 - Implemented parity test: `dbms/src/Flash/tests/gtest_tiforth_arrow_hash_agg_parity.cpp`.
 - Coverage includes: int32/int64 keys; int64/float64/decimal values; single/low-card/high-card/zipf distributions; null keys + null values (including an “all-null group” case to validate sum/min/max nullability).
+- TiFlash can now enable this path in planner via `enable_tiforth_arrow_hash_agg` (collation-sensitive string GROUP BY still falls back to TiForth `HashAggTransformOp`).

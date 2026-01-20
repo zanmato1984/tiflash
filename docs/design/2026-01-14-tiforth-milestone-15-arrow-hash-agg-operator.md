@@ -128,6 +128,12 @@ TiFlash integration (optional in MS15; required for MS16):
 
 - Add a switch to select which TiForth hash agg implementation to use:
   - `HashAggTransformOp` vs `ArrowHashAggTransformOp` vs `ArrowComputeAggTransformOp`.
+- [x] Implemented as TiFlash settings:
+  - `enable_tiforth_arrow_compute_agg`: use `ArrowComputeAggTransformOp` (Acero, baseline)
+  - `enable_tiforth_arrow_hash_agg`: use `ArrowHashAggTransformOp` (no Acero)
+  - default: `HashAggTransformOp`
+  - precedence: `enable_tiforth_arrow_compute_agg` wins if both are enabled
+  - string keys: both Arrow-backed modes are binary semantics only; collation-sensitive GROUP BY falls back to `HashAggTransformOp`
 
 ## Validation
 
@@ -145,3 +151,4 @@ TiFlash integration (optional in MS15; required for MS16):
 - Current limitations:
   - group-by without keys not implemented yet
   - only a small set of grouped functions mapped (`hash_{count_all,count,sum,mean,min,max}`)
+  - TiFlash planner switch lives in `dbms/src/Flash/Planner/Plans/PhysicalAggregation.cpp` via `enable_tiforth_arrow_hash_agg`

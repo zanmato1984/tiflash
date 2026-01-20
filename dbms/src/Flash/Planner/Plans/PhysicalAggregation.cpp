@@ -48,6 +48,7 @@
 #include "tiforth/engine.h"
 #include "tiforth/expr.h"
 #include "tiforth/operators/arrow_compute_agg.h"
+#include "tiforth/operators/arrow_hash_agg.h"
 #include "tiforth/operators/hash_agg.h"
 #include "tiforth/pipeline.h"
 #endif // defined(TIFLASH_ENABLE_TIFORTH)
@@ -82,8 +83,9 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
 {
     if (!context.getSettingsRef().enable_tiforth_executor)
         return std::nullopt;
-    const bool allow_tiforth_agg
-        = context.getSettingsRef().enable_tiforth_translate_dag || context.getSettingsRef().enable_tiforth_arrow_compute_agg;
+    const bool allow_tiforth_agg = context.getSettingsRef().enable_tiforth_translate_dag
+        || context.getSettingsRef().enable_tiforth_arrow_compute_agg
+        || context.getSettingsRef().enable_tiforth_arrow_hash_agg;
     if (!allow_tiforth_agg)
         return std::nullopt;
     if (expr_after_agg == nullptr)
@@ -169,13 +171,17 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
     }
 
     const bool has_string_key = containsStringGroupKeys(before_agg_header, aggregation_keys);
+    const bool collation_sensitive = AggregationInterpreterHelper::isGroupByCollationSensitive(context);
+    const bool allow_binary_string_keys = !collation_sensitive;
     const bool allow_arrow_compute_string_keys
         = context.getSettingsRef().enable_tiforth_arrow_compute_agg_string_keys
-        && !AggregationInterpreterHelper::isGroupByCollationSensitive(context);
+        && allow_binary_string_keys;
     const bool use_arrow_compute = context.getSettingsRef().enable_tiforth_arrow_compute_agg
         && !aggregation_keys.empty()
         && (!has_string_key || allow_arrow_compute_string_keys);
     const bool use_arrow_compute_string_keys = use_arrow_compute && has_string_key;
+    const bool use_arrow_hash_agg = !use_arrow_compute && context.getSettingsRef().enable_tiforth_arrow_hash_agg
+        && !aggregation_keys.empty() && (!has_string_key || allow_binary_string_keys);
 
     size_t max_threads = static_cast<size_t>(context.getSettingsRef().max_threads);
     if (max_threads == 0)
@@ -193,14 +199,20 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
             context.getSettingsRef().max_buffered_bytes_in_executor,
             log->identifier());
 
-    auto append_status = builder->AppendTransform(
-        [engine = engine.get(), keys, aggs, use_arrow_compute, use_arrow_compute_string_keys]() -> arrow::Result<tiforth::TransformOpPtr> {
+    auto append_status = builder->AppendTransform([engine = engine.get(),
+                                                   keys,
+                                                   aggs,
+                                                   use_arrow_compute,
+                                                   use_arrow_compute_string_keys,
+                                                   use_arrow_hash_agg]() -> arrow::Result<tiforth::TransformOpPtr> {
             if (use_arrow_compute)
             {
                 tiforth::ArrowComputeAggOptions options;
                 options.stable_dictionary_encode_binary_keys = use_arrow_compute_string_keys;
                 return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs, options);
             }
+            if (use_arrow_hash_agg)
+                return std::make_unique<tiforth::ArrowHashAggTransformOp>(engine, keys, aggs);
             return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
         });
     if (!append_status.ok())
@@ -214,6 +226,8 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
     {
         if (use_arrow_compute_string_keys)
             LOG_DEBUG(log, "TiForthAgg: string group keys detected, using ArrowComputeAgg stable dictionary mode");
+        else if (use_arrow_hash_agg)
+            LOG_DEBUG(log, "TiForthAgg: string group keys detected, using ArrowHashAgg (binary semantics)");
         else
             LOG_DEBUG(log, "TiForthAgg: string group keys detected, fallback to TiForth HashAgg");
     }
