@@ -1,8 +1,8 @@
 # TiForth MS15: Arrow HashAgg Operator (Port Acero GroupByNode Into TiForth)
 
-- Author(s): TBD
-- Last Updated: 2026-01-19
-- Status: Planned
+- Author(s): zanmato
+- Last Updated: 2026-01-20
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-14-arrow-compute-aggregation.md`
 - Discussion PR: TBD
@@ -112,16 +112,17 @@ Future implementations can:
 
 TiForth:
 
-- Add `include/tiforth/operators/arrow_hash_agg.h` + `src/tiforth/operators/arrow_hash_agg.cc`.
-- Port minimal orchestration logic from Arrow Acero `GroupByNode`:
-  - group id production via `arrow::compute::Grouper`
-  - grouped kernel state init/resize/consume/finalize wiring
-- Keep `HashAggTransformOp` and `ArrowComputeAggTransformOp` unchanged.
-- Add unit tests:
-  - int key + numeric value (`count`, `sum`, `min`, `max`) across multiple batches
-  - multi-key group-by (fixed-width)
-  - string keys treated as binary (no collation), where supported
-  - compare results as sets (ignore group ordering)
+- [x] Add `include/tiforth/operators/arrow_hash_agg.h` + `src/tiforth/operators/arrow_hash_agg.cc`.
+- [x] Port minimal orchestration logic from Arrow Acero `GroupByNode`:
+  - [x] group id production via `arrow::compute::Grouper`
+  - [x] grouped kernel state init/resize/consume/finalize wiring
+- [x] Keep `HashAggTransformOp` and `ArrowComputeAggTransformOp` unchanged.
+- [x] Add unit tests:
+  - [x] int key + numeric value (`count_all`, `count`, `sum`, `min`, `max`, `mean`) across multiple batches
+  - [x] computed key + computed aggregate arg
+  - [x] multi-key group-by (fixed-width + string)
+  - [x] string keys treated as binary (no collation), where supported
+  - [x] compare results as sets (ignore group ordering)
 
 TiFlash integration (optional in MS15; required for MS16):
 
@@ -130,11 +131,17 @@ TiFlash integration (optional in MS15; required for MS16):
 
 ## Validation
 
-- `ninja -C cmake-build-debug gtests_dbms`
-- `ninja -C cmake-build-release gtests_dbms bench_dbms`
+- TiForth: `ctest --test-dir build-debug --output-on-failure`
+- TiFlash: `ninja -C cmake-build-debug gtests_dbms`, `gtests_dbms '--gtest_filter=TiForth*'`
 
 ## Status / Notes
 
-- MS15 introduces the “ported GroupByNode” TiForth operator and the grouper injection point.
-- MS16 adds extensive parity tests to confirm Arrow grouped kernels match TiFlash aggregation semantics for the
-  supported subset.
+- Implemented in TiForth `include/tiforth/operators/arrow_hash_agg.h` and `src/tiforth/operators/arrow_hash_agg.cc`.
+- Key decisions:
+  - no Acero `ExecPlan`; drive `HashAggregateKernel` state directly (`resize`/`consume`/`finalize`)
+  - keys/agg args are TiForth expressions (compiled via `CompileExpr`), not restricted to field refs
+  - output columns: aggregates first, then grouping keys; output is sliced into `kOutputBatchSize` batches
+  - `GrouperFactory` hook kept to allow future collation/short-string optimized groupers
+- Current limitations:
+  - group-by without keys not implemented yet
+  - only a small set of grouped functions mapped (`hash_{count_all,count,sum,mean,min,max}`)
