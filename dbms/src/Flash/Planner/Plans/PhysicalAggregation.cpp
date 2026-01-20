@@ -169,7 +169,13 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
     }
 
     const bool has_string_key = containsStringGroupKeys(before_agg_header, aggregation_keys);
-    const bool use_arrow_compute = context.getSettingsRef().enable_tiforth_arrow_compute_agg && !aggregation_keys.empty() && !has_string_key;
+    const bool allow_arrow_compute_string_keys
+        = context.getSettingsRef().enable_tiforth_arrow_compute_agg_string_keys
+        && !AggregationInterpreterHelper::isGroupByCollationSensitive(context);
+    const bool use_arrow_compute = context.getSettingsRef().enable_tiforth_arrow_compute_agg
+        && !aggregation_keys.empty()
+        && (!has_string_key || allow_arrow_compute_string_keys);
+    const bool use_arrow_compute_string_keys = use_arrow_compute && has_string_key;
 
     size_t max_threads = static_cast<size_t>(context.getSettingsRef().max_threads);
     if (max_threads == 0)
@@ -188,9 +194,13 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
             log->identifier());
 
     auto append_status = builder->AppendTransform(
-        [engine = engine.get(), keys, aggs, use_arrow_compute]() -> arrow::Result<tiforth::TransformOpPtr> {
+        [engine = engine.get(), keys, aggs, use_arrow_compute, use_arrow_compute_string_keys]() -> arrow::Result<tiforth::TransformOpPtr> {
             if (use_arrow_compute)
-                return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs);
+            {
+                tiforth::ArrowComputeAggOptions options;
+                options.stable_dictionary_encode_binary_keys = use_arrow_compute_string_keys;
+                return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs, options);
+            }
             return std::make_unique<tiforth::HashAggTransformOp>(engine, keys, aggs);
         });
     if (!append_status.ok())
@@ -201,7 +211,12 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
         return std::nullopt;
 
     if (has_string_key)
-        LOG_DEBUG(log, "TiForthAgg: string group keys detected, fallback to TiForth HashAgg");
+    {
+        if (use_arrow_compute_string_keys)
+            LOG_DEBUG(log, "TiForthAgg: string group keys detected, using ArrowComputeAgg stable dictionary mode");
+        else
+            LOG_DEBUG(log, "TiForthAgg: string group keys detected, fallback to TiForth HashAgg");
+    }
 
     return std::make_shared<DB::TiForth::TiForthAggBlockInputStream>(
         input_stream,

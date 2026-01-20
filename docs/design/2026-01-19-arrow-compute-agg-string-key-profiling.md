@@ -16,11 +16,12 @@ Benchmark context and raw throughput tables are in:
   - `DB::Aggregator::emplaceOrFindKey` + `DB::ColumnsHashing::KeyStringBatchHandlerBase::prepareNextBatchType`
 - **TiForthDictKey** removes most varbinary comparison work by turning keys into **int dictionary codes** (stable dictionary across batches), shifting time to:
   - `arrow::compute::SwissTable::*` + grouped aggregate update kernels
+- **TiForthStableDictKey** (TiForth `stable_dictionary_encode_binary_keys`) works around Arrow’s “unifying differing dictionaries” limitation by encoding varlen keys into stable `int32` codes (`dictionary_encode` + `DictionaryUnifier`) and decoding on output; in the current microbench it is still slower than raw keys because encoding dominates.
 
 Practical conclusion:
 
 - Arrow/Acero grouped aggregation is fast when keys are **fixed-width**, but raw `BinaryArray` keys incur substantial per-row varlen hash/compare overhead.
-- A shared-dictionary representation can eliminate the bottleneck, but Arrow currently cannot “unify differing dictionaries” across batches (so per-batch dictionary-encode is not viable for streaming).
+- A shared-dictionary representation can eliminate the bottleneck (`TiForthDictKey`), but Arrow/Acero cannot “unify differing dictionaries” across batches; TiForth’s stable-code workaround exists but is not a win (yet) for these string-key cases.
 
 ## Profiling method
 
@@ -189,11 +190,11 @@ Why dict keys help:
 
 Why per-batch dictionary-encode doesn’t work today:
 
-- Arrow/Acero currently errors on multi-batch input with differing dictionaries (`NotImplemented: Unifying differing dictionaries`), so streaming inputs where the dictionary grows/changes cannot simply `dictionary_encode` per batch.
+- Arrow/Acero currently errors on multi-batch input with differing dictionaries (`NotImplemented: Unifying differing dictionaries`), so streaming inputs where the dictionary grows/changes cannot simply feed per-batch `DictionaryArray` to `GroupByNode`.
+- TiForthStableDictKey works around this by converting per-batch dictionaries into stable `int32` codes and aggregating on the codes, but this adds extra encoding work (currently slower than raw varlen keys in `bench_dbms`).
 
 ## Follow-ups (actionable)
 
 - Short term (bench/prototype): keep `TiForthDictKey` as a proof that “fixed-width group keys are fast” and use it to isolate remaining overheads.
-- Medium term (TiForth operator): explore a **two-phase** mode for string keys:
-  - buffer input until a stable dictionary is built (or until reaching a threshold), then run Acero aggregate on dict keys; trade off memory/latency for throughput.
-- Long term (Arrow): upstream or track support for **dictionary unification** inside Grouper/GroupByNode so streamed `DictionaryArray` batches with differing dictionaries can be accepted efficiently.
+- Medium term (TiForth operator): keep default string-key fallback to TiForth `HashAggTransformOp`; only use Arrow/Acero when keys are already fixed-width (e.g. upstream dictionary/low-card encoding).
+- Long term (Arrow): upstream or track support for **dictionary unification** and/or “short-string → fixed-width key” fast paths inside Grouper/GroupByNode.

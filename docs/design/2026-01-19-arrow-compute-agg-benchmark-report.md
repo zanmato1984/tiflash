@@ -1,19 +1,20 @@
-# ArrowComputeAgg Bench Report (2026-01-19)
+# ArrowComputeAgg Bench Report (2026-01-20)
 
 This report summarizes `dbms/bench_dbms` `ArrowComputeAgg/*` benchmarks comparing:
 
 - **Native**: TiFlash `DB::Aggregator` (spill disabled, `concurrency=1`)
 - **TiForth**: `tiforth::ArrowComputeAggTransformOp` via Arrow Acero (`use_threads=true`)
 - **TiForthDictKey**: same as TiForth, but for **string keys** the key column is a `DictionaryArray` with a **shared dictionary** across all input batches
+- **TiForthStableDictKey**: same as TiForth, but enable `ArrowComputeAggOptions.stable_dictionary_encode_binary_keys` (varlen keys are encoded into stable `int32` codes via `dictionary_encode` + `DictionaryUnifier`, aggregated as fixed-width, then decoded on output)
 
 ## Environment
 
-- Git commit: `bf6d1659a4e29a95d841c9647a17f5b505428564` (branch `tiforth`)
+- Git describe: `v4.1.0-alpha-3798-g603cd4bc9b-dirty` (branch `tiforth`)
 - Build dir: `cmake-build-release` (`CMAKE_BUILD_TYPE=RELEASE`, `ENABLE_TIFORTH=ON`, `NO_WERROR=ON`)
 - OS: macOS 15.7.3 (Darwin 24.6.0, arm64)
 - CPU: Apple M1 Pro (`hw.ncpu=10`)
 - Compiler: Apple clang 17.0.0
-- Benchmark run time: `2026-01-19T17:29:30+08:00`
+- Benchmark run time: `2026-01-20T12:57:44+08:00`
 
 ## How to reproduce
 
@@ -51,25 +52,23 @@ Notes:
 
 | Case | Native (M/s) | TiForth (M/s) | TiForth/Native |
 |---|---:|---:|---:|
-| `kInt32_vInt64_single_rows1048576_blk65536_groups1` | 148.4 | 126.2 | 0.85x |
-| `kInt32_vInt64_uniform_low_rows1048576_blk65536_groups16` | 183.6 | 192.6 | 1.05x |
-| `kInt32_vInt64_uniform_high_rows1048576_blk65536_groups0` | 17.2 | 27.1 | 1.57x |
-| `kInt32_vInt64_zipf_rows1048576_blk65536_groups1024` | 168.0 | 200.9 | 1.20x |
-| `kInt64_vFloat64_uniform_low_rows1048576_blk65536_groups16` | 185.7 | 205.1 | 1.10x |
-| `kInt64_vFloat64_zipf_rows1048576_blk65536_groups1024` | 165.6 | 204.0 | 1.23x |
+| `kInt32_vInt64_single_rows1048576_blk65536_groups1` | 143.2 | 122.9 | 0.86x |
+| `kInt32_vInt64_uniform_low_rows1048576_blk65536_groups16` | 177.6 | 188.7 | 1.06x |
+| `kInt32_vInt64_uniform_high_rows1048576_blk65536_groups0` | 23.0 | 26.3 | 1.15x |
+| `kInt32_vInt64_zipf_rows1048576_blk65536_groups1024` | 162.4 | 193.1 | 1.19x |
+| `kInt64_vFloat64_uniform_low_rows1048576_blk65536_groups16` | 182.3 | 197.6 | 1.08x |
+| `kInt64_vFloat64_zipf_rows1048576_blk65536_groups1024` | 159.6 | 196.2 | 1.23x |
 
 ### String keys
 
-| Case | Native (M/s) | TiForth (M/s) | TiForth/Native | TiForthDictKey (M/s) | DictKey/Native |
-|---|---:|---:|---:|---:|---:|
-| `kString_vInt64_uniform_low_rows262144_blk65536_groups16` | 161.7 | 72.4 | 0.45x | 199.5 | 1.23x |
-| `kString_vInt64_zipf_rows262144_blk65536_groups1024` | 123.8 | 58.1 | 0.47x | 193.9 | 1.57x |
+| Case | Native (M/s) | TiForth (M/s) | TiForth/Native | TiForthDictKey (M/s) | DictKey/Native | TiForthStableDictKey (M/s) | StableDictKey/Native |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `kString_vInt64_uniform_low_rows262144_blk65536_groups16` | 155.4 | 69.3 | 0.45x | 192.6 | 1.24x | 46.4 | 0.30x |
+| `kString_vInt64_zipf_rows262144_blk65536_groups1024` | 119.7 | 56.5 | 0.47x | 186.4 | 1.56x | 41.7 | 0.35x |
 
 ## Observations / notes
 
 - For numeric keys, TiForth/Acero is generally faster on higher-cardinality and skewed distributions, but slower on the single-group case (likely overhead/parallelism tradeoff).
-- For string keys, TiForth with plain `BinaryArray` keys is ~2x slower than Native in these runs.
+- For string keys, TiForth with plain `BinaryArray` keys is ~2-3x slower than Native in these runs.
 - Switching string keys to a **shared-dictionary** `DictionaryArray` makes TiForth significantly faster than Native.
-  - Arrow/Acero currently fails when input batches carry **different** dictionaries (`NotImplemented: Unifying differing dictionaries`), so per-batch `dictionary_encode` is not a viable workaround for streaming inputs.
-  - Any production use of dictionary keys must ensure a **stable dictionary** across batches (or add an explicit unification step before aggregation).
-
+- `TiForthStableDictKey` currently does not help: key encoding (`dictionary_encode` + unification + remap) dominates, so end-to-end is slower than both TiForth(raw) and Native for these cases.

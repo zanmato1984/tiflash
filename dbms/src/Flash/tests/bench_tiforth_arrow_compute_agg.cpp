@@ -572,6 +572,75 @@ void RunTiForthArrowComputeAggDictKey(const BenchConfig & cfg, benchmark::State 
     state.SetItemsProcessed(static_cast<int64_t>(cfg.num_rows) * state.iterations());
 }
 
+void RunTiForthArrowComputeAggStableDictKey(const BenchConfig & cfg, benchmark::State & state) {
+    ARROW_CHECK(cfg.key_type == KeyType::kString);
+    const auto dataset = GetOrCreateDataset(cfg);
+
+    auto maybe_engine = tiforth::Engine::Create(tiforth::EngineOptions{});
+    ARROW_CHECK_OK(maybe_engine.status());
+    auto engine = std::move(maybe_engine).ValueUnsafe();
+
+    tiforth::ArrowComputeAggOptions options;
+    options.stable_dictionary_encode_binary_keys = true;
+
+    std::unique_ptr<tiforth::Pipeline> pipeline;
+    {
+        auto maybe_builder = tiforth::PipelineBuilder::Create(engine.get());
+        ARROW_CHECK_OK(maybe_builder.status());
+        auto builder = std::move(maybe_builder).ValueUnsafe();
+        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
+        std::vector<tiforth::AggFunc> aggs;
+        aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
+        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
+
+        auto status = builder->AppendTransform(
+            [engine_ptr = engine.get(), keys, aggs, options]() -> arrow::Result<tiforth::TransformOpPtr> {
+                return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine_ptr, keys, aggs, options);
+            });
+        ARROW_CHECK_OK(status);
+
+        auto maybe_pipeline = builder->Finalize();
+        ARROW_CHECK_OK(maybe_pipeline.status());
+        pipeline = std::move(maybe_pipeline).ValueUnsafe();
+    }
+
+    for (const auto & _ : state) {
+        (void)_;
+        auto maybe_task = pipeline->CreateTask();
+        ARROW_CHECK_OK(maybe_task.status());
+        auto task = std::move(maybe_task).ValueUnsafe();
+        auto maybe_task_state = task->Step();
+        ARROW_CHECK_OK(maybe_task_state.status());
+        auto task_state = maybe_task_state.ValueUnsafe();
+        ARROW_CHECK(task_state == tiforth::TaskState::kNeedInput);
+
+        for (const auto & batch : dataset->arrow_batches) {
+            ARROW_CHECK_OK(task->PushInput(batch));
+        }
+        ARROW_CHECK_OK(task->CloseInput());
+
+        while (true) {
+            maybe_task_state = task->Step();
+            ARROW_CHECK_OK(maybe_task_state.status());
+            task_state = maybe_task_state.ValueUnsafe();
+            if (task_state == tiforth::TaskState::kFinished) {
+                break;
+            }
+            if (task_state == tiforth::TaskState::kNeedInput) {
+                continue;
+            }
+            ARROW_CHECK(task_state == tiforth::TaskState::kHasOutput);
+            auto maybe_out = task->PullOutput();
+            ARROW_CHECK_OK(maybe_out.status());
+            auto out = std::move(maybe_out).ValueUnsafe();
+            ARROW_CHECK(out != nullptr);
+            benchmark::DoNotOptimize(out->num_rows());
+        }
+    }
+
+    state.SetItemsProcessed(static_cast<int64_t>(cfg.num_rows) * state.iterations());
+}
+
 void RegisterCases() {
     const size_t num_rows_numeric = 1 << 20;
     const size_t rows_per_block = 1 << 16;
@@ -606,6 +675,9 @@ void RegisterCases() {
             benchmark::RegisterBenchmark(
                 fmt::format("ArrowComputeAgg/TiForthDictKey/{}", case_name).c_str(),
                 [cfg](benchmark::State & state) { RunTiForthArrowComputeAggDictKey(cfg, state); });
+            benchmark::RegisterBenchmark(
+                fmt::format("ArrowComputeAgg/TiForthStableDictKey/{}", case_name).c_str(),
+                [cfg](benchmark::State & state) { RunTiForthArrowComputeAggStableDictKey(cfg, state); });
         }
     }
 }
