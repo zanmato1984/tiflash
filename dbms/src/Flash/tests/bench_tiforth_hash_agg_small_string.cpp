@@ -39,9 +39,8 @@
 
 #include <tiforth/engine.h>
 #include <tiforth/expr.h>
-#include <tiforth/operators/arrow_hash_agg.h>
 #include <tiforth/operators/hash_agg.h>
-#include <tiforth/pipeline.h>
+#include <tiforth/plan.h>
 #include <tiforth/task.h>
 
 #include <algorithm>
@@ -381,12 +380,10 @@ void RunNativeAgg(const BenchConfig & cfg, benchmark::State & state) {
     state.SetItemsProcessed(static_cast<int64_t>(cfg.num_rows) * state.iterations());
 }
 
-std::unique_ptr<tiforth::Pipeline> MakeTiForthAggPipeline(
-    const tiforth::Engine * engine,
-    bool use_arrow_hash_agg) {
+std::unique_ptr<tiforth::Plan> MakeTiForthAggPlan(const tiforth::Engine * engine) {
     ARROW_CHECK(engine != nullptr);
 
-    auto maybe_builder = tiforth::PipelineBuilder::Create(engine);
+    auto maybe_builder = tiforth::PlanBuilder::Create(engine);
     ARROW_CHECK_OK(maybe_builder.status());
     auto builder = std::move(maybe_builder).ValueUnsafe();
 
@@ -396,32 +393,61 @@ std::unique_ptr<tiforth::Pipeline> MakeTiForthAggPipeline(
     aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
     aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
-    auto status = builder->AppendTransform(
-        [engine, keys, aggs, use_arrow_hash_agg]() -> arrow::Result<tiforth::TransformOpPtr> {
-            if (use_arrow_hash_agg) {
-                return std::make_unique<tiforth::ArrowHashAggTransformOp>(engine, keys, aggs);
-            }
-            return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine, keys, aggs);
+    const tiforth::Engine * engine_ptr = engine;
+    auto maybe_ctx_id = builder->AddBreakerState<tiforth::HashAggContext>(
+        [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+            return std::make_shared<tiforth::HashAggContext>(engine_ptr, keys, aggs);
         });
-    ARROW_CHECK_OK(status);
+    ARROW_CHECK_OK(maybe_ctx_id.status());
+    const auto ctx_id = maybe_ctx_id.ValueUnsafe();
 
-    auto maybe_pipeline = builder->Finalize();
-    ARROW_CHECK_OK(maybe_pipeline.status());
-    return std::move(maybe_pipeline).ValueUnsafe();
+    auto maybe_build_stage = builder->AddStage();
+    ARROW_CHECK_OK(maybe_build_stage.status());
+    const auto build_stage = maybe_build_stage.ValueUnsafe();
+
+    ARROW_CHECK_OK(builder->AppendTransform(
+        build_stage,
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::TransformOpPtr> {
+            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+            return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
+        }));
+
+    ARROW_CHECK_OK(builder->SetStageSink(
+        build_stage,
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+            return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
+        }));
+
+    auto maybe_result_stage = builder->AddStage();
+    ARROW_CHECK_OK(maybe_result_stage.status());
+    const auto result_stage = maybe_result_stage.ValueUnsafe();
+
+    ARROW_CHECK_OK(builder->SetStageSource(
+        result_stage,
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+            return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx));
+        }));
+    ARROW_CHECK_OK(builder->AddDependency(build_stage, result_stage));
+
+    auto maybe_plan = builder->Finalize();
+    ARROW_CHECK_OK(maybe_plan.status());
+    return std::move(maybe_plan).ValueUnsafe();
 }
 
-void RunTiForthAgg(const BenchConfig & cfg, benchmark::State & state, bool use_arrow_hash_agg) {
+void RunTiForthHashAgg(const BenchConfig & cfg, benchmark::State & state) {
     const auto dataset = GetOrCreateDataset(cfg);
 
     auto maybe_engine = tiforth::Engine::Create(tiforth::EngineOptions{});
     ARROW_CHECK_OK(maybe_engine.status());
     auto engine = std::move(maybe_engine).ValueUnsafe();
 
-    auto pipeline = MakeTiForthAggPipeline(engine.get(), use_arrow_hash_agg);
+    auto plan = MakeTiForthAggPlan(engine.get());
 
     for (const auto & _ : state) {
         (void)_;
-        auto maybe_task = pipeline->CreateTask();
+        auto maybe_task = plan->CreateTask();
         ARROW_CHECK_OK(maybe_task.status());
         auto task = std::move(maybe_task).ValueUnsafe();
 
@@ -455,14 +481,6 @@ void RunTiForthAgg(const BenchConfig & cfg, benchmark::State & state, bool use_a
     state.SetItemsProcessed(static_cast<int64_t>(cfg.num_rows) * state.iterations());
 }
 
-void RunTiForthArrowHashAgg(const BenchConfig & cfg, benchmark::State & state) {
-    RunTiForthAgg(cfg, state, /*use_arrow_hash_agg=*/true);
-}
-
-void RunTiForthLegacyHashAgg(const BenchConfig & cfg, benchmark::State & state) {
-    RunTiForthAgg(cfg, state, /*use_arrow_hash_agg=*/false);
-}
-
 void RegisterCases() {
     const size_t rows_per_block = 1 << 13;
     const size_t num_rows = 1 << 18;
@@ -490,11 +508,8 @@ void RegisterCases() {
             fmt::format("NativeAgg/SmallStringSingleKey/{}", case_name).c_str(),
             [cfg](benchmark::State & state) { RunNativeAgg(cfg, state); });
         benchmark::RegisterBenchmark(
-            fmt::format("ArrowHashAgg/SmallStringSingleKey/{}", case_name).c_str(),
-            [cfg](benchmark::State & state) { RunTiForthArrowHashAgg(cfg, state); });
-        benchmark::RegisterBenchmark(
             fmt::format("HashAgg/SmallStringSingleKey/{}", case_name).c_str(),
-            [cfg](benchmark::State & state) { RunTiForthLegacyHashAgg(cfg, state); });
+            [cfg](benchmark::State & state) { RunTiForthHashAgg(cfg, state); });
     }
 }
 

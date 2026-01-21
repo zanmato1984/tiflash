@@ -1,4 +1,4 @@
-# TiForth MS16: Arrow HashAgg Parity GTests (vs TiFlash Aggregator, No Collation)
+# TiForth MS16: HashAgg Parity GTests (vs TiFlash Aggregator)
 
 - Author(s): zanmato
 - Last Updated: 2026-01-20
@@ -11,10 +11,11 @@
 ## Summary
 
 Add **extensive parity gtests in TiFlash** to validate that Arrow-compute native grouped **`hash_*`** aggregation kernels
-(as used by TiForth’s `ArrowHashAggTransformOp`) are **semantically compatible** with TiFlash native aggregation for the
-supported subset.
+(as used by TiForth’s Arrow-kernel-backed `HashAgg*` operator family) are **semantically compatible** with TiFlash
+native aggregation for the supported subset.
 
-Scope explicitly **ignores collation** for now (treat string keys as binary or exclude them).
+MS16 scope explicitly **ignored collation** initially (treat string keys as binary or exclude them). Collation-aware
+single-key string grouping was added later (MS21).
 
 ## Motivation / Problem
 
@@ -37,8 +38,8 @@ match TiFlash semantics where Arrow defaults differ.
 
 - Add a parity test suite that compares results between:
   - **TiFlash native**: `DB::Aggregator` (no spill), and
-  - **Arrow grouped kernels**: via TiForth `ArrowHashAggTransformOp` (or direct kernel driving) using the same input.
-- Cover the aggregate set intended to be supported by `ArrowHashAggTransformOp`:
+  - **Arrow grouped kernels**: via TiForth `HashAgg*` (or direct kernel driving) using the same input.
+- Cover the aggregate set intended to be supported by Arrow-kernel-backed HashAgg:
   - `count_all`, `count`, `sum`, `min`, `max` (and `mean`/`avg` if enabled).
 - Cover representative key/value types and common distributions, across multiple batches.
 - Compare results without relying on group output ordering (treat results as sets keyed by group-by columns).
@@ -102,22 +103,22 @@ As divergences are found, either:
 ## Implementation Plan (Checklist)
 
 - [x] Add a new TiFlash gtest file under `dbms/src/Flash/tests/` implementing a parity matrix.
-- [x] Add helpers to run native `DB::Aggregator` and TiForth `ArrowHashAggTransformOp`, normalize outputs (unordered map keyed by group key bytes) and compare.
+- [x] Add helpers to run native `DB::Aggregator` and TiForth `HashAgg*`, normalize outputs (unordered map keyed by group key bytes) and compare.
 - [x] Integrate into `gtests_dbms` (auto via `gtest*.cpp` glob).
 
 ## Validation
 
 - `ninja -C cmake-build-debug gtests_dbms`
-- `gtests_dbms '--gtest_filter=TiForthArrowHashAggParityTest.*'`
+- `gtests_dbms '--gtest_filter=TiForthHashAggParityTest.*'`
 
 ## Status / Notes
 
-- Implemented parity test: `dbms/src/Flash/tests/gtest_tiforth_arrow_hash_agg_parity.cpp`.
+- Implemented parity test: `dbms/src/Flash/tests/gtest_tiforth_hash_agg_parity.cpp`.
 - Coverage includes: int32/int64 keys; int64/float64/decimal values; single/low-card/high-card/zipf distributions; null keys + null values (including an “all-null group” case to validate sum/min/max nullability).
 - Coverage includes: output type/nullability checks; int32/int64 keys; int32/int64/uint64/float32/float64/decimal values;
   single/low-card/high-card/zipf distributions; null keys + null values (including an “all-null group” case); empty input;
   multi-key group-by; special float corner cases (NaN/Inf and signed zero); and an explicit Int64 overflow case.
-- TiFlash can now enable this path in planner via `enable_tiforth_arrow_hash_agg` (collation-sensitive string GROUP BY still falls back to TiForth `HashAggTransformOp`).
+- TiFlash can now enable this path in planner via `enable_tiforth_hash_agg`.
 - Key mitigations implemented based on parity failures:
   - `hash_count`/`hash_count_all`: override to UInt64 output (non-nullable) to match TiFlash `count` type contract.
   - `hash_min`/`hash_max` (float): override float kernels to use `<`/`>` comparisons (order-sensitive) to match TiFlash

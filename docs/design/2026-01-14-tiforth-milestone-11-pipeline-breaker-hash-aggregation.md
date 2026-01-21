@@ -6,6 +6,10 @@
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Depends on: MS3 (pipeline framework common path), MS5 (hash agg common path)
 
+Update (MS20): legacy TiFlash-port HashAgg and its breaker ops (`HashAggBuildSinkOp`, `HashAggConvergentSourceOp`) were
+removed. The Arrow-kernel-backed HashAgg uses breaker-style `HashAggTransformOp` (partial) + `HashAggMergeSinkOp` +
+`HashAggResultSourceOp`.
+
 ## Motivation
 
 In TiFlash pipeline model, the essential abstraction is the **pipeline breaker**: a blocking operator becomes a boundary

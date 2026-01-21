@@ -16,7 +16,7 @@ Add a TiForth-owned **custom `arrow::compute::Grouper` implementation** optimize
 - **binary/string-like keys**
 - **small strings**
 
-The new grouper is injected into `ArrowHashAggTransformOp` via its `GrouperFactory` hook and becomes the default
+The new grouper is selected by HashAgg via its grouper selection hook and becomes the default
 grouper for supported inputs.
 
 The implementation should be based on the proven TiFlash approach (small-string optimized hash table / inline key
@@ -82,7 +82,7 @@ TiForth should use `ARROW_DCHECK/ARROW_CHECK` liberally to keep invariants rigid
 
 ### Integration point
 
-`ArrowHashAggTransformOp` already supports:
+HashAgg already supports:
 
 - `GrouperFactory` injection
 
@@ -104,7 +104,7 @@ Null group should be emitted as a null slot in the output unique array.
 
 - [x] Identify TiFlash “small string key” aggregation method and port the core approach (open addressing + inline bytes).
 - [x] Implement `SmallStringSingleKeyGrouper : public arrow::compute::Grouper`.
-- [x] Wire as the default grouper for single-key binary/string grouping in `ArrowHashAggTransformOp`.
+- [x] Wire as the default grouper for single-key binary/string grouping in HashAgg.
 - [x] Add unit tests (multiple batches, nulls, duplicates, high-cardinality, reset).
 - [x] Extend TiFlash parity gtests to include string/binary keys (binary semantics; collation out of scope).
 
@@ -112,9 +112,9 @@ Null group should be emitted as a null slot in the output unique array.
 
 - TiForth: `ctest --test-dir build-debug --output-on-failure`
 - TiFlash: `ninja -C cmake-build-debug gtests_dbms`
-- TiFlash: `gtests_dbms --gtest_filter='TiForthArrowHashAggParityTest.*'`
+- TiFlash: `gtests_dbms --gtest_filter='TiForthHashAggParityTest.*'`
 
 ## Notes
 
-- Collation: long-term plan is “group by sort keys + keep original string via payload/first_row”; MS18 is binary-only.
+- Collation: MS18 is binary-only; collation-aware single-key grouping was added later (MS21).
 - This grouper is explicitly a “single-key fast path”; multi-key string grouping can come later.

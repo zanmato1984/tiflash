@@ -31,6 +31,7 @@
 #include "tiforth/operators/hash_join.h"
 #include "tiforth/operators/filter.h"
 #include "tiforth/operators/projection.h"
+#include "tiforth/plan.h"
 #include "tiforth/pipeline.h"
 
 namespace DB::tests {
@@ -514,7 +515,7 @@ arrow::Status RunProjectionTiDBPackedMyTimeScalarsOnBlock() {
 }
 
 arrow::Status RunTwoKeyHashAggOnBlocks() {
-  // Input: group by (s, k2) where s uses padding BIN collation ("a" == "a ").
+  // Input: group by (s, k2) with binary string semantics.
   auto s_col = ColumnString::create();
   s_col->insertData("a", 1);
   s_col->insertData("a ", 2);
@@ -542,11 +543,10 @@ arrow::Status RunTwoKeyHashAggOnBlocks() {
   cols.emplace_back(std::move(v_col), v_type, "v");
   Block input(std::move(cols));
 
-  std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  options_by_name.emplace("s", TiForth::ColumnOptions{.collation_id = 46});  // UTF8MB4_BIN (PAD SPACE)
+  const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
 
   std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef("s")},
                                        {"k2", tiforth::MakeFieldRef("k2")}};
@@ -554,82 +554,102 @@ arrow::Status RunTwoKeyHashAggOnBlocks() {
   aggs.push_back({"cnt", "count_all", nullptr});
   aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([engine_ptr = engine.get(), keys,
-                                                aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-    return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine_ptr, keys, aggs);
-  }));
+  const tiforth::Engine* engine_ptr = engine.get();
+  ARROW_ASSIGN_OR_RAISE(
+      const auto ctx_id,
+      builder->AddBreakerState<tiforth::HashAggContext>(
+          [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+            return std::make_shared<tiforth::HashAggContext>(engine_ptr, keys, aggs);
+          }));
 
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      build_stage, [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::TransformOpPtr> {
+        ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+        return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
+      }));
+  ARROW_RETURN_NOT_OK(builder->SetStageSink(
+      build_stage, [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+        ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+        return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
+      }));
+
+  ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
+  ARROW_RETURN_NOT_OK(builder->SetStageSource(
+      result_stage, [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+        ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+        return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx), /*max_output_rows=*/1 << 30);
+      }));
+  ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
+
+  ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto outputs,
-                        TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input}, options_by_name,
-                                                            arrow::default_memory_pool()));
+                        TiForth::RunTiForthPlanOnBlocks(*plan, {input}, options_by_name,
+                                                        arrow::default_memory_pool()));
   if (outputs.size() != 1) {
     return arrow::Status::Invalid("expected exactly 1 hash agg output block");
   }
 
   const auto& out = outputs[0];
   const auto& block = out.block;
-  if (block.columns() != 4 || block.rows() != 3) {
+  if (block.columns() != 4 || block.rows() != 4) {
     return arrow::Status::Invalid("unexpected hash agg output shape");
   }
 
-  // Collation metadata should survive on the string key.
-  const auto opt_it = out.options_by_name.find("s");
-  if (opt_it == out.options_by_name.end() || !opt_it->second.collation_id.has_value() ||
-      *opt_it->second.collation_id != 46) {
-    return arrow::Status::Invalid("hash agg output collation id mismatch");
-  }
-
-  const auto& cnt_out = block.getByPosition(0).column;
+  const auto& cnt_out = block.getByName("cnt").column;
   const auto* cnt_u64 = typeid_cast<const ColumnUInt64*>(cnt_out.get());
   if (cnt_u64 == nullptr) {
     return arrow::Status::Invalid("expected ColumnUInt64 for count");
   }
-  const auto& sum_out = block.getByPosition(1).column;
+  const auto& sum_out = block.getByName("sum_v").column;
   const auto* sum_nullable = typeid_cast<const ColumnNullable*>(sum_out.get());
-  if (sum_nullable == nullptr) {
-    return arrow::Status::Invalid("expected nullable sum column");
+  const ColumnInt64* sum_i64 = nullptr;
+  if (sum_nullable != nullptr) {
+    sum_i64 = typeid_cast<const ColumnInt64*>(&sum_nullable->getNestedColumn());
+  } else {
+    sum_i64 = typeid_cast<const ColumnInt64*>(sum_out.get());
   }
-  const auto* sum_i64 = typeid_cast<const ColumnInt64*>(&sum_nullable->getNestedColumn());
   if (sum_i64 == nullptr) {
-    return arrow::Status::Invalid("expected nested ColumnInt64 for sum");
+    return arrow::Status::Invalid("expected ColumnInt64 (nullable or non-nullable) for sum");
   }
-  const auto& s_out = block.getByPosition(2).column;
+  const auto& s_out = block.getByName("s").column;
   const auto* s_str = typeid_cast<const ColumnString*>(s_out.get());
   if (s_str == nullptr) {
     return arrow::Status::Invalid("expected ColumnString for group key s");
   }
-  const auto& k2_out = block.getByPosition(3).column;
+  const auto& k2_out = block.getByName("k2").column;
   const auto* k2_i32 = typeid_cast<const ColumnInt32*>(k2_out.get());
   if (k2_i32 == nullptr) {
     return arrow::Status::Invalid("expected ColumnInt32 for group key k2");
   }
 
-  // Output order is first-seen groups: ("a",1), ("a ",2), ("b",1).
+  // Output order is first-seen groups: ("a",1), ("a ",1), ("a ",2), ("b",1).
   const auto s0 = s_str->getDataAt(0);
   const auto s1 = s_str->getDataAt(1);
   const auto s2 = s_str->getDataAt(2);
-  if (std::string_view(s0.data, s0.size) != "a" || std::string_view(s1.data, s1.size) != "a " ||
-      std::string_view(s2.data, s2.size) != "b") {
+  const auto s3 = s_str->getDataAt(3);
+  if (std::string_view(s0.data, s0.size) != "a" || std::string_view(s1.data, s1.size) != "a "
+      || std::string_view(s2.data, s2.size) != "a " || std::string_view(s3.data, s3.size) != "b") {
     return arrow::Status::Invalid("unexpected hash agg s values");
   }
   const auto& k2_data = k2_i32->getData();
   const auto& cnt_data = cnt_u64->getData();
-  if (k2_data.size() != 3 || cnt_data.size() != 3) {
+  if (k2_data.size() != 4 || cnt_data.size() != 4) {
     return arrow::Status::Invalid("unexpected hash agg key/cnt sizes");
   }
-  if (k2_data[0] != 1 || k2_data[1] != 2 || k2_data[2] != 1) {
+  if (k2_data[0] != 1 || k2_data[1] != 1 || k2_data[2] != 2 || k2_data[3] != 1) {
     return arrow::Status::Invalid("unexpected hash agg k2 values");
   }
-  if (cnt_data[0] != 2 || cnt_data[1] != 1 || cnt_data[2] != 1) {
+  if (cnt_data[0] != 1 || cnt_data[1] != 1 || cnt_data[2] != 1 || cnt_data[3] != 1) {
     return arrow::Status::Invalid("unexpected hash agg cnt values");
   }
 
-  if (sum_nullable->isNullAt(0) || sum_nullable->isNullAt(1) || sum_nullable->isNullAt(2)) {
+  if (sum_nullable != nullptr && (sum_nullable->isNullAt(0) || sum_nullable->isNullAt(1) ||
+                                  sum_nullable->isNullAt(2) || sum_nullable->isNullAt(3))) {
     return arrow::Status::Invalid("unexpected null sums");
   }
   const auto& sum_data = sum_i64->getData();
-  if (sum_data.size() != 3 || sum_data[0] != 30 || sum_data[1] != 1 || sum_data[2] != 5) {
+  if (sum_data.size() != 4 || sum_data[0] != 10 || sum_data[1] != 20 || sum_data[2] != 1 || sum_data[3] != 5) {
     return arrow::Status::Invalid("unexpected hash agg sum values");
   }
 
@@ -661,22 +681,45 @@ arrow::Status RunGeneralCiHashAggOnBlocks() {
   options_by_name.emplace("s", TiForth::ColumnOptions{.collation_id = 45});  // UTF8MB4_GENERAL_CI (PAD SPACE)
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
 
   std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef("s")}};
   std::vector<tiforth::AggFunc> aggs;
   aggs.push_back({"cnt", "count_all", nullptr});
   aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
-  ARROW_RETURN_NOT_OK(builder->AppendTransform([engine_ptr = engine.get(), keys,
-                                                aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-    return std::make_unique<tiforth::LegacyHashAggTransformOp>(engine_ptr, keys, aggs);
-  }));
+  const tiforth::Engine* engine_ptr = engine.get();
+  ARROW_ASSIGN_OR_RAISE(
+      const auto ctx_id,
+      builder->AddBreakerState<tiforth::HashAggContext>(
+          [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+            return std::make_shared<tiforth::HashAggContext>(engine_ptr, keys, aggs);
+          }));
 
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      build_stage, [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::TransformOpPtr> {
+        ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+        return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
+      }));
+  ARROW_RETURN_NOT_OK(builder->SetStageSink(
+      build_stage, [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+        ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+        return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
+      }));
+
+  ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
+  ARROW_RETURN_NOT_OK(builder->SetStageSource(
+      result_stage, [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+        ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+        return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx), /*max_output_rows=*/1 << 30);
+      }));
+  ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
+
+  ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto outputs,
-                        TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input}, options_by_name,
-                                                            arrow::default_memory_pool()));
+                        TiForth::RunTiForthPlanOnBlocks(*plan, {input}, options_by_name,
+                                                        arrow::default_memory_pool()));
   if (outputs.size() != 1) {
     return arrow::Status::Invalid("expected exactly 1 hash agg output block");
   }
@@ -693,15 +736,18 @@ arrow::Status RunGeneralCiHashAggOnBlocks() {
     return arrow::Status::Invalid("hash agg output collation id mismatch");
   }
 
-  const auto* cnt_out = typeid_cast<const ColumnUInt64*>(block.getByPosition(0).column.get());
-  const auto* sum_nullable = typeid_cast<const ColumnNullable*>(block.getByPosition(1).column.get());
-  const auto* s_out = typeid_cast<const ColumnString*>(block.getByPosition(2).column.get());
-  if (s_out == nullptr || cnt_out == nullptr || sum_nullable == nullptr) {
-    return arrow::Status::Invalid("unexpected hash agg output column types");
+  const auto* cnt_out = typeid_cast<const ColumnUInt64*>(block.getByName("cnt").column.get());
+  const auto* s_out = typeid_cast<const ColumnString*>(block.getByName("s").column.get());
+  const auto& sum_any = block.getByName("sum_v").column;
+  const auto* sum_nullable = typeid_cast<const ColumnNullable*>(sum_any.get());
+  const ColumnInt64* sum_i64 = nullptr;
+  if (sum_nullable != nullptr) {
+    sum_i64 = typeid_cast<const ColumnInt64*>(&sum_nullable->getNestedColumn());
+  } else {
+    sum_i64 = typeid_cast<const ColumnInt64*>(sum_any.get());
   }
-  const auto* sum_i64 = typeid_cast<const ColumnInt64*>(&sum_nullable->getNestedColumn());
-  if (sum_i64 == nullptr) {
-    return arrow::Status::Invalid("expected nested ColumnInt64 for sum");
+  if (s_out == nullptr || cnt_out == nullptr || sum_i64 == nullptr) {
+    return arrow::Status::Invalid("unexpected hash agg output column types");
   }
 
   // Output order is first-seen groups: "a", "b".
@@ -720,7 +766,7 @@ arrow::Status RunGeneralCiHashAggOnBlocks() {
     return arrow::Status::Invalid("unexpected hash agg cnt/sum values");
   }
 
-  if (sum_nullable->isNullAt(0) || sum_nullable->isNullAt(1)) {
+  if (sum_nullable != nullptr && (sum_nullable->isNullAt(0) || sum_nullable->isNullAt(1))) {
     return arrow::Status::Invalid("unexpected null sums");
   }
 

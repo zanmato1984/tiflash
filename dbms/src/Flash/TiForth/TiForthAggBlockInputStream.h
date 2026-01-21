@@ -29,7 +29,7 @@
 namespace tiforth
 {
 class Engine;
-class Pipeline;
+class Plan;
 class Task;
 } // namespace tiforth
 
@@ -42,7 +42,7 @@ public:
     TiForthAggBlockInputStream(
         const BlockInputStreamPtr & input_stream_,
         std::unique_ptr<tiforth::Engine> engine_,
-        std::unique_ptr<tiforth::Pipeline> pipeline_,
+        std::unique_ptr<tiforth::Plan> plan_,
         const NamesAndTypesList & output_columns_,
         const std::unordered_map<String, ColumnOptions> & input_options_by_name_,
         std::shared_ptr<arrow::MemoryPool> pool_holder_,
@@ -64,7 +64,7 @@ private:
 
     BlockInputStreamPtr input_stream;
     std::unique_ptr<tiforth::Engine> engine;
-    std::unique_ptr<tiforth::Pipeline> pipeline;
+    std::unique_ptr<tiforth::Plan> plan;
     std::unique_ptr<tiforth::Task> task;
     NamesAndTypesList output_columns;
     std::unordered_map<String, ColumnOptions> input_options_by_name;

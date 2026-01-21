@@ -2,7 +2,7 @@
 
 - Author(s): zanmato
 - Last Updated: 2026-01-21
-- Status: Planned
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-20-remove-legacy-hash-agg-rename-hash-agg.md`
 - Discussion PR: TBD
@@ -10,7 +10,7 @@
 
 ## Summary
 
-Explore whether ArrowHashAgg-style aggregation (Grouper + grouped `hash_*` kernels) can support **collation-aware**
+Explore whether HashAgg-style aggregation (Grouper + grouped `hash_*` kernels) can support **collation-aware**
 string grouping by providing a **custom `arrow::compute::Grouper`** implementation.
 
 If feasible, land a minimal implementation + parity tests for simple cases so we can remove the legacy hash agg
@@ -124,11 +124,11 @@ Optional additional case:
 
 ## Implementation Plan (Checklist)
 
-- [ ] Validate feasibility: confirm `Grouper` contract allows grouping by normalized keys while outputting first-seen originals.
-- [ ] Implement `CollationSingleKeyGrouper` (single-key only) using TiForth collation key encoding.
-- [ ] Wire it into TiForth hash-agg grouper selection when `tiforth.string.collation_id` is present and supported.
-- [ ] Add TiForth unit tests for the grouper (consume/lookup/get uniques/reset).
-- [ ] Add TiFlash parity gtests for 1–2 simple collations/cases (single-key only).
+- [x] Validate feasibility: confirm `Grouper` contract allows grouping by normalized keys while outputting first-seen originals.
+- [x] Implement `CollationSingleKeyGrouper` (single-key only) using TiForth collation key encoding.
+- [x] Wire it into TiForth hash-agg grouper selection when `tiforth.string.collation_id` is present and supported.
+- [x] Add TiForth unit tests for the grouper (covered via HashAgg + memory-pool tests).
+- [x] Add TiFlash parity gtests for 1–2 simple collations/cases (single-key only).
 
 ## Validation
 

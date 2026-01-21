@@ -20,7 +20,6 @@
 #include "tiforth/engine.h"
 #include "tiforth/expr.h"
 #include "tiforth/operators/arrow_compute_agg.h"
-#include "tiforth/operators/arrow_hash_agg.h"
 #include "tiforth/operators/filter.h"
 #include "tiforth/operators/hash_agg.h"
 #include "tiforth/operators/hash_join.h"
@@ -291,10 +290,11 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag, cons
       aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
       ARROW_RETURN_NOT_OK(builder->AppendTransform(
           [engine, keys, aggs, use_arrow_compute_agg]() -> arrow::Result<tiforth::TransformOpPtr> {
-            if (use_arrow_compute_agg) {
-              return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs);
+            if (!use_arrow_compute_agg) {
+              return arrow::Status::NotImplemented(
+                  "HashAgg is breaker-style; use a PlanBuilder translation");
             }
-            return std::make_unique<tiforth::ArrowHashAggTransformOp>(engine, keys, aggs);
+            return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs);
           }));
       continue;
     }
@@ -356,32 +356,44 @@ arrow::Status TranslateDagToTiForthAggBreakerPlan(const PipelineExecBuilder& dag
     return arrow::Status::Invalid("expected a hash agg transform op in the DAG");
   }
 
-  // Minimal translation for the unit test: build a breaker plan (build sink + convergent source)
-  // using a shared HashAggContext.
+  // Minimal translation for the unit test: build a breaker plan (partial transform + merge sink +
+  // result source) using a shared HashAggContext.
   std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
   std::vector<tiforth::AggFunc> aggs;
   aggs.push_back({"cnt", "count_all", nullptr});
   aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
-  ARROW_ASSIGN_OR_RAISE(const auto ctx_id, builder->AddBreakerState<tiforth::HashAggContext>(
-                                               [engine, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
-                                                 return std::make_shared<tiforth::HashAggContext>(engine, keys, aggs);
-                                               }));
+  ARROW_ASSIGN_OR_RAISE(const auto ctx_id,
+                        builder->AddBreakerState<tiforth::HashAggContext>(
+                            [engine, keys, aggs]()
+                                -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+                              return std::make_shared<tiforth::HashAggContext>(engine, keys, aggs);
+                            }));
 
   ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
+  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+      build_stage,
+      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::TransformOpPtr> {
+        ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
+                              ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+        return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
+      }));
   ARROW_RETURN_NOT_OK(builder->SetStageSink(
-      build_stage, [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-        return std::make_unique<tiforth::HashAggBuildSinkOp>(std::move(agg_ctx));
+      build_stage,
+      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+        ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
+                              ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+        return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
       }));
 
   ARROW_ASSIGN_OR_RAISE(const auto convergent_stage, builder->AddStage());
   ARROW_RETURN_NOT_OK(builder->SetStageSource(
       convergent_stage,
       [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SourceOpPtr> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-        return std::make_unique<tiforth::HashAggConvergentSourceOp>(std::move(agg_ctx),
-                                                                    /*max_output_rows=*/1 << 30);
+        ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
+                              ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+        return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx),
+                                                                /*max_output_rows=*/1 << 30);
       }));
   ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, convergent_stage));
 
@@ -729,11 +741,6 @@ TEST(TiForthPipelineTranslateTest, TiFlashDagWithFilterToTiForth) {
 
 TEST(TiForthPipelineTranslateTest, TiFlashDagWithHashAggToTiForth) {
   auto status = RunHashAggTranslationSmoke();
-  ASSERT_TRUE(status.ok()) << status.ToString();
-}
-
-TEST(TiForthPipelineTranslateTest, TiFlashDagWithHashAggTransformToTiForth) {
-  auto status = RunHashAggTransformTranslationSmoke(/*use_arrow_compute_agg=*/false);
   ASSERT_TRUE(status.ok()) << status.ToString();
 }
 

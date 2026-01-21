@@ -1,4 +1,4 @@
-# TiForth MS19: Benchmark Small-String Single-Key HashAgg (ArrowHashAgg vs TiFlash Native)
+# TiForth MS19: Benchmark Small-String Single-Key HashAgg (HashAgg vs TiFlash Native)
 
 - Author(s): zanmato
 - Last Updated: 2026-01-21
@@ -13,8 +13,7 @@
 Add a dedicated benchmark suite for **small-string single-key GROUP BY** comparing:
 
 - TiFlash native aggregation (baseline)
-- TiForth default aggregation after MS17+MS18 (ArrowHashAgg + small-string grouper)
-- TiForth legacy hash agg (for context / regression detection)
+- TiForth HashAgg (Arrow grouper + grouped `hash_*` kernels + MS18 small-string grouper)
 
 Then update the existing benchmark report doc with these results and analysis.
 
@@ -57,14 +56,12 @@ Generate synthetic string keys (deterministic) with knobs:
 
 Values:
 
-- use `Int64` and/or `Float64` payloads with a small aggregate set matching ArrowHashAgg supported subset.
+- use `Int64` and/or `Float64` payloads with a small aggregate set matching HashAgg supported subset.
 
 ### Operators compared
 
 - TiFlash native: `DB::Aggregator` path
-- TiForth:
-  - default hash agg after MS17: ArrowHashAgg path
-  - legacy hash agg: LegacyHashAggTransformOp (explicitly selected)
+- TiForth HashAgg (Arrow-based)
 
 ### Metrics
 
@@ -74,19 +71,19 @@ Values:
 
 ## Implementation Plan (Checklist)
 
-- [x] Add new `bench_dbms` benchmark cases for small-string single-key grouping (`dbms/src/Flash/tests/bench_tiforth_arrow_hash_agg_small_string.cpp`).
-- [x] Compare TiFlash native vs TiForth ArrowHashAgg vs TiForth legacy HashAgg (explicit operators in the benchmark).
+- [x] Add new `bench_dbms` benchmark cases for small-string single-key grouping (`dbms/src/Flash/tests/bench_tiforth_hash_agg_small_string.cpp`).
+- [x] Compare TiFlash native vs TiForth HashAgg.
 - [x] Run benchmark matrix and capture results.
 - [x] Update `docs/design/2026-01-19-arrow-compute-agg-benchmark-report.md` with:
-  - new section “Small-string single-key GROUP BY (ArrowHashAgg)”
+  - new section “Small-string single-key GROUP BY (HashAgg)”
   - raw numbers + key takeaways
 
 ## Validation / Repro
 
 - Build benchmark: `ninja -C cmake-build-release bench_dbms`
-- Run: `bench_dbms --benchmark_filter '^(ArrowHashAgg|HashAgg|NativeAgg)/SmallStringSingleKey/.*'`
+- Run: `bench_dbms --benchmark_filter '^(HashAgg|NativeAgg)/SmallStringSingleKey/.*'`
 
 ## Notes
 
 - The benchmark should treat strings as **binary semantics** (collation out of scope).
-- If results are mixed, keep ArrowHashAgg default behind a setting until confidence is higher.
+- If results are mixed, keep HashAgg behind a setting until confidence is higher.

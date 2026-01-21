@@ -20,6 +20,7 @@
 
 #include "tiforth/engine.h"
 #include "tiforth/operators/pass_through.h"
+#include "tiforth/plan.h"
 #include "tiforth/pipeline.h"
 
 namespace DB::tests
@@ -133,19 +134,25 @@ TEST(TiForthStreamingExecutorTest, AggBlockInputStreamPassThroughLargeInputUnder
     auto engine = std::move(engine_res).ValueOrDie();
     ASSERT_NE(engine, nullptr);
 
-    auto builder_res = tiforth::PipelineBuilder::Create(engine.get());
+    auto builder_res = tiforth::PlanBuilder::Create(engine.get());
     ASSERT_TRUE(builder_res.ok()) << builder_res.status().ToString();
     auto builder = std::move(builder_res).ValueOrDie();
     ASSERT_NE(builder, nullptr);
 
-    ASSERT_TRUE(builder->AppendTransform([]() -> arrow::Result<tiforth::TransformOpPtr> {
-        return std::make_unique<tiforth::PassThroughTransformOp>();
-    }).ok());
+    auto stage_res = builder->AddStage();
+    ASSERT_TRUE(stage_res.ok()) << stage_res.status().ToString();
+    const auto stage = stage_res.ValueOrDie();
 
-    auto pipeline_res = builder->Finalize();
-    ASSERT_TRUE(pipeline_res.ok()) << pipeline_res.status().ToString();
-    auto pipeline = std::move(pipeline_res).ValueOrDie();
-    ASSERT_NE(pipeline, nullptr);
+    ASSERT_TRUE(builder->AppendTransform(
+        stage,
+        [](tiforth::PlanTaskContext *) -> arrow::Result<tiforth::TransformOpPtr> {
+            return std::make_unique<tiforth::PassThroughTransformOp>();
+        }).ok());
+
+    auto plan_res = builder->Finalize();
+    ASSERT_TRUE(plan_res.ok()) << plan_res.status().ToString();
+    auto plan = std::move(plan_res).ValueOrDie();
+    ASSERT_NE(plan, nullptr);
 
     const auto output_type = std::make_shared<DataTypeInt64>();
     NamesAndTypesList output_columns;
@@ -155,7 +162,7 @@ TEST(TiForthStreamingExecutorTest, AggBlockInputStreamPassThroughLargeInputUnder
     auto agg_stream = std::make_shared<DB::TiForth::TiForthAggBlockInputStream>(
         input_stream,
         std::move(engine),
-        std::move(pipeline),
+        std::move(plan),
         output_columns,
         /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
         pool,

@@ -2,7 +2,7 @@
 
 - Author(s): zanmato
 - Last Updated: 2026-01-21
-- Status: Planned
+- Status: Implemented
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Related milestone: `docs/design/2026-01-14-tiforth-milestone-17-default-arrow-hash-agg.md`
 - Discussion PR: TBD
@@ -68,15 +68,15 @@ Target naming after MS20:
 
 - HashAgg (Arrow-based):
   - `tiforth::HashAggTransformOp`: partial aggregation transform (per task).
-  - `tiforth::HashAggMergeSinkOp` (name TBD): merge + final aggregation sink (shared context).
-  - `tiforth::HashAggResultSourceOp` (name TBD): result source that emits final aggregated batches.
+  - `tiforth::HashAggMergeSinkOp`: merge + final aggregation sink (shared context).
+  - `tiforth::HashAggResultSourceOp`: result source that emits final aggregated batches.
 - No `tiforth::ArrowHashAggTransformOp` symbol remains (renamed).
 - No `tiforth::LegacyHashAggTransformOp` remains (deleted).
 - No legacy breaker types remain (`HashAggBuildSinkOp`, `HashAggConvergentSourceOp` deleted).
 
 ### File layout
 
-Today:
+Before MS20:
 
 - ArrowHashAgg: `include/tiforth/operators/arrow_hash_agg.h` + `src/tiforth/operators/arrow_hash_agg.cc`
 - Legacy HashAgg: `include/tiforth/operators/hash_agg.h` + `src/tiforth/operators/hash_agg.cc`
@@ -144,23 +144,23 @@ HashAgg (shared context stores Arrow-native state / merged outputs).
 
 TiForth:
 
-- [ ] Delete `LegacyHashAggTransformOp` implementation + remove any remaining alias types.
-- [ ] Delete legacy HashAgg breaker types (`HashAggBuildSinkOp`, `HashAggConvergentSourceOp`) and their shared context.
-- [ ] Rework ArrowHashAgg into a breaker-style implementation:
-  - [ ] `HashAggTransformOp`: partial aggregation transform used in parallel pipelines/tasks.
-  - [ ] `HashAggMergeSinkOp`: merge + final aggregation sink with a shared context.
-  - [ ] `HashAggResultSourceOp`: source that emits final result batches after merge/finalization.
-  - [ ] define the partial-state schema contract and the merge/finalization mapping for supported aggregates.
-- [ ] Rename `ArrowHashAggTransformOp` → `HashAggTransformOp` and remove “ArrowHashAgg” naming across headers/paths/docs/tests.
-- [ ] Ensure the default operator docs clearly describe string semantics:
+- [x] Delete `LegacyHashAggTransformOp` implementation + remove any remaining alias types.
+- [x] Delete legacy HashAgg breaker types (`HashAggBuildSinkOp`, `HashAggConvergentSourceOp`) and their shared context.
+- [x] Rework ArrowHashAgg into a breaker-style implementation:
+  - [x] `HashAggTransformOp`: partial aggregation transform used in parallel pipelines/tasks.
+  - [x] `HashAggMergeSinkOp`: merge + final aggregation sink with a shared context.
+  - [x] `HashAggResultSourceOp`: source that emits final result batches after merge/finalization.
+  - [x] define the partial-state schema contract and the merge/finalization mapping for supported aggregates.
+- [x] Rename `ArrowHashAggTransformOp` → `HashAggTransformOp` and remove “ArrowHashAgg” naming across headers/paths/docs/tests.
+- [x] Ensure the default operator docs clearly describe string semantics:
   - binary semantics by default
   - collation-aware grouping via custom grouper selection (once MS21 lands).
 
 TiFlash integration:
 
-- [ ] Update planner selection code to use the renamed `HashAgg*` operators and breaker wiring (partial + convergent stage).
-- [ ] Update any settings/logging/benchmark names to remove “ArrowHashAgg”.
-- [ ] Keep the TiFlash→TiForth Arrow type metadata contract unchanged (`tiforth.string.collation_id`, etc).
+- [x] Update planner selection code to use the renamed `HashAgg*` operators and breaker wiring (partial + convergent stage).
+- [x] Update any settings/logging/benchmark names to remove “ArrowHashAgg”.
+- [x] Keep the TiFlash→TiForth Arrow type metadata contract unchanged (`tiforth.string.collation_id`, etc).
 
 ## Validation
 

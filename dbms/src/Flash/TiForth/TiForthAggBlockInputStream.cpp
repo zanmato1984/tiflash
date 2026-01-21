@@ -22,7 +22,7 @@
 #include <arrow/status.h>
 
 #include "tiforth/engine.h"
-#include "tiforth/pipeline.h"
+#include "tiforth/plan.h"
 #include "tiforth/task.h"
 
 namespace DB::TiForth
@@ -113,14 +113,14 @@ tiforth::TaskState driveBlockedTaskOrThrow(tiforth::Task & task, tiforth::TaskSt
 TiForthAggBlockInputStream::TiForthAggBlockInputStream(
     const BlockInputStreamPtr & input_stream_,
     std::unique_ptr<tiforth::Engine> engine_,
-    std::unique_ptr<tiforth::Pipeline> pipeline_,
+    std::unique_ptr<tiforth::Plan> plan_,
     const NamesAndTypesList & output_columns_,
     const std::unordered_map<String, ColumnOptions> & input_options_by_name_,
     std::shared_ptr<arrow::MemoryPool> pool_holder_,
     const Block & sample_input_block_)
     : input_stream(input_stream_)
     , engine(std::move(engine_))
-    , pipeline(std::move(pipeline_))
+    , plan(std::move(plan_))
     , output_columns(output_columns_)
     , input_options_by_name(input_options_by_name_)
     , pool_holder(std::move(pool_holder_))
@@ -128,7 +128,7 @@ TiForthAggBlockInputStream::TiForthAggBlockInputStream(
 {
     RUNTIME_CHECK_MSG(input_stream != nullptr, "input stream must not be null");
     RUNTIME_CHECK_MSG(engine != nullptr, "tiforth engine must not be null");
-    RUNTIME_CHECK_MSG(pipeline != nullptr, "tiforth pipeline must not be null");
+    RUNTIME_CHECK_MSG(plan != nullptr, "tiforth plan must not be null");
     RUNTIME_CHECK_MSG(pool_holder != nullptr, "arrow memory pool must not be null");
     children.push_back(input_stream);
 }
@@ -158,7 +158,7 @@ void TiForthAggBlockInputStream::initOnce()
         return;
     initialized = true;
 
-    auto task_res = pipeline->CreateTask();
+    auto task_res = plan->CreateTask();
     if (!task_res.ok())
         throw Exception(task_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
     task = std::move(task_res).ValueOrDie();

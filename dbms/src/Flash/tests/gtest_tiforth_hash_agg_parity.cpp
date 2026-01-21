@@ -26,8 +26,8 @@
 
 #include <tiforth/engine.h>
 #include <tiforth/expr.h>
-#include <tiforth/operators/arrow_hash_agg.h>
-#include <tiforth/pipeline.h>
+#include <tiforth/operators/hash_agg.h>
+#include <tiforth/plan.h>
 
 #include <algorithm>
 #include <cmath>
@@ -656,13 +656,13 @@ std::unique_ptr<Aggregator::Params> BuildAggregatorParams(
         /*group_by_two_level_threshold_bytes_=*/0,
         /*max_bytes_before_external_group_by_=*/0, // disable spill/external aggregation
         /*empty_result_for_aggregation_by_empty_set_=*/false,
-        SpillConfig(
-            context->getTemporaryPath(),
-            "gtest_tiforth_arrow_hash_agg_parity",
-            context->getSettingsRef().max_cached_data_bytes_in_spiller,
-            context->getSettingsRef().max_spilled_rows_per_file,
-            context->getSettingsRef().max_spilled_bytes_per_file,
-            context->getFileProvider(),
+            SpillConfig(
+                context->getTemporaryPath(),
+            "gtest_tiforth_hash_agg_parity",
+                context->getSettingsRef().max_cached_data_bytes_in_spiller,
+                context->getSettingsRef().max_spilled_rows_per_file,
+                context->getSettingsRef().max_spilled_bytes_per_file,
+                context->getFileProvider(),
             context->getSettingsRef().max_threads,
             context->getSettingsRef().max_block_size),
         /*max_block_size_=*/context->getSettingsRef().max_block_size,
@@ -712,9 +712,9 @@ arrow::Result<std::vector<Block>> RunNativeAggregator(const Dataset & dataset) {
     return RunNativeAggregatorWithKeys(dataset, ColumnNumbers{0});
 }
 
-arrow::Result<std::vector<Block>> RunTiForthArrowHashAgg(const Dataset & dataset) {
+arrow::Result<std::vector<Block>> RunTiForthHashAgg(const Dataset & dataset) {
     ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-    ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+    ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
 
     const std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
     std::vector<tiforth::AggFunc> aggs;
@@ -725,17 +725,43 @@ arrow::Result<std::vector<Block>> RunTiForthArrowHashAgg(const Dataset & dataset
     aggs.push_back({"max_v", "max", tiforth::MakeFieldRef("v")});
     aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef("v")});
 
+    const tiforth::Engine * engine_ptr = engine.get();
+    ARROW_ASSIGN_OR_RAISE(
+        const auto ctx_id,
+        builder->AddBreakerState<tiforth::HashAggContext>(
+            [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+                return std::make_shared<tiforth::HashAggContext>(engine_ptr, keys, aggs);
+            }));
+
+    ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
     ARROW_RETURN_NOT_OK(builder->AppendTransform(
-        [engine_ptr = engine.get(), keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::ArrowHashAggTransformOp>(engine_ptr, keys, aggs);
+        build_stage,
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::TransformOpPtr> {
+            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+            return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
+        }));
+    ARROW_RETURN_NOT_OK(builder->SetStageSink(
+        build_stage,
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+            return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
         }));
 
-    ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+    ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
+    ARROW_RETURN_NOT_OK(builder->SetStageSource(
+        result_stage,
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+            return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx));
+        }));
+    ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
+
+    ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
     const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
     ARROW_ASSIGN_OR_RAISE(
         auto outputs,
-        TiForth::RunTiForthPipelineOnBlocks(
-            *pipeline,
+        TiForth::RunTiForthPlanOnBlocks(
+            *plan,
             dataset.blocks,
             options_by_name,
             arrow::default_memory_pool(),
@@ -749,11 +775,11 @@ arrow::Result<std::vector<Block>> RunTiForthArrowHashAgg(const Dataset & dataset
     return out_blocks;
 }
 
-arrow::Result<std::vector<Block>> RunTiForthArrowHashAggWithKeys(
+arrow::Result<std::vector<Block>> RunTiForthHashAggWithKeys(
     const Dataset & dataset,
     const std::vector<tiforth::AggKey> & keys) {
     ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-    ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+    ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
 
     std::vector<tiforth::AggFunc> aggs;
     aggs.push_back({"cnt_all", "count_all", nullptr});
@@ -763,17 +789,43 @@ arrow::Result<std::vector<Block>> RunTiForthArrowHashAggWithKeys(
     aggs.push_back({"max_v", "max", tiforth::MakeFieldRef("v")});
     aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef("v")});
 
+    const tiforth::Engine * engine_ptr = engine.get();
+    ARROW_ASSIGN_OR_RAISE(
+        const auto ctx_id,
+        builder->AddBreakerState<tiforth::HashAggContext>(
+            [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
+                return std::make_shared<tiforth::HashAggContext>(engine_ptr, keys, aggs);
+            }));
+
+    ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
     ARROW_RETURN_NOT_OK(builder->AppendTransform(
-        [engine_ptr = engine.get(), keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::ArrowHashAggTransformOp>(engine_ptr, keys, aggs);
+        build_stage,
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::TransformOpPtr> {
+            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+            return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
+        }));
+    ARROW_RETURN_NOT_OK(builder->SetStageSink(
+        build_stage,
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+            return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
         }));
 
-    ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+    ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
+    ARROW_RETURN_NOT_OK(builder->SetStageSource(
+        result_stage,
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
+            return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx));
+        }));
+    ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
+
+    ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
     const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
     ARROW_ASSIGN_OR_RAISE(
         auto outputs,
-        TiForth::RunTiForthPipelineOnBlocks(
-            *pipeline,
+        TiForth::RunTiForthPlanOnBlocks(
+            *plan,
             dataset.blocks,
             options_by_name,
             arrow::default_memory_pool(),
@@ -790,7 +842,7 @@ arrow::Result<std::vector<Block>> RunTiForthArrowHashAggWithKeys(
 arrow::Status RunParityCase(const ParityConfig & cfg) {
     const auto dataset = MakeDataset(cfg);
     ARROW_ASSIGN_OR_RAISE(auto native_blocks, RunNativeAggregator(dataset));
-    ARROW_ASSIGN_OR_RAISE(auto tiforth_blocks, RunTiForthArrowHashAgg(dataset));
+    ARROW_ASSIGN_OR_RAISE(auto tiforth_blocks, RunTiForthHashAgg(dataset));
 
     const std::vector<std::string_view> key_names = {"k"};
     ARROW_RETURN_NOT_OK(CompareOutputTypes(
@@ -802,7 +854,7 @@ arrow::Status RunParityCase(const ParityConfig & cfg) {
     return CompareCanonical(expected, actual, cfg);
 }
 
-TEST(TiForthArrowHashAggParityTest, NativeVsArrowHashAggMatrix)
+TEST(TiForthHashAggParityTest, NativeVsHashAggMatrix)
 {
     const std::vector<ParityConfig> cases = {
         // Int64 values (include high-card + skew, and nulls + null-key grouping).
@@ -840,7 +892,7 @@ TEST(TiForthArrowHashAggParityTest, NativeVsArrowHashAggMatrix)
     }
 }
 
-TEST(TiForthArrowHashAggParityTest, MultiKeyParity)
+TEST(TiForthHashAggParityTest, MultiKeyParity)
 {
     std::vector<Block> blocks;
     blocks.reserve(4);
@@ -889,7 +941,7 @@ TEST(TiForthArrowHashAggParityTest, MultiKeyParity)
 
     const std::vector<tiforth::AggKey> tiforth_keys = {{"k0", tiforth::MakeFieldRef("k0")},
                                                        {"k1", tiforth::MakeFieldRef("k1")}};
-    const auto tiforth_blocks_res = RunTiForthArrowHashAggWithKeys(dataset, tiforth_keys);
+    const auto tiforth_blocks_res = RunTiForthHashAggWithKeys(dataset, tiforth_keys);
     ASSERT_TRUE(tiforth_blocks_res.ok()) << tiforth_blocks_res.status().ToString();
     const auto & tiforth_blocks = tiforth_blocks_res.ValueOrDie();
 
@@ -911,7 +963,7 @@ TEST(TiForthArrowHashAggParityTest, MultiKeyParity)
     ASSERT_TRUE(st.ok()) << st.ToString();
 }
 
-TEST(TiForthArrowHashAggParityTest, SpecialFloatValues)
+TEST(TiForthHashAggParityTest, SpecialFloatValues)
 {
     auto k_col = ColumnInt32::create();
     auto v_col = ColumnFloat64::create();
@@ -952,7 +1004,7 @@ TEST(TiForthArrowHashAggParityTest, SpecialFloatValues)
 
     auto native_blocks_res = RunNativeAggregator(dataset);
     ASSERT_TRUE(native_blocks_res.ok()) << native_blocks_res.status().ToString();
-    auto tiforth_blocks_res = RunTiForthArrowHashAgg(dataset);
+    auto tiforth_blocks_res = RunTiForthHashAgg(dataset);
     ASSERT_TRUE(tiforth_blocks_res.ok()) << tiforth_blocks_res.status().ToString();
 
     const auto & native_blocks = native_blocks_res.ValueOrDie();
@@ -975,7 +1027,7 @@ TEST(TiForthArrowHashAggParityTest, SpecialFloatValues)
     ASSERT_TRUE(st.ok()) << st.ToString();
 }
 
-TEST(TiForthArrowHashAggParityTest, Int64Overflow)
+TEST(TiForthHashAggParityTest, Int64Overflow)
 {
     auto k_col = ColumnInt32::create();
     auto v_col = ColumnInt64::create();
@@ -999,7 +1051,7 @@ TEST(TiForthArrowHashAggParityTest, Int64Overflow)
 
     auto native_blocks_res = RunNativeAggregator(dataset);
     ASSERT_TRUE(native_blocks_res.ok()) << native_blocks_res.status().ToString();
-    auto tiforth_blocks_res = RunTiForthArrowHashAgg(dataset);
+    auto tiforth_blocks_res = RunTiForthHashAgg(dataset);
     ASSERT_TRUE(tiforth_blocks_res.ok()) << tiforth_blocks_res.status().ToString();
 
     const auto & native_blocks = native_blocks_res.ValueOrDie();
@@ -1028,7 +1080,7 @@ TEST(TiForthArrowHashAggParityTest, Int64Overflow)
 
 #else
 
-TEST(TiForthArrowHashAggParityTest, Disabled)
+TEST(TiForthHashAggParityTest, Disabled)
 {
     GTEST_SKIP() << "TiForth integration is disabled (ENABLE_TIFORTH=OFF)";
 }

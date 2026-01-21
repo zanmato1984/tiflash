@@ -73,24 +73,24 @@ Notes:
 - Switching string keys to a **shared-dictionary** `DictionaryArray` makes TiForth significantly faster than Native.
 - `TiForthStableDictKey` currently does not help: key encoding (`dictionary_encode` + unification + remap) dominates, so end-to-end is slower than both TiForth(raw) and Native for these cases.
 
-## Small-string single-key GROUP BY (ArrowHashAgg)
+## Small-string single-key GROUP BY (HashAgg)
 
 This section summarizes `dbms/bench_dbms` benchmarks comparing:
 
 - **NativeAgg**: TiFlash `DB::Aggregator` (spill disabled, `concurrency=1`)
-- **ArrowHashAgg**: TiForth `tiforth::ArrowHashAggTransformOp` (Arrow Grouper + grouped `hash_*` kernels; no Acero)
-- **HashAgg**: TiForth legacy `tiforth::LegacyHashAggTransformOp` (TiFlash-port semantics anchor)
+- **HashAgg**: TiForth `tiforth::HashAgg*` (Arrow Grouper + grouped `hash_*` kernels; no Acero; breaker-style)
+- **LegacyHashAgg**: TiForth legacy TiFlash-port hash agg (removed in MS20; values below are from pre-MS20 runs)
 
 ### How to reproduce
 
 ```bash
 ninja -C cmake-build-release bench_dbms
-cmake-build-release/dbms/bench_dbms --benchmark_filter='^(ArrowHashAgg|HashAgg|NativeAgg)/SmallStringSingleKey/.*' --benchmark_min_time=0.2
+cmake-build-release/dbms/bench_dbms --benchmark_filter='^(HashAgg|NativeAgg)/SmallStringSingleKey/.*' --benchmark_min_time=0.2
 ```
 
 ### Benchmark configuration
 
-- Source: `dbms/src/Flash/tests/bench_tiforth_arrow_hash_agg_small_string.cpp`
+- Source: `dbms/src/Flash/tests/bench_tiforth_hash_agg_small_string.cpp`
 - Query shape: `GROUP BY k` with aggregates:
   - `count_all()`
   - `count(v)`
@@ -110,7 +110,7 @@ cmake-build-release/dbms/bench_dbms --benchmark_filter='^(ArrowHashAgg|HashAgg|N
 
 `items/s` counts **input rows processed** per second (Google Benchmark `items_per_second`). Values below are in **M rows/s**.
 
-| Case | NativeAgg (M/s) | ArrowHashAgg (M/s) | Arrow/Native | HashAgg (M/s) | HashAgg/Native |
+| Case | NativeAgg (M/s) | HashAgg (M/s) | HashAgg/Native | LegacyHashAgg (M/s) | LegacyHashAgg/Native |
 |---|---:|---:|---:|---:|---:|
 | `len4_uniform_low_rows262144_blk8192_groups16_nullk0_nullv0` | 148.5 | 95.4 | 0.64x | 39.1 | 0.26x |
 | `len8_uniform_low_rows262144_blk8192_groups16_nullk0_nullv0` | 138.0 | 85.4 | 0.62x | 40.8 | 0.30x |
@@ -124,6 +124,6 @@ cmake-build-release/dbms/bench_dbms --benchmark_filter='^(ArrowHashAgg|HashAgg|N
 
 ### Notes
 
-- ArrowHashAgg is consistently faster than legacy HashAgg on string keys in this suite (2–4x vs HashAgg).
-- ArrowHashAgg is still below TiFlash native on the no-null uniform cases (0.5–0.7x), but close to parity on the high-cardinality case (~0.99x).
-- With null keys/values enabled, ArrowHashAgg exceeds native in these runs (1.4–1.6x).
+- HashAgg (formerly ArrowHashAgg) is consistently faster than LegacyHashAgg on string keys in this suite (2–4x).
+- HashAgg is still below TiFlash native on the no-null uniform cases (0.5–0.7x), but close to parity on the high-cardinality case (~0.99x).
+- With null keys/values enabled, HashAgg exceeds native in these runs (1.4–1.6x).

@@ -11,8 +11,10 @@
 ## Summary
 
 Switch TiForth’s **default hash aggregation operator** from the TiFlash-port implementation to the **Arrow-compute-based**
-non-Acero implementation (`ArrowHashAggTransformOp`), and rename the current default hash agg operator to **“legacy”**
-to reflect its new role (semantics anchor / fallback path).
+non-Acero implementation (now canonical **HashAgg**; introduced as `ArrowHashAggTransformOp` in MS15-19), and rename the
+current default hash agg operator to **“legacy”** to reflect its new role (semantics anchor / fallback path).
+
+Note: in MS20, ArrowHashAgg was renamed to `HashAgg*` and the legacy implementation was removed.
 
 This is a behavior and naming change only: the legacy operator remains available for:
 
@@ -24,9 +26,9 @@ This is a behavior and naming change only: the legacy operator remains available
 
 We now have:
 
-- **Legacy** TiFlash-port `HashAggTransformOp`: semantics anchor, but its code and optimizations are tied to TiFlash
+- **Legacy** TiFlash-port hash agg: semantics anchor, but its code and optimizations are tied to TiFlash
   internals and are harder to evolve in a “pure Arrow-native” direction.
-- **Arrow** `ArrowHashAggTransformOp`: Arrow-native architecture (Grouper + grouped `hash_*` kernels), no Acero,
+- **Arrow-kernel-backed HashAgg**: Arrow-native architecture (Grouper + grouped `hash_*` kernels), no Acero,
   pluggable grouper hook, and now guarded by parity tests + TiForth overrides for known semantic mismatches.
 
 To keep TiForth moving toward “Arrow-native compute library”, the Arrow-based hash agg should become the default.
@@ -54,7 +56,7 @@ To keep TiForth moving toward “Arrow-native compute library”, the Arrow-base
 
 Implemented naming:
 
-- `ArrowHashAggTransformOp`: stays as-is (it’s the implementation).
+- Arrow-kernel-backed HashAgg is the default (renamed to `HashAgg*` in MS20).
 - Rename TiFlash-port `HashAggTransformOp` to `LegacyHashAggTransformOp`.
 - Keep `HashAggTransformOp` as a temporary alias to `LegacyHashAggTransformOp` for migration/compat.
 
@@ -96,7 +98,7 @@ TiFlash:
 
 - TiForth: `ctest --test-dir build-debug --output-on-failure`
 - TiFlash: `ninja -C cmake-build-debug gtests_dbms`
-- TiFlash: `gtests_dbms --gtest_filter='TiForthArrowHashAggParityTest.*:TiForth*'`
+- TiFlash: `gtests_dbms --gtest_filter='TiForthHashAggParityTest.*:TiForth*'`
 
 ## Notes / Open Questions
 

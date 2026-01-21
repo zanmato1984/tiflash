@@ -10,8 +10,10 @@
 
 ## Summary
 
-Add a new TiForth hash aggregation operator, **`ArrowHashAggTransformOp`**, by porting the core logic of Arrow Acero’s
-`GroupByNode` into TiForth’s own operator/pipeline framework (no Acero `ExecPlan` dependency).
+Add a new TiForth hash aggregation operator family, **`HashAgg*`** (introduced as `ArrowHashAggTransformOp` in MS15;
+renamed and reworked into breaker-style `HashAggTransformOp` + `HashAggMergeSinkOp` + `HashAggResultSourceOp` in MS20),
+by porting the core logic of Arrow Acero’s `GroupByNode` into TiForth’s own operator/pipeline framework (no Acero
+`ExecPlan` dependency).
 
 This operator:
 
@@ -26,7 +28,8 @@ This operator:
 
 It is intentionally separate from:
 
-- **`HashAggTransformOp`**: TiFlash-port aggregation core + TiFlash-shaped hash table optimizations (semantics anchor).
+- **Legacy hash agg** (removed in MS20): TiFlash-port aggregation core + TiFlash-shaped hash table optimizations
+  (semantics anchor / fallback).
 - **`ArrowComputeAggTransformOp`**: Arrow Acero-backed baseline (MS14) via `DeclarationToReader`.
 
 ## Motivation / Problem
@@ -65,7 +68,7 @@ TiForth so:
 
 ### Operator surface + name
 
-Operator: **`ArrowHashAggTransformOp`** (distinct from the Acero-backed `ArrowComputeAggTransformOp`).
+Operator family: **`HashAgg*`** (distinct from the Acero-backed `ArrowComputeAggTransformOp`).
 
 Input/Output: Arrow-native (`arrow::RecordBatch` / `arrow::compute::ExecBatch`) consistent with existing TiForth
 operators.
@@ -115,7 +118,8 @@ Future implementations can:
 
 TiForth:
 
-- [x] Add `include/tiforth/operators/arrow_hash_agg.h` + `src/tiforth/operators/arrow_hash_agg.cc`.
+- [x] Add Arrow-kernel-backed HashAgg implementation (renamed in MS20 to `include/tiforth/operators/hash_agg.h` +
+  `src/tiforth/operators/hash_agg.cc`).
 - [x] Port minimal orchestration logic from Arrow Acero `GroupByNode`:
   - [x] group id production via `arrow::compute::Grouper`
   - [x] grouped kernel state init/resize/consume/finalize wiring
@@ -130,13 +134,13 @@ TiForth:
 TiFlash integration (optional in MS15; required for MS16):
 
 - Add a switch to select which TiForth hash agg implementation to use:
-  - `HashAggTransformOp` vs `ArrowHashAggTransformOp` vs `ArrowComputeAggTransformOp`.
+  - `HashAgg*` vs `ArrowComputeAggTransformOp`.
 - [x] Implemented as TiFlash settings:
   - `enable_tiforth_arrow_compute_agg`: use `ArrowComputeAggTransformOp` (Acero, baseline)
-  - `enable_tiforth_arrow_hash_agg`: use `ArrowHashAggTransformOp` (no Acero)
-  - default: `HashAggTransformOp`
+  - `enable_tiforth_hash_agg`: use `HashAgg*` (no Acero)
+  - default: native (unless TiForth translate mode is enabled)
   - precedence: `enable_tiforth_arrow_compute_agg` wins if both are enabled
-  - string keys: both Arrow-backed modes are binary semantics only; collation-sensitive GROUP BY falls back to `HashAggTransformOp`
+  - string keys: HashAgg is binary semantics by default; collation-aware single-key GROUP BY via key metadata (MS21)
 
 ## Validation
 
@@ -145,7 +149,8 @@ TiFlash integration (optional in MS15; required for MS16):
 
 ## Status / Notes
 
-- Implemented in TiForth `include/tiforth/operators/arrow_hash_agg.h` and `src/tiforth/operators/arrow_hash_agg.cc`.
+- Implemented in TiForth `include/tiforth/operators/hash_agg.h` and `src/tiforth/operators/hash_agg.cc`
+  (renamed from `arrow_hash_agg.{h,cc}` in MS20).
 - Key decisions:
   - no Acero `ExecPlan`; drive `HashAggregateKernel` state directly (`resize`/`consume`/`finalize`)
   - keys/agg args are TiForth expressions (compiled via `CompileExpr`), not restricted to field refs
@@ -156,4 +161,4 @@ TiFlash integration (optional in MS15; required for MS16):
 - Current limitations:
   - group-by without keys not implemented yet
   - only a small set of grouped functions mapped (`hash_{count_all,count,sum,mean,min,max}`)
-  - TiFlash planner switch lives in `dbms/src/Flash/Planner/Plans/PhysicalAggregation.cpp` via `enable_tiforth_arrow_hash_agg`
+  - TiFlash planner switch lives in `dbms/src/Flash/Planner/Plans/PhysicalAggregation.cpp` via `enable_tiforth_hash_agg`
