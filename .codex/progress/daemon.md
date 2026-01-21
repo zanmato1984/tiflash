@@ -9,6 +9,9 @@
 
 # To Do
 
+- MS20: rework ArrowHashAgg into breaker-style HashAgg + remove legacy. Steps: (1) delete legacy hash agg entirely (`LegacyHashAggTransformOp`, `HashAggBuildSinkOp`, `HashAggConvergentSourceOp`, context, tests); (2) rename ArrowHashAgg → HashAgg (`HashAggTransformOp` + new merge sink/result source ops) and remove “ArrowHashAgg” naming across APIs/files/docs/tests/benchmarks/settings/logs; (3) implement partial agg in parallel via `TransformOp`, merge+final via shared `SinkOp`/`SourceOp`, then update TiFlash planner wiring + parity/bench/docs. Design: `docs/design/2026-01-14-tiforth-milestone-20-remove-legacy-hash-agg-rename-hash-agg.md`.
+- MS21: explore collation-aware GROUP BY via custom Arrow `Grouper` (and prototype if feasible). Steps: (1) evaluate Arrow `Grouper` contract vs TiFlash collation semantics (normalize-to-sort-key + preserve first-row original key); (2) implement `CollationSingleKeyGrouper` (binary keys, single-key) using TiForth collation key encoding; (3) wire into default `HashAggTransformOp` grouper selection when `collation_id` metadata is present; (4) add parity tests for a small matrix (GeneralCI, simple ASCII cases + nulls). Design: `docs/design/2026-01-14-tiforth-milestone-21-collation-aware-group-by-grouper.md`.
+
 # Completed
 
 - TiForth core + type contract (MS1-13, 2026-01-19): standalone `tiforth` library (Engine/Pipeline/Task + minimal C ABI), Arrow logical-type metadata contract (decimal/MyTime/collations), core operators (projection/filter/hash agg/join/sort) with breaker plan semantics + blocked-state model, and optimized hash tables. Decision: keep TiForth independent (no TiFlash assumptions) while matching Arrow style + rigid checks. Files: `libs/tiforth/*`, `docs/design/2026-01-14-tiforth.md`, `docs/design/2026-01-14-tiforth-milestone-*.md`.
