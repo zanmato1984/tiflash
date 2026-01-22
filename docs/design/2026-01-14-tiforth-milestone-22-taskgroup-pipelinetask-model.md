@@ -2,7 +2,7 @@
 
 - Author(s): TBD
 - Last Updated: 2026-01-22
-- Status: Planned / In Progress
+- Status: Implemented (superseded-by MS23 rewrite)
 - Related design: `docs/design/2026-01-14-tiforth.md`
 - Reference implementation: `https://github.com/zanmato1984/ara` (notably `src/ara/pipeline/op/op.h`, `src/ara/pipeline/pipeline_task.h`, `src/ara/task/task_group.h`, and the hash agg sketch `src/sketch/sketch_aggregation_test.cpp`)
 
@@ -103,4 +103,3 @@ But we do need an explicit way for operators to participate in TaskGroups:
   - explicit backend merge stage,
   - parallel result consumption,
   - all without operator locks.
-
