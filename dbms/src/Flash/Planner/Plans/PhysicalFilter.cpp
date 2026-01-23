@@ -125,9 +125,9 @@ void PhysicalFilter::buildBlockInputStreamImpl(DAGPipeline & pipeline, Context &
                     }
                     auto builder = std::move(builder_res).ValueOrDie();
 
-                    const auto st = builder->AppendTransform(
-                        [engine = engine.get(), predicate]() -> arrow::Result<tiforth::TransformOpPtr> {
-                            return std::make_unique<tiforth::FilterTransformOp>(engine, predicate);
+                    const auto st = builder->AppendPipe(
+                        [engine = engine.get(), predicate]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+                            return std::make_unique<tiforth::FilterPipeOp>(engine, predicate);
                         });
                     if (!st.ok())
                     {

@@ -137,8 +137,8 @@ arrow::Result<std::unique_ptr<TiForthQueryExecutor>> TiForthQueryExecutor::Creat
         return arrow::Status::Invalid("tiforth pipeline builder must not be null");
 
     // Minimal integration: run a pass-through TiForth pipeline on Block streams.
-    ARROW_RETURN_NOT_OK(builder->AppendTransform([]() -> arrow::Result<tiforth::TransformOpPtr> {
-        return std::make_unique<tiforth::PassThroughTransformOp>();
+    ARROW_RETURN_NOT_OK(builder->AppendPipe([]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+        return std::make_unique<tiforth::PassThroughPipeOp>();
     }));
 
     ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());

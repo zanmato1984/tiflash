@@ -233,9 +233,9 @@ void PhysicalProjection::buildBlockInputStreamImpl(DAGPipeline & pipeline, Conte
                         }
                         auto builder = std::move(builder_res).ValueOrDie();
 
-                        const auto st = builder->AppendTransform(
-                            [engine = engine.get(), exprs]() -> arrow::Result<tiforth::TransformOpPtr> {
-                                return std::make_unique<tiforth::ProjectionTransformOp>(engine, exprs);
+                        const auto st = builder->AppendPipe(
+                            [engine = engine.get(), exprs]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+                                return std::make_unique<tiforth::ProjectionPipeOp>(engine, exprs);
                             });
                         if (!st.ok())
                         {

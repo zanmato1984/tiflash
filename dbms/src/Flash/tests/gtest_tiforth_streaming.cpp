@@ -143,10 +143,10 @@ TEST(TiForthStreamingExecutorTest, AggBlockInputStreamPassThroughLargeInputUnder
     ASSERT_TRUE(stage_res.ok()) << stage_res.status().ToString();
     const auto stage = stage_res.ValueOrDie();
 
-    ASSERT_TRUE(builder->AppendTransform(
+    ASSERT_TRUE(builder->AppendPipe(
         stage,
-        [](tiforth::PlanTaskContext *) -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::PassThroughTransformOp>();
+        [](tiforth::PlanTaskContext *) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+            return std::make_unique<tiforth::PassThroughPipeOp>();
         }).ok());
 
     auto plan_res = builder->Finalize();

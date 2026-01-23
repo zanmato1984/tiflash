@@ -40,9 +40,9 @@ arrow::Result<ColumnWithTypeAndName> EvalTiForthProjection(
   std::vector<tiforth::ProjectionExpr> exprs;
   exprs.push_back({std::string(out_name), expr});
 
-  ARROW_RETURN_NOT_OK(builder->AppendTransform(
-      [engine_ptr = engine.get(), exprs]() -> arrow::Result<tiforth::TransformOpPtr> {
-        return std::make_unique<tiforth::ProjectionTransformOp>(engine_ptr, exprs);
+  ARROW_RETURN_NOT_OK(builder->AppendPipe(
+      [engine_ptr = engine.get(), exprs]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+        return std::make_unique<tiforth::ProjectionPipeOp>(engine_ptr, exprs);
       }));
 
   ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
@@ -256,4 +256,3 @@ TEST_F(FunctionTest, TiForthLogicalParityAndOrXorNot) {
 }  // namespace DB::tests
 
 #endif  // defined(TIFLASH_ENABLE_TIFORTH)
-

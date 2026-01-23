@@ -729,31 +729,25 @@ arrow::Result<std::vector<Block>> RunTiForthHashAgg(const Dataset & dataset) {
     const tiforth::Engine * engine_ptr = engine.get();
     ARROW_ASSIGN_OR_RAISE(
         const auto ctx_id,
-        builder->AddBreakerState<tiforth::HashAggContext>(
-            [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
-                return std::make_shared<tiforth::HashAggContext>(engine_ptr, keys, aggs);
+        builder->AddBreakerState<tiforth::HashAggState>(
+            [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggState>> {
+                return std::make_shared<tiforth::HashAggState>(engine_ptr, keys, aggs);
             }));
 
     ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
-    ARROW_RETURN_NOT_OK(builder->AppendPipe(
-        build_stage,
-        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-            return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
-        }));
     ARROW_RETURN_NOT_OK(builder->SetStageSink(
         build_stage,
         [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-            return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
+            ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
+            return std::make_unique<tiforth::HashAggSinkOp>(std::move(agg_state));
         }));
 
     ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
     ARROW_RETURN_NOT_OK(builder->SetStageSource(
         result_stage,
         [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-            return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx));
+            ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
+            return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_state));
         }));
     ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
 
@@ -793,31 +787,25 @@ arrow::Result<std::vector<Block>> RunTiForthHashAggWithKeys(
     const tiforth::Engine * engine_ptr = engine.get();
     ARROW_ASSIGN_OR_RAISE(
         const auto ctx_id,
-        builder->AddBreakerState<tiforth::HashAggContext>(
-            [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
-                return std::make_shared<tiforth::HashAggContext>(engine_ptr, keys, aggs);
+        builder->AddBreakerState<tiforth::HashAggState>(
+            [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggState>> {
+                return std::make_shared<tiforth::HashAggState>(engine_ptr, keys, aggs);
             }));
 
     ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
-    ARROW_RETURN_NOT_OK(builder->AppendPipe(
-        build_stage,
-        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-            return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
-        }));
     ARROW_RETURN_NOT_OK(builder->SetStageSink(
         build_stage,
         [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-            return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
+            ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
+            return std::make_unique<tiforth::HashAggSinkOp>(std::move(agg_state));
         }));
 
     ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
     ARROW_RETURN_NOT_OK(builder->SetStageSource(
         result_stage,
         [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-            return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx));
+            ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
+            return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_state));
         }));
     ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
 

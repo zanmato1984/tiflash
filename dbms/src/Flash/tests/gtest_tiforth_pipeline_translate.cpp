@@ -278,9 +278,10 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag, cons
       auto predicate = tiforth::MakeCall(
           "greater", {tiforth::MakeFieldRef("x"),
                       tiforth::MakeLiteral(std::make_shared<arrow::Int32Scalar>(1))});
-      ARROW_RETURN_NOT_OK(builder->AppendTransform(
-          [engine, predicate]() -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::FilterTransformOp>(engine, predicate);
+      ARROW_RETURN_NOT_OK(
+          builder->AppendPipe([engine, predicate]()
+                                  -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+            return std::make_unique<tiforth::FilterPipeOp>(engine, predicate);
           }));
       continue;
     }
@@ -311,16 +312,17 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag, cons
       build_batches.push_back(arrow::RecordBatch::Make(build_schema, /*num_rows=*/4, {k_array, bv_array}));
 
       tiforth::JoinKey key{.left = {"k"}, .right = {"k"}};
-      ARROW_RETURN_NOT_OK(builder->AppendTransform(
-          [engine, build_batches, key]() -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::HashJoinTransformOp>(engine, build_batches, key);
+      ARROW_RETURN_NOT_OK(
+          builder->AppendPipe([engine, build_batches, key]()
+                                  -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+            return std::make_unique<tiforth::HashJoinPipeOp>(engine, build_batches, key);
           }));
       continue;
     }
 
-    ARROW_RETURN_NOT_OK(builder->AppendTransform(
-        []() -> arrow::Result<tiforth::TransformOpPtr> {
-          return std::make_unique<tiforth::PassThroughTransformOp>();
+    ARROW_RETURN_NOT_OK(builder->AppendPipe(
+        []() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+          return std::make_unique<tiforth::PassThroughPipeOp>();
         }));
   }
   return arrow::Status::OK();
@@ -346,36 +348,27 @@ arrow::Status TranslateDagToTiForthAggBreakerPlan(const PipelineExecBuilder& dag
     return arrow::Status::Invalid("expected a hash agg transform op in the DAG");
   }
 
-  // Minimal translation for the unit test: build a breaker plan (partial transform + merge sink +
-  // result source) using a shared HashAggContext.
+  // Minimal translation for the unit test: build a breaker plan (build sink + result source)
+  // using a shared HashAggState.
   std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
   std::vector<tiforth::AggFunc> aggs;
   aggs.push_back({"cnt", "count_all", nullptr});
   aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
   ARROW_ASSIGN_OR_RAISE(const auto ctx_id,
-                        builder->AddBreakerState<tiforth::HashAggContext>(
+                        builder->AddBreakerState<tiforth::HashAggState>(
                             [engine, keys, aggs]()
-                                -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
-                              return std::make_shared<tiforth::HashAggContext>(engine, keys, aggs);
+                                -> arrow::Result<std::shared_ptr<tiforth::HashAggState>> {
+                              return std::make_shared<tiforth::HashAggState>(engine, keys, aggs);
                             }));
 
   ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
-  ARROW_RETURN_NOT_OK(builder->AppendPipe(
-      build_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx)
-          -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
-                              ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-        return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
-      }));
   ARROW_RETURN_NOT_OK(builder->SetStageSink(
       build_stage,
       [ctx_id](tiforth::PlanTaskContext* ctx)
           -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
-                              ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-        return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
+        ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
+        return std::make_unique<tiforth::HashAggSinkOp>(std::move(agg_state));
       }));
 
   ARROW_ASSIGN_OR_RAISE(const auto convergent_stage, builder->AddStage());
@@ -383,9 +376,8 @@ arrow::Status TranslateDagToTiForthAggBreakerPlan(const PipelineExecBuilder& dag
       convergent_stage,
       [ctx_id](tiforth::PlanTaskContext* ctx)
           -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
-                              ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-        return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx),
+        ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
+        return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_state),
                                                                 /*max_output_rows=*/1 << 30);
       }));
   ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, convergent_stage));
@@ -410,11 +402,12 @@ arrow::Status TranslateDagToTiForthArrowComputeAggPlan(const PipelineExecBuilder
       auto predicate = tiforth::MakeCall(
           "greater", {tiforth::MakeFieldRef("x"),
                       tiforth::MakeLiteral(std::make_shared<arrow::Int32Scalar>(1))});
-      ARROW_RETURN_NOT_OK(builder->AppendTransform(
-          stage,
-          [engine, predicate](tiforth::PlanTaskContext*) -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::FilterTransformOp>(engine, predicate);
-          }));
+      ARROW_RETURN_NOT_OK(
+          builder->AppendPipe(stage,
+                              [engine, predicate](tiforth::PlanTaskContext*)
+                                  -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+                                return std::make_unique<tiforth::FilterPipeOp>(engine, predicate);
+                              }));
       continue;
     }
 
@@ -427,7 +420,7 @@ arrow::Status TranslateDagToTiForthArrowComputeAggPlan(const PipelineExecBuilder
           stage,
           [engine, keys, aggs](tiforth::PlanTaskContext*)
               -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-            return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs);
+            return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, keys, aggs);
           }));
       continue;
     }

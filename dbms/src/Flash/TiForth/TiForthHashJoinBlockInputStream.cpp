@@ -215,9 +215,10 @@ void TiForthHashJoinBlockInputStream::initOnce()
         join_key.right.push_back(build_key_names[i]);
     }
 
-    auto append_status = builder->AppendTransform(
-        [engine = engine.get(), build_batches, join_key, pool = pool_holder.get()]() mutable -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::HashJoinTransformOp>(engine, std::move(build_batches), std::move(join_key), pool);
+    auto append_status = builder->AppendPipe(
+        [engine = engine.get(), build_batches, join_key, pool = pool_holder.get()]() mutable
+            -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+            return std::make_unique<tiforth::HashJoinPipeOp>(engine, std::move(build_batches), std::move(join_key), pool);
         });
     if (!append_status.ok())
         throw Exception(append_status.ToString(), ErrorCodes::LOGICAL_ERROR);
@@ -234,9 +235,9 @@ void TiForthHashJoinBlockInputStream::initOnce()
         ++field_index;
     }
 
-    append_status = builder->AppendTransform(
-        [engine = engine.get(), projection]() -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::ProjectionTransformOp>(engine, projection);
+    append_status = builder->AppendPipe(
+        [engine = engine.get(), projection]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+            return std::make_unique<tiforth::ProjectionPipeOp>(engine, projection);
         });
     if (!append_status.ok())
         throw Exception(append_status.ToString(), ErrorCodes::LOGICAL_ERROR);

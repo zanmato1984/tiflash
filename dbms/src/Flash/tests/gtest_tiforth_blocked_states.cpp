@@ -61,12 +61,12 @@ arrow::Result<std::unique_ptr<tiforth::Pipeline>> makePilotPipeline(
         return arrow::Status::Invalid("engine must not be null");
 
     ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine));
-    tiforth::PilotAsyncTransformOptions options;
+    tiforth::PilotAsyncOptions options;
     options.block_kind = block_kind;
     options.block_cycles = block_cycles;
 
-    ARROW_RETURN_NOT_OK(builder->AppendTransform([options]() -> arrow::Result<tiforth::TransformOpPtr> {
-        return std::make_unique<tiforth::PilotAsyncTransformOp>(options);
+    ARROW_RETURN_NOT_OK(builder->AppendPipe([options]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+        return std::make_unique<tiforth::PilotAsyncPipeOp>(options);
     }));
     return builder->Finalize();
 }
@@ -127,13 +127,13 @@ void runPilotOnAggBlockInputStream(tiforth::PilotBlockKind kind)
     ASSERT_TRUE(stage_res.ok()) << stage_res.status().ToString();
     const auto stage = stage_res.ValueOrDie();
 
-    tiforth::PilotAsyncTransformOptions options;
+    tiforth::PilotAsyncOptions options;
     options.block_kind = kind;
     options.block_cycles = 3;
-    ASSERT_TRUE(builder->AppendTransform(
+    ASSERT_TRUE(builder->AppendPipe(
         stage,
-        [options](tiforth::PlanTaskContext *) -> arrow::Result<tiforth::TransformOpPtr> {
-            return std::make_unique<tiforth::PilotAsyncTransformOp>(options);
+        [options](tiforth::PlanTaskContext *) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+            return std::make_unique<tiforth::PilotAsyncPipeOp>(options);
         }).ok());
 
     auto plan_res = builder->Finalize();

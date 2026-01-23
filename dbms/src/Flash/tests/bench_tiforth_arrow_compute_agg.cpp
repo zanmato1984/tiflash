@@ -466,7 +466,7 @@ void RunTiForthArrowComputeAgg(const BenchConfig & cfg, benchmark::State & state
             stage,
             [engine_ptr = engine.get(), keys, aggs](tiforth::PlanTaskContext *)
                 -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-                return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine_ptr, keys, aggs);
+                return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine_ptr, keys, aggs);
             });
         ARROW_CHECK_OK(status);
 
@@ -538,7 +538,7 @@ void RunTiForthArrowComputeAggDictKey(const BenchConfig & cfg, benchmark::State 
             stage,
             [engine_ptr = engine.get(), keys, aggs](tiforth::PlanTaskContext *)
                 -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-                return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine_ptr, keys, aggs);
+                return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine_ptr, keys, aggs);
             });
         ARROW_CHECK_OK(status);
 
@@ -612,7 +612,7 @@ void RunTiForthArrowComputeAggStableDictKey(const BenchConfig & cfg, benchmark::
             stage,
             [engine_ptr = engine.get(), keys, aggs, options](tiforth::PlanTaskContext *)
                 -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-                return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine_ptr, keys, aggs, options);
+                return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine_ptr, keys, aggs, options);
             });
         ARROW_CHECK_OK(status);
 

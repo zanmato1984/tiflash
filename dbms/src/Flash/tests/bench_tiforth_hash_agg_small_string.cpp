@@ -395,9 +395,9 @@ std::unique_ptr<tiforth::Plan> MakeTiForthAggPlan(const tiforth::Engine * engine
     aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
     const tiforth::Engine * engine_ptr = engine;
-    auto maybe_ctx_id = builder->AddBreakerState<tiforth::HashAggContext>(
-        [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggContext>> {
-            return std::make_shared<tiforth::HashAggContext>(engine_ptr, keys, aggs);
+    auto maybe_ctx_id = builder->AddBreakerState<tiforth::HashAggState>(
+        [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggState>> {
+            return std::make_shared<tiforth::HashAggState>(engine_ptr, keys, aggs);
         });
     ARROW_CHECK_OK(maybe_ctx_id.status());
     const auto ctx_id = maybe_ctx_id.ValueUnsafe();
@@ -406,18 +406,11 @@ std::unique_ptr<tiforth::Plan> MakeTiForthAggPlan(const tiforth::Engine * engine
     ARROW_CHECK_OK(maybe_build_stage.status());
     const auto build_stage = maybe_build_stage.ValueUnsafe();
 
-    ARROW_CHECK_OK(builder->AppendPipe(
-        build_stage,
-        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-            return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
-        }));
-
     ARROW_CHECK_OK(builder->SetStageSink(
         build_stage,
         [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-            return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
+            ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
+            return std::make_unique<tiforth::HashAggSinkOp>(std::move(agg_state));
         }));
 
     auto maybe_result_stage = builder->AddStage();
@@ -427,8 +420,8 @@ std::unique_ptr<tiforth::Plan> MakeTiForthAggPlan(const tiforth::Engine * engine
     ARROW_CHECK_OK(builder->SetStageSource(
         result_stage,
         [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
-            return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx));
+            ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
+            return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_state));
         }));
     ARROW_CHECK_OK(builder->AddDependency(build_stage, result_stage));
 
