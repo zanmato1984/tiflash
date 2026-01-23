@@ -32,8 +32,6 @@
 #include "tiforth/operators/filter.h"
 #include "tiforth/operators/projection.h"
 #include "tiforth/pipeline/op/op.h"
-#include "tiforth/plan.h"
-#include "tiforth/pipeline.h"
 
 namespace DB::tests {
 
@@ -68,24 +66,17 @@ arrow::Status RunFilterOnBlockWithCollation() {
   options_by_name.emplace("s", TiForth::ColumnOptions{.collation_id = 46});  // UTF8MB4_BIN (PAD SPACE)
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
 
   auto predicate = tiforth::MakeCall(
       "equal", {tiforth::MakeFieldRef("s"),
                 tiforth::MakeLiteral(std::make_shared<arrow::StringScalar>("a"))});
 
-  ARROW_RETURN_NOT_OK(builder->AppendPipe(
-      [engine_ptr = engine.get(),
-       predicate]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-        return std::make_unique<tiforth::FilterPipeOp>(engine_ptr, predicate);
-      }));
-
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
-
+  std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+  pipe_ops.push_back(std::make_unique<tiforth::FilterPipeOp>(engine.get(), predicate));
   ARROW_ASSIGN_OR_RAISE(
       auto outputs,
-      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input}, options_by_name,
-                                          arrow::default_memory_pool()));
+      TiForth::RunTiForthPipeOpsOnBlocks(std::move(pipe_ops), {input}, options_by_name,
+                                         arrow::default_memory_pool()));
 
   if (outputs.size() != 1) {
     return arrow::Status::Invalid("expected exactly 1 output block");
@@ -155,21 +146,15 @@ arrow::Status RunFilterOnBlockWithMixedCollation() {
   options_by_name.emplace("s_pad", TiForth::ColumnOptions{.collation_id = 46});  // UTF8MB4_BIN (PAD SPACE)
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
 
   auto predicate = tiforth::MakeCall("equal", {tiforth::MakeFieldRef("s_bin"), tiforth::MakeFieldRef("s_pad")});
-  ARROW_RETURN_NOT_OK(builder->AppendPipe(
-      [engine_ptr = engine.get(),
-       predicate]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-        return std::make_unique<tiforth::FilterPipeOp>(engine_ptr, predicate);
-      }));
 
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
-
+  std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+  pipe_ops.push_back(std::make_unique<tiforth::FilterPipeOp>(engine.get(), predicate));
   ARROW_ASSIGN_OR_RAISE(
       auto outputs,
-      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input}, options_by_name,
-                                          arrow::default_memory_pool()));
+      TiForth::RunTiForthPipeOpsOnBlocks(std::move(pipe_ops), {input}, options_by_name,
+                                         arrow::default_memory_pool()));
 
   if (outputs.size() != 1) {
     return arrow::Status::Invalid("expected exactly 1 output block");
@@ -271,24 +256,17 @@ arrow::Status RunProjectionDecimalAddOnBlock() {
   Block input(std::move(cols));
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
 
   std::vector<tiforth::ProjectionExpr> exprs;
   exprs.push_back({"sum", tiforth::MakeCall("add", {tiforth::MakeFieldRef("a"), tiforth::MakeFieldRef("b")})});
 
-  ARROW_RETURN_NOT_OK(builder->AppendPipe(
-      [engine_ptr = engine.get(),
-       exprs]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-        return std::make_unique<tiforth::ProjectionPipeOp>(engine_ptr, exprs);
-      }));
-
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
-
+  std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+  pipe_ops.push_back(std::make_unique<tiforth::ProjectionPipeOp>(engine.get(), std::move(exprs)));
   ARROW_ASSIGN_OR_RAISE(
       auto outputs,
-      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input},
-                                          /*input_options_by_name=*/{},
-                                          arrow::default_memory_pool()));
+      TiForth::RunTiForthPipeOpsOnBlocks(std::move(pipe_ops), {input},
+                                         /*input_options_by_name=*/{},
+                                         arrow::default_memory_pool()));
   if (outputs.size() != 1) {
     return arrow::Status::Invalid("expected exactly 1 output block");
   }
@@ -377,23 +355,17 @@ arrow::Status RunProjectionDecimalAddIntOnBlock() {
   Block input(std::move(cols));
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
 
   std::vector<tiforth::ProjectionExpr> exprs;
   exprs.push_back({"sum", tiforth::MakeCall("add", {tiforth::MakeFieldRef("a"), tiforth::MakeFieldRef("i")})});
 
-  ARROW_RETURN_NOT_OK(builder->AppendPipe(
-      [engine_ptr = engine.get(),
-       exprs]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-        return std::make_unique<tiforth::ProjectionPipeOp>(engine_ptr, exprs);
-      }));
-
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+  pipe_ops.push_back(std::make_unique<tiforth::ProjectionPipeOp>(engine.get(), std::move(exprs)));
   ARROW_ASSIGN_OR_RAISE(
       auto outputs,
-      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input},
-                                          /*input_options_by_name=*/{},
-                                          arrow::default_memory_pool()));
+      TiForth::RunTiForthPipeOpsOnBlocks(std::move(pipe_ops), {input},
+                                         /*input_options_by_name=*/{},
+                                         arrow::default_memory_pool()));
   if (outputs.size() != 1) {
     return arrow::Status::Invalid("expected exactly 1 output block");
   }
@@ -454,25 +426,19 @@ arrow::Status RunProjectionTiDBPackedMyTimeScalarsOnBlock() {
   Block input(std::move(cols));
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
 
   std::vector<tiforth::ProjectionExpr> exprs;
   exprs.push_back({"dow", tiforth::MakeCall("tidbDayOfWeek", {tiforth::MakeFieldRef("t")})});
   exprs.push_back({"woy", tiforth::MakeCall("tidbWeekOfYear", {tiforth::MakeFieldRef("t")})});
   exprs.push_back({"yw", tiforth::MakeCall("yearWeek", {tiforth::MakeFieldRef("t")})});
 
-  ARROW_RETURN_NOT_OK(builder->AppendPipe(
-      [engine_ptr = engine.get(),
-       exprs]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-        return std::make_unique<tiforth::ProjectionPipeOp>(engine_ptr, exprs);
-      }));
-
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+  pipe_ops.push_back(std::make_unique<tiforth::ProjectionPipeOp>(engine.get(), std::move(exprs)));
   ARROW_ASSIGN_OR_RAISE(
       auto outputs,
-      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input},
-                                          /*input_options_by_name=*/{},
-                                          arrow::default_memory_pool()));
+      TiForth::RunTiForthPipeOpsOnBlocks(std::move(pipe_ops), {input},
+                                         /*input_options_by_name=*/{},
+                                         arrow::default_memory_pool()));
   if (outputs.size() != 1) {
     return arrow::Status::Invalid("expected exactly 1 output block");
   }
@@ -552,7 +518,6 @@ arrow::Status RunTwoKeyHashAggOnBlocks() {
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
 
   std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef("s")},
                                        {"k2", tiforth::MakeFieldRef("k2")}};
@@ -560,38 +525,15 @@ arrow::Status RunTwoKeyHashAggOnBlocks() {
   aggs.push_back({"cnt", "count_all", nullptr});
   aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
-  const tiforth::Engine* engine_ptr = engine.get();
-  ARROW_ASSIGN_OR_RAISE(
-      const auto ctx_id,
-      builder->AddBreakerState<tiforth::HashAggState>(
-          [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggState>> {
-            return std::make_shared<tiforth::HashAggState>(engine_ptr, keys, aggs);
-          }));
-
-  ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
-  ARROW_RETURN_NOT_OK(builder->SetStageSink(
-      build_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx)
-          -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-        return std::make_unique<tiforth::HashAggSinkOp>(std::move(agg_state));
-      }));
-
-  ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
-  ARROW_RETURN_NOT_OK(builder->SetStageSource(
-      result_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx)
-          -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-        return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_state),
-                                                                /*max_output_rows=*/1 << 30);
-      }));
-  ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
-
-  ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto outputs,
-                        TiForth::RunTiForthPlanOnBlocks(*plan, {input}, options_by_name,
-                                                        arrow::default_memory_pool()));
+                        TiForth::RunTiForthHashAggOnBlocks(
+                            engine.get(),
+                            /*build_pipe_ops=*/{},
+                            std::move(keys),
+                            std::move(aggs),
+                            {input},
+                            options_by_name,
+                            arrow::default_memory_pool()));
   if (outputs.size() != 1) {
     return arrow::Status::Invalid("expected exactly 1 hash agg output block");
   }
@@ -687,45 +629,21 @@ arrow::Status RunGeneralCiHashAggOnBlocks() {
   options_by_name.emplace("s", TiForth::ColumnOptions{.collation_id = 45});  // UTF8MB4_GENERAL_CI (PAD SPACE)
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
 
   std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef("s")}};
   std::vector<tiforth::AggFunc> aggs;
   aggs.push_back({"cnt", "count_all", nullptr});
   aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
-  const tiforth::Engine* engine_ptr = engine.get();
-  ARROW_ASSIGN_OR_RAISE(
-      const auto ctx_id,
-      builder->AddBreakerState<tiforth::HashAggState>(
-          [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggState>> {
-            return std::make_shared<tiforth::HashAggState>(engine_ptr, keys, aggs);
-          }));
-
-  ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
-  ARROW_RETURN_NOT_OK(builder->SetStageSink(
-      build_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx)
-          -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-        return std::make_unique<tiforth::HashAggSinkOp>(std::move(agg_state));
-      }));
-
-  ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
-  ARROW_RETURN_NOT_OK(builder->SetStageSource(
-      result_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx)
-          -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-        return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_state),
-                                                                /*max_output_rows=*/1 << 30);
-      }));
-  ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
-
-  ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
   ARROW_ASSIGN_OR_RAISE(auto outputs,
-                        TiForth::RunTiForthPlanOnBlocks(*plan, {input}, options_by_name,
-                                                        arrow::default_memory_pool()));
+                        TiForth::RunTiForthHashAggOnBlocks(
+                            engine.get(),
+                            /*build_pipe_ops=*/{},
+                            std::move(keys),
+                            std::move(aggs),
+                            {input},
+                            options_by_name,
+                            arrow::default_memory_pool()));
   if (outputs.size() != 1) {
     return arrow::Status::Invalid("expected exactly 1 hash agg output block");
   }
@@ -860,21 +778,14 @@ arrow::Status RunTwoKeyHashJoinOnBlocks() {
   build_batches.push_back(std::move(build_batch));
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
-  const auto* eng = engine.get();
 
   tiforth::JoinKey key{.left = {"s", "d"}, .right = {"bs", "bd"}};
-  ARROW_RETURN_NOT_OK(
-      builder->AppendPipe([eng, build_batches, key]()
-                              -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-        return std::make_unique<tiforth::HashJoinPipeOp>(eng, build_batches, key);
-      }));
-
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+  pipe_ops.push_back(std::make_unique<tiforth::HashJoinPipeOp>(engine.get(), build_batches, key));
   ARROW_ASSIGN_OR_RAISE(
       auto outputs,
-      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {probe_block}, probe_options,
-                                          arrow::default_memory_pool()));
+      TiForth::RunTiForthPipeOpsOnBlocks(std::move(pipe_ops), {probe_block}, probe_options,
+                                         arrow::default_memory_pool()));
   if (outputs.size() != 1) {
     return arrow::Status::Invalid("expected exactly 1 join output block");
   }
@@ -993,21 +904,14 @@ arrow::Status RunUnicode0900HashJoinOnBlocks() {
   build_batches.push_back(std::move(build_batch));
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
-  const auto* eng = engine.get();
 
   tiforth::JoinKey key{.left = {"s"}, .right = {"bs"}};
-  ARROW_RETURN_NOT_OK(
-      builder->AppendPipe([eng, build_batches, key]()
-                              -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-        return std::make_unique<tiforth::HashJoinPipeOp>(eng, build_batches, key);
-      }));
-
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+  pipe_ops.push_back(std::make_unique<tiforth::HashJoinPipeOp>(engine.get(), build_batches, key));
   ARROW_ASSIGN_OR_RAISE(
       auto outputs,
-      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {probe_block}, probe_options,
-                                          arrow::default_memory_pool()));
+      TiForth::RunTiForthPipeOpsOnBlocks(std::move(pipe_ops), {probe_block}, probe_options,
+                                         arrow::default_memory_pool()));
   if (outputs.size() != 1) {
     return arrow::Status::Invalid("expected exactly 1 join output block");
   }

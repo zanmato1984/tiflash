@@ -37,6 +37,7 @@
 #include <DataStreams/UnionBlockInputStream.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <Flash/TiForth/TiForthAggBlockInputStream.h>
+#include <Flash/TiForth/TiForthPipelineBlockInputStream.h>
 #include <Flash/TiForth/TiFlashMemoryPool.h>
 
 #include <arrow/memory_pool.h>
@@ -50,7 +51,6 @@
 #include "tiforth/operators/arrow_compute_agg.h"
 #include "tiforth/operators/hash_agg.h"
 #include "tiforth/pipeline/op/op.h"
-#include "tiforth/plan.h"
 #endif // defined(TIFLASH_ENABLE_TIFORTH)
 
 namespace DB
@@ -108,14 +108,6 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
         return std::nullopt;
     }
     auto engine = std::move(engine_res).ValueOrDie();
-
-    auto builder_res = tiforth::PlanBuilder::Create(engine.get());
-    if (!builder_res.ok())
-    {
-        LOG_WARNING(log, "TiForthAgg: failed to create plan builder, fallback to native agg: {}", builder_res.status().ToString());
-        return std::nullopt;
-    }
-    auto builder = std::move(builder_res).ValueOrDie();
 
     std::vector<tiforth::AggKey> keys;
     keys.reserve(aggregation_keys.size());
@@ -201,70 +193,37 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
     if (!use_arrow_compute && !use_hash_agg)
         return std::nullopt;
 
+    BlockInputStreamPtr tiforth_stream;
     if (use_arrow_compute)
     {
-        auto stage_res = builder->AddStage();
-        if (!stage_res.ok())
-            return std::nullopt;
-        const auto stage = stage_res.ValueOrDie();
+        std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+        tiforth::ArrowComputeAggOptions options;
+        options.stable_dictionary_encode_binary_keys = use_arrow_compute_string_keys;
+        pipe_ops.push_back(std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine.get(), keys, aggs, options));
 
-        auto st = builder->AppendPipe(
-            stage,
-            [engine = engine.get(), keys, aggs, use_arrow_compute_string_keys](tiforth::PlanTaskContext *) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-                tiforth::ArrowComputeAggOptions options;
-                options.stable_dictionary_encode_binary_keys = use_arrow_compute_string_keys;
-                return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, keys, aggs, options);
-            });
-        if (!st.ok())
-            return std::nullopt;
+        tiforth_stream = std::make_shared<DB::TiForth::TiForthPipelineBlockInputStream>(
+            "TiForthAggArrowCompute",
+            input_stream,
+            std::move(engine),
+            std::move(pipe_ops),
+            output_cols,
+            /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
+            std::move(pool_holder),
+            before_agg_header);
     }
     else
     {
-        const tiforth::Engine * engine_ptr = engine.get();
-        auto ctx_id_res = builder->AddBreakerState<tiforth::HashAggState>(
-            [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggState>> {
-                return std::make_shared<tiforth::HashAggState>(engine_ptr, keys, aggs);
-            });
-        if (!ctx_id_res.ok())
-            return std::nullopt;
-        const auto ctx_id = ctx_id_res.ValueOrDie();
-
-        auto build_stage_res = builder->AddStage();
-        if (!build_stage_res.ok())
-            return std::nullopt;
-        const auto build_stage = build_stage_res.ValueOrDie();
-
-        auto st = builder->SetStageSink(
-            build_stage,
-            [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
-                ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-                return std::make_unique<tiforth::HashAggSinkOp>(std::move(agg_ctx));
-            });
-        if (!st.ok())
-            return std::nullopt;
-
-        auto result_stage_res = builder->AddStage();
-        if (!result_stage_res.ok())
-            return std::nullopt;
-        const auto result_stage = result_stage_res.ValueOrDie();
-
-        st = builder->SetStageSource(
-            result_stage,
-            [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
-                ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-                return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx));
-            });
-        if (!st.ok())
-            return std::nullopt;
-
-        st = builder->AddDependency(build_stage, result_stage);
-        if (!st.ok())
-            return std::nullopt;
+        RUNTIME_CHECK(use_hash_agg);
+        tiforth_stream = std::make_shared<DB::TiForth::TiForthAggBlockInputStream>(
+            input_stream,
+            std::move(engine),
+            std::move(keys),
+            std::move(aggs),
+            output_cols,
+            /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
+            std::move(pool_holder),
+            before_agg_header);
     }
-
-    auto plan_res = builder->Finalize();
-    if (!plan_res.ok())
-        return std::nullopt;
 
     if (has_string_key)
     {
@@ -280,15 +239,7 @@ std::optional<BlockInputStreamPtr> tryBuildTiForthAggStream(
         else
             LOG_DEBUG(log, "TiForthAgg: string group keys detected, fallback to native agg");
     }
-
-    return std::make_shared<DB::TiForth::TiForthAggBlockInputStream>(
-        input_stream,
-        std::move(engine),
-        std::move(plan_res).ValueOrDie(),
-        output_cols,
-        /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
-        std::move(pool_holder),
-        before_agg_header);
+    return tiforth_stream;
 }
 
 } // namespace

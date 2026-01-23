@@ -23,14 +23,19 @@
 #include <arrow/memory_pool.h>
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
+
+#include "tiforth/operators/hash_agg.h"
+#include "tiforth/pipeline/op/op.h"
+#include "tiforth/pipeline/task_groups.h"
+#include "tiforth/task/resumer.h"
+#include "tiforth/task/task_context.h"
 
 namespace tiforth
 {
 class Engine;
-class Plan;
-class Task;
 } // namespace tiforth
 
 namespace DB::TiForth
@@ -42,7 +47,8 @@ public:
     TiForthAggBlockInputStream(
         const BlockInputStreamPtr & input_stream_,
         std::unique_ptr<tiforth::Engine> engine_,
-        std::unique_ptr<tiforth::Plan> plan_,
+        std::vector<tiforth::AggKey> keys_,
+        std::vector<tiforth::AggFunc> aggs_,
         const NamesAndTypesList & output_columns_,
         const std::unordered_map<String, ColumnOptions> & input_options_by_name_,
         std::shared_ptr<arrow::MemoryPool> pool_holder_,
@@ -61,11 +67,20 @@ protected:
 
 private:
     void initOnce();
+    void DriveUntilOutputOrFinished();
 
     BlockInputStreamPtr input_stream;
     std::unique_ptr<tiforth::Engine> engine;
-    std::unique_ptr<tiforth::Plan> plan;
-    std::unique_ptr<tiforth::Task> task;
+    std::vector<tiforth::AggKey> keys;
+    std::vector<tiforth::AggFunc> aggs;
+    std::shared_ptr<tiforth::HashAggState> agg_state;
+    std::unique_ptr<tiforth::pipeline::SourceOp> result_source_op;
+    std::unique_ptr<tiforth::pipeline::SinkOp> sink_op;
+    tiforth::task::TaskGroups task_groups;
+    tiforth::task::TaskContext task_ctx;
+    std::size_t next_group = 0;
+    std::optional<Block> next_output;
+    tiforth::task::ResumerPtr output_resumer;
     NamesAndTypesList output_columns;
     std::unordered_map<String, ColumnOptions> input_options_by_name;
     std::shared_ptr<arrow::MemoryPool> pool_holder;
@@ -74,8 +89,6 @@ private:
     bool initialized = false;
     bool prefix_called = false;
     bool suffix_called = false;
-    bool input_closed = false;
-    bool pushed_any_input = false;
     bool finished = false;
 };
 

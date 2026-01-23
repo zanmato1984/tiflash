@@ -14,6 +14,7 @@
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Flash/TiForth/ArrowTypeMapping.h>
+#include <Flash/TiForth/TaskGroupRunner.h>
 
 #include <arrow/array.h>
 #include <arrow/builder.h>
@@ -36,10 +37,9 @@
 #include "tiforth/expr.h"
 #include "tiforth/operators/hash_agg.h"
 #include "tiforth/operators/hash_join.h"
+#include "tiforth/pipeline/logical_pipeline.h"
 #include "tiforth/pipeline/op/op.h"
-#include "tiforth/plan.h"
-#include "tiforth/pipeline.h"
-#include "tiforth/task.h"
+#include "tiforth/pipeline/task_groups.h"
 
 namespace DB::tests {
 
@@ -99,113 +99,163 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ToArrow(const Block & block) 
   return TiForth::toArrowRecordBatch(block, options, arrow::default_memory_pool());
 }
 
+class VectorSourceOp final : public tiforth::pipeline::SourceOp {
+ public:
+  explicit VectorSourceOp(std::vector<std::shared_ptr<arrow::RecordBatch>> batches_)
+      : batches(std::move(batches_)) {}
+
+  tiforth::pipeline::PipelineSource Source(const tiforth::pipeline::PipelineContext &) override {
+    return [this](const tiforth::pipeline::PipelineContext &, const tiforth::task::TaskContext &,
+                  tiforth::pipeline::ThreadId thread_id) -> tiforth::pipeline::OpResult {
+      if (thread_id != 0) {
+        return arrow::Status::Invalid("VectorSourceOp only supports thread_id=0");
+      }
+      if (next >= batches.size()) {
+        return tiforth::pipeline::OpOutput::Finished();
+      }
+      auto batch = batches[next++];
+      if (batch == nullptr) {
+        return arrow::Status::Invalid("source batch must not be null");
+      }
+      return tiforth::pipeline::OpOutput::SourcePipeHasMore(std::move(batch));
+    };
+  }
+
+ private:
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+  std::size_t next = 0;
+};
+
+class CollectSinkOp final : public tiforth::pipeline::SinkOp {
+ public:
+  explicit CollectSinkOp(std::vector<std::shared_ptr<arrow::RecordBatch>> * outputs_)
+      : outputs(outputs_) {}
+
+  tiforth::pipeline::PipelineSink Sink(const tiforth::pipeline::PipelineContext &) override {
+    return [this](const tiforth::pipeline::PipelineContext &, const tiforth::task::TaskContext &,
+                  tiforth::pipeline::ThreadId thread_id,
+                  std::optional<tiforth::pipeline::Batch> input) -> tiforth::pipeline::OpResult {
+      if (thread_id != 0) {
+        return arrow::Status::Invalid("CollectSinkOp only supports thread_id=0");
+      }
+      if (outputs == nullptr) {
+        return arrow::Status::Invalid("outputs must not be null");
+      }
+      if (!input.has_value()) {
+        return tiforth::pipeline::OpOutput::PipeSinkNeedsMore();
+      }
+      auto batch = std::move(*input);
+      if (batch != nullptr) {
+        outputs->push_back(std::move(batch));
+      }
+      return tiforth::pipeline::OpOutput::PipeSinkNeedsMore();
+    };
+  }
+
+ private:
+  std::vector<std::shared_ptr<arrow::RecordBatch>> * outputs = nullptr;
+};
+
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> RunPipeline(
     std::shared_ptr<arrow::RecordBatch> input,
     std::vector<std::function<arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>>(const tiforth::Engine*)>>
         transforms) {
+  if (input == nullptr) {
+    return arrow::Status::Invalid("input batch must not be null");
+  }
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
+
+  std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+  pipe_ops.reserve(transforms.size());
   for (auto & factory : transforms) {
-    ARROW_RETURN_NOT_OK(builder->AppendPipe(
-        [engine_ptr = engine.get(), factory = std::move(factory)]() mutable
-            -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> { return factory(engine_ptr); }));
-  }
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
-  ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
-
-  ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
-  if (initial_state != tiforth::TaskState::kNeedInput) {
-    return arrow::Status::Invalid("expected TaskState::kNeedInput");
+    if (factory == nullptr) {
+      return arrow::Status::Invalid("pipeline factory must not be null");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto op, factory(engine.get()));
+    if (op == nullptr) {
+      return arrow::Status::Invalid("pipeline factory returned null op");
+    }
+    pipe_ops.push_back(std::move(op));
   }
 
-  ARROW_RETURN_NOT_OK(task->PushInput(std::move(input)));
-  ARROW_RETURN_NOT_OK(task->CloseInput());
+  auto source_op = std::make_unique<VectorSourceOp>(std::vector<std::shared_ptr<arrow::RecordBatch>>{input});
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> outputs;
-  while (true) {
-    ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
-    if (state == tiforth::TaskState::kFinished) {
-      break;
-    }
-    if (state == tiforth::TaskState::kNeedInput) {
-      continue;
-    }
-    if (state != tiforth::TaskState::kHasOutput) {
-      return arrow::Status::Invalid("unexpected task state");
-    }
+  auto sink_op = std::make_unique<CollectSinkOp>(&outputs);
 
-    ARROW_ASSIGN_OR_RAISE(auto out, task->PullOutput());
-    if (out == nullptr) {
-      return arrow::Status::Invalid("expected non-null output batch");
+  tiforth::pipeline::LogicalPipeline::Channel channel;
+  channel.source_op = source_op.get();
+  channel.pipe_ops.reserve(pipe_ops.size());
+  for (const auto & op : pipe_ops) {
+    if (op == nullptr) {
+      return arrow::Status::Invalid("pipe op must not be null");
     }
-    outputs.push_back(std::move(out));
+    channel.pipe_ops.push_back(op.get());
   }
+
+  tiforth::pipeline::LogicalPipeline logical_pipeline{"TypeMappingPipeline", {std::move(channel)},
+                                                      sink_op.get()};
+  ARROW_ASSIGN_OR_RAISE(
+      auto task_groups,
+      tiforth::pipeline::CompileToTaskGroups(tiforth::pipeline::PipelineContext{}, logical_pipeline, /*dop=*/1));
+  const auto task_ctx = TiForth::MakeTaskContext();
+  ARROW_RETURN_NOT_OK(TiForth::RunTaskGroupsToCompletion(task_groups, task_ctx));
 
   return outputs;
 }
 
-arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> RunHashAggPlan(
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> RunHashAgg(
     std::shared_ptr<arrow::RecordBatch> input,
     std::vector<tiforth::AggKey> keys,
     std::vector<tiforth::AggFunc> aggs) {
+  if (input == nullptr) {
+    return arrow::Status::Invalid("input batch must not be null");
+  }
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
+  auto agg_state = std::make_shared<tiforth::HashAggState>(
+      engine.get(),
+      std::move(keys),
+      std::move(aggs),
+      /*grouper_factory=*/tiforth::HashAggState::GrouperFactory{},
+      arrow::default_memory_pool(),
+      /*dop=*/1);
 
-  const tiforth::Engine* engine_ptr = engine.get();
-  ARROW_ASSIGN_OR_RAISE(
-      const auto ctx_id,
-      builder->AddBreakerState<tiforth::HashAggState>(
-          [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggState>> {
-            return std::make_shared<tiforth::HashAggState>(engine_ptr, keys, aggs);
-          }));
+  // Build stage.
+  {
+    auto source_op = std::make_unique<VectorSourceOp>(std::vector<std::shared_ptr<arrow::RecordBatch>>{input});
+    auto sink_op = std::make_unique<tiforth::HashAggSinkOp>(agg_state);
 
-  ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
-  ARROW_RETURN_NOT_OK(builder->SetStageSink(
-      build_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-        return std::make_unique<tiforth::HashAggSinkOp>(std::move(agg_state));
-      }));
+    tiforth::pipeline::LogicalPipeline::Channel channel;
+    channel.source_op = source_op.get();
+    channel.pipe_ops = {};
 
-  ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
-  ARROW_RETURN_NOT_OK(builder->SetStageSource(
-      result_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-        return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_state),
-                                                                /*max_output_rows=*/1 << 30);
-      }));
-  ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
-
-  ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
-  ARROW_ASSIGN_OR_RAISE(auto task, plan->CreateTask());
-
-  ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
-  if (initial_state != tiforth::TaskState::kNeedInput) {
-    return arrow::Status::Invalid("expected TaskState::kNeedInput");
+    tiforth::pipeline::LogicalPipeline logical_pipeline{"TypeMappingHashAggBuild", {std::move(channel)},
+                                                        sink_op.get()};
+    ARROW_ASSIGN_OR_RAISE(
+        auto task_groups,
+        tiforth::pipeline::CompileToTaskGroups(tiforth::pipeline::PipelineContext{}, logical_pipeline, /*dop=*/1));
+    const auto task_ctx = TiForth::MakeTaskContext();
+    ARROW_RETURN_NOT_OK(TiForth::RunTaskGroupsToCompletion(task_groups, task_ctx));
   }
 
-  ARROW_RETURN_NOT_OK(task->PushInput(std::move(input)));
-  ARROW_RETURN_NOT_OK(task->CloseInput());
-
+  // Result stage.
   std::vector<std::shared_ptr<arrow::RecordBatch>> outputs;
-  while (true) {
-    ARROW_ASSIGN_OR_RAISE(auto state, task->Step());
-    if (state == tiforth::TaskState::kFinished) {
-      break;
-    }
-    if (state == tiforth::TaskState::kNeedInput) {
-      continue;
-    }
-    if (state != tiforth::TaskState::kHasOutput) {
-      return arrow::Status::Invalid("unexpected task state");
-    }
+  {
+    auto source_op =
+        std::make_unique<tiforth::HashAggResultSourceOp>(agg_state, /*max_output_rows=*/1 << 30);
+    auto sink_op = std::make_unique<CollectSinkOp>(&outputs);
 
-    ARROW_ASSIGN_OR_RAISE(auto out, task->PullOutput());
-    if (out == nullptr) {
-      return arrow::Status::Invalid("expected non-null output batch");
-    }
-    outputs.push_back(std::move(out));
+    tiforth::pipeline::LogicalPipeline::Channel channel;
+    channel.source_op = source_op.get();
+    channel.pipe_ops = {};
+
+    tiforth::pipeline::LogicalPipeline logical_pipeline{"TypeMappingHashAggResult", {std::move(channel)},
+                                                        sink_op.get()};
+    ARROW_ASSIGN_OR_RAISE(
+        auto task_groups,
+        tiforth::pipeline::CompileToTaskGroups(tiforth::pipeline::PipelineContext{}, logical_pipeline, /*dop=*/1));
+    const auto task_ctx = TiForth::MakeTaskContext();
+    ARROW_RETURN_NOT_OK(TiForth::RunTaskGroupsToCompletion(task_groups, task_ctx));
   }
 
   return outputs;
@@ -230,7 +280,7 @@ arrow::Status RunTypeMappingAndOps() {
     std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef("s")}};
     std::vector<tiforth::AggFunc> aggs;
     aggs.push_back({"cnt", "count_all", nullptr});
-    ARROW_ASSIGN_OR_RAISE(auto outputs, RunHashAggPlan(input, keys, aggs));
+    ARROW_ASSIGN_OR_RAISE(auto outputs, RunHashAgg(input, keys, aggs));
     if (outputs.size() != 1) {
       return arrow::Status::Invalid("expected exactly 1 hash agg output batch");
     }
@@ -261,7 +311,7 @@ arrow::Status RunTypeMappingAndOps() {
     std::vector<tiforth::AggKey> keys = {{"d", tiforth::MakeFieldRef("d")}};
     std::vector<tiforth::AggFunc> aggs;
     aggs.push_back({"cnt", "count_all", nullptr});
-    ARROW_ASSIGN_OR_RAISE(auto outputs, RunHashAggPlan(input, keys, aggs));
+    ARROW_ASSIGN_OR_RAISE(auto outputs, RunHashAgg(input, keys, aggs));
     if (outputs.size() != 1) {
       return arrow::Status::Invalid("expected exactly 1 decimal hash agg output batch");
     }
@@ -292,7 +342,7 @@ arrow::Status RunTypeMappingAndOps() {
     std::vector<tiforth::AggKey> keys = {{"t", tiforth::MakeFieldRef("t")}};
     std::vector<tiforth::AggFunc> aggs;
     aggs.push_back({"cnt", "count_all", nullptr});
-    ARROW_ASSIGN_OR_RAISE(auto outputs, RunHashAggPlan(input, keys, aggs));
+    ARROW_ASSIGN_OR_RAISE(auto outputs, RunHashAgg(input, keys, aggs));
     if (outputs.size() != 1) {
       return arrow::Status::Invalid("expected exactly 1 datetime hash agg output batch");
     }

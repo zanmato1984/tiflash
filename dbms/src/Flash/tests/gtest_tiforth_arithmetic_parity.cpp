@@ -22,7 +22,6 @@
 #include "tiforth/engine.h"
 #include "tiforth/expr.h"
 #include "tiforth/operators/projection.h"
-#include "tiforth/pipeline.h"
 
 namespace DB::tests {
 
@@ -41,22 +40,16 @@ arrow::Result<ColumnWithTypeAndName> EvalTiForthProjection(const Block& input,
   }
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
 
   std::vector<tiforth::ProjectionExpr> exprs;
   exprs.push_back({std::string(out_name), expr});
 
-  ARROW_RETURN_NOT_OK(builder->AppendPipe(
-      [engine_ptr = engine.get(), exprs]()
-          -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-        return std::make_unique<tiforth::ProjectionPipeOp>(engine_ptr, exprs);
-      }));
-
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
+  std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+  pipe_ops.push_back(std::make_unique<tiforth::ProjectionPipeOp>(engine.get(), exprs));
 
   ARROW_ASSIGN_OR_RAISE(
       auto outputs,
-      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input},
+      TiForth::RunTiForthPipeOpsOnBlocks(std::move(pipe_ops), {input},
                                           /*input_options_by_name=*/{},
                                           arrow::default_memory_pool()));
   if (outputs.size() != 1) {

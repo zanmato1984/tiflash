@@ -18,17 +18,19 @@
 
 #include <Common/Exception.h>
 #include <Flash/TiForth/ArrowBlockConversion.h>
+#include <Flash/TiForth/TaskGroupRunner.h>
 
 #include <arrow/status.h>
 
-#include <algorithm>
-#include <string>
+#include <thread>
+#include <utility>
 
 #include "tiforth/engine.h"
+#include "tiforth/expr.h"
 #include "tiforth/operators/hash_join.h"
 #include "tiforth/operators/projection.h"
-#include "tiforth/pipeline.h"
-#include "tiforth/task.h"
+#include "tiforth/pipeline/logical_pipeline.h"
+#include "tiforth/pipeline/pipeline_context.h"
 
 namespace DB::TiForth
 {
@@ -48,70 +50,113 @@ Block makeHeader(const NamesAndTypesList & columns)
     return header;
 }
 
-const char * taskStateName(const tiforth::TaskState state)
+class BlockInputStreamSourceOp final : public tiforth::pipeline::SourceOp
 {
-    switch (state)
-    {
-    case tiforth::TaskState::kNeedInput:
-        return "NeedInput";
-    case tiforth::TaskState::kHasOutput:
-        return "HasOutput";
-    case tiforth::TaskState::kFinished:
-        return "Finished";
-    case tiforth::TaskState::kCancelled:
-        return "Cancelled";
-    case tiforth::TaskState::kWaiting:
-        return "Waiting";
-    case tiforth::TaskState::kWaitForNotify:
-        return "WaitForNotify";
-    case tiforth::TaskState::kIOIn:
-        return "IOIn";
-    case tiforth::TaskState::kIOOut:
-        return "IOOut";
-    }
-    return "Unknown";
-}
+public:
+    BlockInputStreamSourceOp(
+        BlockInputStreamPtr input_stream_,
+        std::unordered_map<String, ColumnOptions> input_options_by_name_,
+        arrow::MemoryPool * pool_,
+        Block sample_input_block_)
+        : input_stream(std::move(input_stream_))
+        , input_options_by_name(std::move(input_options_by_name_))
+        , pool(pool_)
+        , sample_input_block(std::move(sample_input_block_))
+    {}
 
-tiforth::TaskState driveBlockedTaskOrThrow(tiforth::Task & task, tiforth::TaskState state)
+    tiforth::pipeline::PipelineSource Source(const tiforth::pipeline::PipelineContext &) override
+    {
+        return [this](const tiforth::pipeline::PipelineContext &, const tiforth::task::TaskContext &, tiforth::pipeline::ThreadId thread_id) -> tiforth::pipeline::OpResult {
+            if (thread_id != 0)
+                return arrow::Status::Invalid("BlockInputStreamSourceOp only supports thread_id=0");
+            if (input_stream == nullptr)
+                return arrow::Status::Invalid("input stream must not be null");
+            if (pool == nullptr)
+                return arrow::Status::Invalid("arrow memory pool must not be null");
+
+            if (eos)
+                return tiforth::pipeline::OpOutput::Finished();
+
+            if (Block block = input_stream->read())
+            {
+                ARROW_ASSIGN_OR_RAISE(auto batch, toArrowRecordBatch(block, input_options_by_name, pool));
+                pushed_any_input = true;
+                return tiforth::pipeline::OpOutput::SourcePipeHasMore(std::move(batch));
+            }
+
+            eos = true;
+            if (!pushed_any_input)
+            {
+                ARROW_ASSIGN_OR_RAISE(auto batch, toArrowRecordBatch(sample_input_block, input_options_by_name, pool));
+                pushed_any_input = true;
+                return tiforth::pipeline::OpOutput::SourcePipeHasMore(std::move(batch));
+            }
+            return tiforth::pipeline::OpOutput::Finished();
+        };
+    }
+
+private:
+    BlockInputStreamPtr input_stream;
+    std::unordered_map<String, ColumnOptions> input_options_by_name;
+    arrow::MemoryPool * pool = nullptr;
+    Block sample_input_block;
+
+    bool eos = false;
+    bool pushed_any_input = false;
+};
+
+class SingleOutputSinkOp final : public tiforth::pipeline::SinkOp
 {
-    while (true)
-    {
-        switch (state)
-        {
-        case tiforth::TaskState::kIOIn:
-        case tiforth::TaskState::kIOOut:
-        {
-            auto st = task.ExecuteIO();
-            if (!st.ok())
-                throw Exception(st.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-            state = st.ValueOrDie();
-            break;
-        }
-        case tiforth::TaskState::kWaiting:
-        {
-            auto st = task.Await();
-            if (!st.ok())
-                throw Exception(st.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-            state = st.ValueOrDie();
-            break;
-        }
-        case tiforth::TaskState::kWaitForNotify:
-        {
-            auto st = task.Notify();
-            if (!st.ok())
-                throw Exception(st.ToString(), ErrorCodes::LOGICAL_ERROR);
+public:
+    SingleOutputSinkOp(std::optional<Block> * next_output_, tiforth::task::ResumerPtr * output_resumer_, Block output_header_)
+        : next_output(next_output_)
+        , output_resumer(output_resumer_)
+        , output_header(std::move(output_header_))
+    {}
 
-            auto step = task.Step();
-            if (!step.ok())
-                throw Exception(step.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-            state = step.ValueOrDie();
-            break;
-        }
-        default:
-            return state;
-        }
+    tiforth::pipeline::PipelineSink Sink(const tiforth::pipeline::PipelineContext &) override
+    {
+        return [this](const tiforth::pipeline::PipelineContext &, const tiforth::task::TaskContext &, tiforth::pipeline::ThreadId thread_id, std::optional<tiforth::pipeline::Batch> input) -> tiforth::pipeline::OpResult {
+            if (thread_id != 0)
+                return arrow::Status::Invalid("SingleOutputSinkOp only supports thread_id=0");
+            if (next_output == nullptr || output_resumer == nullptr)
+                return arrow::Status::Invalid("sink output pointers must not be null");
+
+            if (!input.has_value())
+            {
+                if (*output_resumer != nullptr && !(*output_resumer)->IsResumed())
+                    return tiforth::pipeline::OpOutput::Blocked(*output_resumer);
+                output_resumer->reset();
+                return tiforth::pipeline::OpOutput::PipeSinkNeedsMore();
+            }
+
+            if (next_output->has_value())
+                return arrow::Status::Invalid("SingleOutputSinkOp output buffer is full");
+
+            auto batch = std::move(*input);
+            if (batch == nullptr)
+                return arrow::Status::Invalid("sink input batch must not be null");
+
+            ARROW_ASSIGN_OR_RAISE(auto out, fromArrowRecordBatch(batch));
+            Block reordered;
+            for (const auto & elem : output_header)
+            {
+                if (!out.block.has(elem.name))
+                    return arrow::Status::Invalid("output is missing required column: ", elem.name);
+                reordered.insert(out.block.getByName(elem.name));
+            }
+
+            *next_output = std::move(reordered);
+            *output_resumer = std::make_shared<SimpleResumer>();
+            return tiforth::pipeline::OpOutput::Blocked(*output_resumer);
+        };
     }
-}
+
+private:
+    std::optional<Block> * next_output = nullptr;
+    tiforth::task::ResumerPtr * output_resumer = nullptr;
+    Block output_header;
+};
 
 } // namespace
 
@@ -199,13 +244,6 @@ void TiForthHashJoinBlockInputStream::initOnce()
     if (engine == nullptr)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "tiforth engine must not be null");
 
-    auto builder_res = tiforth::PipelineBuilder::Create(engine.get());
-    if (!builder_res.ok())
-        throw Exception(builder_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-    auto builder = std::move(builder_res).ValueOrDie();
-    if (builder == nullptr)
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "tiforth pipeline builder must not be null");
-
     tiforth::JoinKey join_key;
     join_key.left.reserve(probe_key_names.size());
     join_key.right.reserve(build_key_names.size());
@@ -215,13 +253,8 @@ void TiForthHashJoinBlockInputStream::initOnce()
         join_key.right.push_back(build_key_names[i]);
     }
 
-    auto append_status = builder->AppendPipe(
-        [engine = engine.get(), build_batches, join_key, pool = pool_holder.get()]() mutable
-            -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-            return std::make_unique<tiforth::HashJoinPipeOp>(engine, std::move(build_batches), std::move(join_key), pool);
-        });
-    if (!append_status.ok())
-        throw Exception(append_status.ToString(), ErrorCodes::LOGICAL_ERROR);
+    pipe_ops.clear();
+    pipe_ops.push_back(std::make_unique<tiforth::HashJoinPipeOp>(engine.get(), std::move(build_batches), std::move(join_key), pool_holder.get()));
 
     if (output_columns.size() != sample_probe_block.columns() + sample_build_block.columns())
         throw Exception(ErrorCodes::NOT_IMPLEMENTED, "TiForthHashJoin output schema mismatch: cannot build stable projection");
@@ -234,130 +267,102 @@ void TiForthHashJoinBlockInputStream::initOnce()
         projection.push_back({col.name, tiforth::MakeFieldRef(field_index)});
         ++field_index;
     }
+    pipe_ops.push_back(std::make_unique<tiforth::ProjectionPipeOp>(engine.get(), projection));
 
-    append_status = builder->AppendPipe(
-        [engine = engine.get(), projection]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-            return std::make_unique<tiforth::ProjectionPipeOp>(engine, projection);
-        });
-    if (!append_status.ok())
-        throw Exception(append_status.ToString(), ErrorCodes::LOGICAL_ERROR);
+    const auto output_header = getHeader();
+    source_op = std::make_unique<BlockInputStreamSourceOp>(probe_stream, input_options_by_name, pool_holder.get(), sample_probe_block);
+    sink_op = std::make_unique<SingleOutputSinkOp>(&next_output, &output_resumer, output_header);
 
-    auto pipeline_res = builder->Finalize();
-    if (!pipeline_res.ok())
-        throw Exception(pipeline_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-    pipeline = std::move(pipeline_res).ValueOrDie();
-    if (pipeline == nullptr)
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "tiforth pipeline must not be null");
+    tiforth::pipeline::LogicalPipeline::Channel channel;
+    channel.source_op = source_op.get();
+    channel.pipe_ops.reserve(pipe_ops.size());
+    for (const auto & op : pipe_ops)
+    {
+        if (op == nullptr)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "TiForthHashJoin pipe op must not be null");
+        channel.pipe_ops.push_back(op.get());
+    }
 
-    auto task_res = pipeline->CreateTask();
-    if (!task_res.ok())
-        throw Exception(task_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-    task = std::move(task_res).ValueOrDie();
-    if (task == nullptr)
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "tiforth task must not be null");
+    tiforth::pipeline::LogicalPipeline logical_pipeline{"HashJoin", {std::move(channel)}, sink_op.get()};
+
+    auto groups_res = tiforth::pipeline::CompileToTaskGroups(tiforth::pipeline::PipelineContext{}, logical_pipeline, /*dop=*/1);
+    if (!groups_res.ok())
+        throw Exception(groups_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+    task_groups = std::move(groups_res).ValueOrDie();
+    task_ctx = MakeTaskContext();
+}
+
+void TiForthHashJoinBlockInputStream::DriveUntilOutputOrFinished()
+{
+    while (!finished && !next_output.has_value())
+    {
+        if (next_group >= task_groups.size())
+        {
+            finished = true;
+            return;
+        }
+
+        const auto & group = task_groups[next_group];
+        if (group.NumTasks() != 1)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "TiForthHashJoin only supports NumTasks=1 for now");
+
+        auto st_res = group.GetTask()(task_ctx, /*task_id=*/0);
+        if (!st_res.ok())
+            throw Exception(st_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+        auto st = std::move(st_res).ValueOrDie();
+
+        if (st.IsContinue())
+            continue;
+        if (st.IsYield())
+        {
+            std::this_thread::yield();
+            continue;
+        }
+        if (st.IsCancelled())
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "TiForthHashJoin task is cancelled");
+        if (st.IsBlocked())
+        {
+            auto drive_res = DriveAwaiter(st.GetAwaiter());
+            if (!drive_res.ok())
+                throw Exception(drive_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+
+            if (*drive_res == AwaiterDriveResult::kWaitingExternal)
+            {
+                if (!next_output.has_value())
+                    throw Exception(ErrorCodes::LOGICAL_ERROR, "TiForthHashJoin blocked on external resumer without output");
+                return;
+            }
+            continue;
+        }
+        if (!st.IsFinished())
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "unexpected task status");
+
+        auto notify_st = group.NotifyFinish(task_ctx);
+        if (!notify_st.ok())
+            throw Exception(notify_st.ToString(), ErrorCodes::LOGICAL_ERROR);
+        ++next_group;
+    }
 }
 
 Block TiForthHashJoinBlockInputStream::readImpl()
 {
     initOnce();
     if (finished)
-        return Block();
+        return {};
 
-    while (true)
-    {
-        RUNTIME_CHECK_MSG(task != nullptr, "tiforth task must not be null");
-        auto state_res = task->Step();
-        if (!state_res.ok())
-            throw Exception(state_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
+    DriveUntilOutputOrFinished();
 
-        auto state = state_res.ValueOrDie();
-        state = driveBlockedTaskOrThrow(*task, state);
-        switch (state)
-        {
-        case tiforth::TaskState::kNeedInput:
-        {
-            if (probe_input_closed)
-                throw Exception(
-                    ErrorCodes::LOGICAL_ERROR,
-                    "TiForthHashJoin task asked for input after CloseInput() (state={})",
-                    taskStateName(state));
+    if (!next_output.has_value())
+        return {};
 
-            if (Block block = probe_stream->read())
-            {
-                auto batch_res = toArrowRecordBatch(block, input_options_by_name, pool_holder.get());
-                if (!batch_res.ok())
-                    throw Exception(batch_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-                pushed_any_probe_input = true;
-
-                auto st = task->PushInput(batch_res.ValueOrDie());
-                if (!st.ok())
-                    throw Exception(st.ToString(), ErrorCodes::LOGICAL_ERROR);
-            }
-            else
-            {
-                if (!pushed_any_probe_input)
-                {
-                    auto batch_res = toArrowRecordBatch(sample_probe_block, input_options_by_name, pool_holder.get());
-                    if (!batch_res.ok())
-                        throw Exception(batch_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-                    pushed_any_probe_input = true;
-
-                    auto st = task->PushInput(batch_res.ValueOrDie());
-                    if (!st.ok())
-                        throw Exception(st.ToString(), ErrorCodes::LOGICAL_ERROR);
-                }
-
-                auto st = task->CloseInput();
-                if (!st.ok())
-                    throw Exception(st.ToString(), ErrorCodes::LOGICAL_ERROR);
-                probe_input_closed = true;
-            }
-            break;
-        }
-        case tiforth::TaskState::kHasOutput:
-        {
-            auto batch_res = task->PullOutput();
-            if (!batch_res.ok())
-                throw Exception(batch_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-            const auto out_batch = std::move(batch_res).ValueOrDie();
-            if (out_batch == nullptr)
-                throw Exception(ErrorCodes::LOGICAL_ERROR, "TiForthHashJoin expected non-null output batch");
-
-            auto out_res = fromArrowRecordBatch(out_batch);
-            if (!out_res.ok())
-                throw Exception(out_res.status().ToString(), ErrorCodes::LOGICAL_ERROR);
-            auto out = std::move(out_res).ValueOrDie();
-
-            Block reordered;
-            const auto header = getHeader();
-            for (const auto & elem : header)
-            {
-                if (!out.block.has(elem.name))
-                    throw Exception(
-                        ErrorCodes::LOGICAL_ERROR,
-                        "TiForthHashJoin output is missing required column: {}",
-                        elem.name);
-                reordered.insert(out.block.getByName(elem.name));
-            }
-            return reordered;
-        }
-        case tiforth::TaskState::kFinished:
-            finished = true;
-            return Block();
-        case tiforth::TaskState::kCancelled:
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "TiForthHashJoin task is cancelled");
-        case tiforth::TaskState::kWaiting:
-        case tiforth::TaskState::kWaitForNotify:
-        case tiforth::TaskState::kIOIn:
-        case tiforth::TaskState::kIOOut:
-            throw Exception(
-                ErrorCodes::LOGICAL_ERROR,
-                "Unexpected blocked task state after driveBlockedTaskOrThrow (state={})",
-                taskStateName(state));
-        }
-    }
+    Block out = std::move(*next_output);
+    next_output.reset();
+    if (output_resumer != nullptr && !output_resumer->IsResumed())
+        output_resumer->Resume();
+    return out;
 }
 
 } // namespace DB::TiForth
 
 #endif // defined(TIFLASH_ENABLE_TIFORTH)
+

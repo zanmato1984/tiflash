@@ -28,6 +28,7 @@
 #include <Interpreters/Context.h>
 
 #include <Flash/TiForth/ArrowTypeMapping.h>
+#include <Flash/TiForth/TaskGroupRunner.h>
 
 #include <arrow/builder.h>
 #include <arrow/result.h>
@@ -40,10 +41,9 @@
 #include <tiforth/engine.h>
 #include <tiforth/expr.h>
 #include <tiforth/operators/arrow_compute_agg.h>
+#include <tiforth/pipeline/logical_pipeline.h>
 #include <tiforth/pipeline/op/op.h>
-#include <tiforth/plan.h>
-#include <tiforth/pipeline.h>
-#include <tiforth/task.h>
+#include <tiforth/pipeline/task_groups.h>
 
 #include <algorithm>
 #include <cmath>
@@ -442,6 +442,96 @@ void RunNativeAggregator(const BenchConfig & cfg, benchmark::State & state) {
     state.SetItemsProcessed(static_cast<int64_t>(cfg.num_rows) * state.iterations());
 }
 
+class VectorSourceOp final : public tiforth::pipeline::SourceOp {
+public:
+    explicit VectorSourceOp(const std::vector<std::shared_ptr<arrow::RecordBatch>> * batches_)
+        : batches(batches_)
+    {}
+
+    tiforth::pipeline::PipelineSource Source(const tiforth::pipeline::PipelineContext &) override
+    {
+        return [this](const tiforth::pipeline::PipelineContext &, const tiforth::task::TaskContext &, tiforth::pipeline::ThreadId thread_id) -> tiforth::pipeline::OpResult {
+            if (thread_id != 0)
+                return arrow::Status::Invalid("VectorSourceOp only supports thread_id=0");
+            if (batches == nullptr)
+                return arrow::Status::Invalid("source batches must not be null");
+            if (next >= batches->size())
+                return tiforth::pipeline::OpOutput::Finished();
+            auto batch = (*batches)[next++];
+            if (batch == nullptr)
+                return arrow::Status::Invalid("source batch must not be null");
+            return tiforth::pipeline::OpOutput::SourcePipeHasMore(std::move(batch));
+        };
+    }
+
+private:
+    const std::vector<std::shared_ptr<arrow::RecordBatch>> * batches = nullptr;
+    std::size_t next = 0;
+};
+
+class CountingSinkOp final : public tiforth::pipeline::SinkOp {
+public:
+    explicit CountingSinkOp(Int64 * rows_) : rows(rows_) {}
+
+    tiforth::pipeline::PipelineSink Sink(const tiforth::pipeline::PipelineContext &) override
+    {
+        return [this](const tiforth::pipeline::PipelineContext &, const tiforth::task::TaskContext &, tiforth::pipeline::ThreadId thread_id, std::optional<tiforth::pipeline::Batch> input) -> tiforth::pipeline::OpResult {
+            if (thread_id != 0)
+                return arrow::Status::Invalid("CountingSinkOp only supports thread_id=0");
+            if (rows == nullptr)
+                return arrow::Status::Invalid("rows must not be null");
+            if (!input.has_value())
+                return tiforth::pipeline::OpOutput::PipeSinkNeedsMore();
+            auto batch = std::move(*input);
+            if (batch != nullptr)
+                *rows += batch->num_rows();
+            return tiforth::pipeline::OpOutput::PipeSinkNeedsMore();
+        };
+    }
+
+private:
+    Int64 * rows = nullptr;
+};
+
+Int64 RunTiForthArrowComputeAggOnce(
+    const tiforth::Engine * engine,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>> * input_batches,
+    tiforth::ArrowComputeAggOptions options = {})
+{
+    ARROW_CHECK(engine != nullptr);
+    ARROW_CHECK(input_batches != nullptr);
+
+    std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
+    std::vector<tiforth::AggFunc> aggs;
+    aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
+    aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
+
+    std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+    pipe_ops.push_back(std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, keys, aggs, options));
+
+    Int64 out_rows = 0;
+    auto source_op = std::make_unique<VectorSourceOp>(input_batches);
+    auto sink_op = std::make_unique<CountingSinkOp>(&out_rows);
+
+    tiforth::pipeline::LogicalPipeline::Channel channel;
+    channel.source_op = source_op.get();
+    channel.pipe_ops.reserve(pipe_ops.size());
+    for (const auto & op : pipe_ops)
+    {
+        ARROW_CHECK(op != nullptr);
+        channel.pipe_ops.push_back(op.get());
+    }
+    tiforth::pipeline::LogicalPipeline logical_pipeline{"BenchArrowComputeAgg", {std::move(channel)}, sink_op.get()};
+
+    auto groups_res = tiforth::pipeline::CompileToTaskGroups(tiforth::pipeline::PipelineContext{}, logical_pipeline, /*dop=*/1);
+    ARROW_CHECK_OK(groups_res.status());
+
+    const auto task_ctx = TiForth::MakeTaskContext();
+    ARROW_CHECK_OK(TiForth::RunTaskGroupsToCompletion(std::move(groups_res).ValueUnsafe(), task_ctx));
+
+    return out_rows;
+}
+
 void RunTiForthArrowComputeAgg(const BenchConfig & cfg, benchmark::State & state) {
     const auto dataset = GetOrCreateDataset(cfg);
 
@@ -449,64 +539,10 @@ void RunTiForthArrowComputeAgg(const BenchConfig & cfg, benchmark::State & state
     ARROW_CHECK_OK(maybe_engine.status());
     auto engine = std::move(maybe_engine).ValueUnsafe();
 
-    std::unique_ptr<tiforth::Plan> plan;
-    {
-        auto maybe_builder = tiforth::PlanBuilder::Create(engine.get());
-        ARROW_CHECK_OK(maybe_builder.status());
-        auto builder = std::move(maybe_builder).ValueUnsafe();
-        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
-        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
-
-        auto maybe_stage = builder->AddStage();
-        ARROW_CHECK_OK(maybe_stage.status());
-        const auto stage = maybe_stage.ValueUnsafe();
-        auto status = builder->AppendPipe(
-            stage,
-            [engine_ptr = engine.get(), keys, aggs](tiforth::PlanTaskContext *)
-                -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-                return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine_ptr, keys, aggs);
-            });
-        ARROW_CHECK_OK(status);
-
-        auto maybe_plan = builder->Finalize();
-        ARROW_CHECK_OK(maybe_plan.status());
-        plan = std::move(maybe_plan).ValueUnsafe();
-    }
-
     for (const auto & _ : state) {
         (void)_;
-        auto maybe_task = plan->CreateTask();
-        ARROW_CHECK_OK(maybe_task.status());
-        auto task = std::move(maybe_task).ValueUnsafe();
-        auto maybe_task_state = task->Step();
-        ARROW_CHECK_OK(maybe_task_state.status());
-        auto task_state = maybe_task_state.ValueUnsafe();
-        ARROW_CHECK(task_state == tiforth::TaskState::kNeedInput);
-
-        for (const auto & batch : dataset->arrow_batches) {
-            ARROW_CHECK_OK(task->PushInput(batch));
-        }
-        ARROW_CHECK_OK(task->CloseInput());
-
-        while (true) {
-            maybe_task_state = task->Step();
-            ARROW_CHECK_OK(maybe_task_state.status());
-            task_state = maybe_task_state.ValueUnsafe();
-            if (task_state == tiforth::TaskState::kFinished) {
-                break;
-            }
-            if (task_state == tiforth::TaskState::kNeedInput) {
-                continue;
-            }
-            ARROW_CHECK(task_state == tiforth::TaskState::kHasOutput);
-            auto maybe_out = task->PullOutput();
-            ARROW_CHECK_OK(maybe_out.status());
-            auto out = std::move(maybe_out).ValueUnsafe();
-            ARROW_CHECK(out != nullptr);
-            benchmark::DoNotOptimize(out->num_rows());
-        }
+        const auto rows = RunTiForthArrowComputeAggOnce(engine.get(), &dataset->arrow_batches);
+        benchmark::DoNotOptimize(rows);
     }
 
     state.SetItemsProcessed(static_cast<int64_t>(cfg.num_rows) * state.iterations());
@@ -521,64 +557,10 @@ void RunTiForthArrowComputeAggDictKey(const BenchConfig & cfg, benchmark::State 
     ARROW_CHECK_OK(maybe_engine.status());
     auto engine = std::move(maybe_engine).ValueUnsafe();
 
-    std::unique_ptr<tiforth::Plan> plan;
-    {
-        auto maybe_builder = tiforth::PlanBuilder::Create(engine.get());
-        ARROW_CHECK_OK(maybe_builder.status());
-        auto builder = std::move(maybe_builder).ValueUnsafe();
-        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
-        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
-
-        auto maybe_stage = builder->AddStage();
-        ARROW_CHECK_OK(maybe_stage.status());
-        const auto stage = maybe_stage.ValueUnsafe();
-        auto status = builder->AppendPipe(
-            stage,
-            [engine_ptr = engine.get(), keys, aggs](tiforth::PlanTaskContext *)
-                -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-                return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine_ptr, keys, aggs);
-            });
-        ARROW_CHECK_OK(status);
-
-        auto maybe_plan = builder->Finalize();
-        ARROW_CHECK_OK(maybe_plan.status());
-        plan = std::move(maybe_plan).ValueUnsafe();
-    }
-
     for (const auto & _ : state) {
         (void)_;
-        auto maybe_task = plan->CreateTask();
-        ARROW_CHECK_OK(maybe_task.status());
-        auto task = std::move(maybe_task).ValueUnsafe();
-        auto maybe_task_state = task->Step();
-        ARROW_CHECK_OK(maybe_task_state.status());
-        auto task_state = maybe_task_state.ValueUnsafe();
-        ARROW_CHECK(task_state == tiforth::TaskState::kNeedInput);
-
-        for (const auto & batch : dataset->arrow_batches_dict_key) {
-            ARROW_CHECK_OK(task->PushInput(batch));
-        }
-        ARROW_CHECK_OK(task->CloseInput());
-
-        while (true) {
-            maybe_task_state = task->Step();
-            ARROW_CHECK_OK(maybe_task_state.status());
-            task_state = maybe_task_state.ValueUnsafe();
-            if (task_state == tiforth::TaskState::kFinished) {
-                break;
-            }
-            if (task_state == tiforth::TaskState::kNeedInput) {
-                continue;
-            }
-            ARROW_CHECK(task_state == tiforth::TaskState::kHasOutput);
-            auto maybe_out = task->PullOutput();
-            ARROW_CHECK_OK(maybe_out.status());
-            auto out = std::move(maybe_out).ValueUnsafe();
-            ARROW_CHECK(out != nullptr);
-            benchmark::DoNotOptimize(out->num_rows());
-        }
+        const auto rows = RunTiForthArrowComputeAggOnce(engine.get(), &dataset->arrow_batches_dict_key);
+        benchmark::DoNotOptimize(rows);
     }
 
     state.SetItemsProcessed(static_cast<int64_t>(cfg.num_rows) * state.iterations());
@@ -595,64 +577,10 @@ void RunTiForthArrowComputeAggStableDictKey(const BenchConfig & cfg, benchmark::
     tiforth::ArrowComputeAggOptions options;
     options.stable_dictionary_encode_binary_keys = true;
 
-    std::unique_ptr<tiforth::Plan> plan;
-    {
-        auto maybe_builder = tiforth::PlanBuilder::Create(engine.get());
-        ARROW_CHECK_OK(maybe_builder.status());
-        auto builder = std::move(maybe_builder).ValueUnsafe();
-        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
-        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
-
-        auto maybe_stage = builder->AddStage();
-        ARROW_CHECK_OK(maybe_stage.status());
-        const auto stage = maybe_stage.ValueUnsafe();
-        auto status = builder->AppendPipe(
-            stage,
-            [engine_ptr = engine.get(), keys, aggs, options](tiforth::PlanTaskContext *)
-                -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-                return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine_ptr, keys, aggs, options);
-            });
-        ARROW_CHECK_OK(status);
-
-        auto maybe_plan = builder->Finalize();
-        ARROW_CHECK_OK(maybe_plan.status());
-        plan = std::move(maybe_plan).ValueUnsafe();
-    }
-
     for (const auto & _ : state) {
         (void)_;
-        auto maybe_task = plan->CreateTask();
-        ARROW_CHECK_OK(maybe_task.status());
-        auto task = std::move(maybe_task).ValueUnsafe();
-        auto maybe_task_state = task->Step();
-        ARROW_CHECK_OK(maybe_task_state.status());
-        auto task_state = maybe_task_state.ValueUnsafe();
-        ARROW_CHECK(task_state == tiforth::TaskState::kNeedInput);
-
-        for (const auto & batch : dataset->arrow_batches) {
-            ARROW_CHECK_OK(task->PushInput(batch));
-        }
-        ARROW_CHECK_OK(task->CloseInput());
-
-        while (true) {
-            maybe_task_state = task->Step();
-            ARROW_CHECK_OK(maybe_task_state.status());
-            task_state = maybe_task_state.ValueUnsafe();
-            if (task_state == tiforth::TaskState::kFinished) {
-                break;
-            }
-            if (task_state == tiforth::TaskState::kNeedInput) {
-                continue;
-            }
-            ARROW_CHECK(task_state == tiforth::TaskState::kHasOutput);
-            auto maybe_out = task->PullOutput();
-            ARROW_CHECK_OK(maybe_out.status());
-            auto out = std::move(maybe_out).ValueUnsafe();
-            ARROW_CHECK(out != nullptr);
-            benchmark::DoNotOptimize(out->num_rows());
-        }
+        const auto rows = RunTiForthArrowComputeAggOnce(engine.get(), &dataset->arrow_batches, options);
+        benchmark::DoNotOptimize(rows);
     }
 
     state.SetItemsProcessed(static_cast<int64_t>(cfg.num_rows) * state.iterations());

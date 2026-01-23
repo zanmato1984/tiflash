@@ -28,7 +28,6 @@
 #include <tiforth/expr.h>
 #include <tiforth/operators/hash_agg.h>
 #include <tiforth/pipeline/op/op.h>
-#include <tiforth/plan.h>
 
 #include <algorithm>
 #include <cmath>
@@ -715,9 +714,7 @@ arrow::Result<std::vector<Block>> RunNativeAggregator(const Dataset & dataset) {
 
 arrow::Result<std::vector<Block>> RunTiForthHashAgg(const Dataset & dataset) {
     ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-    ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
-
-    const std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
+    std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
     std::vector<tiforth::AggFunc> aggs;
     aggs.push_back({"cnt_all", "count_all", nullptr});
     aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
@@ -725,38 +722,14 @@ arrow::Result<std::vector<Block>> RunTiForthHashAgg(const Dataset & dataset) {
     aggs.push_back({"min_v", "min", tiforth::MakeFieldRef("v")});
     aggs.push_back({"max_v", "max", tiforth::MakeFieldRef("v")});
     aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef("v")});
-
-    const tiforth::Engine * engine_ptr = engine.get();
-    ARROW_ASSIGN_OR_RAISE(
-        const auto ctx_id,
-        builder->AddBreakerState<tiforth::HashAggState>(
-            [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggState>> {
-                return std::make_shared<tiforth::HashAggState>(engine_ptr, keys, aggs);
-            }));
-
-    ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
-    ARROW_RETURN_NOT_OK(builder->SetStageSink(
-        build_stage,
-        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-            return std::make_unique<tiforth::HashAggSinkOp>(std::move(agg_state));
-        }));
-
-    ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
-    ARROW_RETURN_NOT_OK(builder->SetStageSource(
-        result_stage,
-        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-            return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_state));
-        }));
-    ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
-
-    ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
     const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
     ARROW_ASSIGN_OR_RAISE(
         auto outputs,
-        TiForth::RunTiForthPlanOnBlocks(
-            *plan,
+        TiForth::RunTiForthHashAggOnBlocks(
+            engine.get(),
+            /*build_pipe_ops=*/{},
+            std::move(keys),
+            std::move(aggs),
             dataset.blocks,
             options_by_name,
             arrow::default_memory_pool(),
@@ -774,7 +747,6 @@ arrow::Result<std::vector<Block>> RunTiForthHashAggWithKeys(
     const Dataset & dataset,
     const std::vector<tiforth::AggKey> & keys) {
     ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-    ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
 
     std::vector<tiforth::AggFunc> aggs;
     aggs.push_back({"cnt_all", "count_all", nullptr});
@@ -783,38 +755,15 @@ arrow::Result<std::vector<Block>> RunTiForthHashAggWithKeys(
     aggs.push_back({"min_v", "min", tiforth::MakeFieldRef("v")});
     aggs.push_back({"max_v", "max", tiforth::MakeFieldRef("v")});
     aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef("v")});
-
-    const tiforth::Engine * engine_ptr = engine.get();
-    ARROW_ASSIGN_OR_RAISE(
-        const auto ctx_id,
-        builder->AddBreakerState<tiforth::HashAggState>(
-            [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggState>> {
-                return std::make_shared<tiforth::HashAggState>(engine_ptr, keys, aggs);
-            }));
-
-    ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
-    ARROW_RETURN_NOT_OK(builder->SetStageSink(
-        build_stage,
-        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-            return std::make_unique<tiforth::HashAggSinkOp>(std::move(agg_state));
-        }));
-
-    ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
-    ARROW_RETURN_NOT_OK(builder->SetStageSource(
-        result_stage,
-        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
-            ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-            return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_state));
-        }));
-    ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
-
-    ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
     const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
+    std::vector<tiforth::AggKey> keys_copy = keys;
     ARROW_ASSIGN_OR_RAISE(
         auto outputs,
-        TiForth::RunTiForthPlanOnBlocks(
-            *plan,
+        TiForth::RunTiForthHashAggOnBlocks(
+            engine.get(),
+            /*build_pipe_ops=*/{},
+            std::move(keys_copy),
+            std::move(aggs),
             dataset.blocks,
             options_by_name,
             arrow::default_memory_pool(),

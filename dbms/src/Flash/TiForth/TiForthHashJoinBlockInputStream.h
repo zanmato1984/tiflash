@@ -23,14 +23,18 @@
 #include <arrow/memory_pool.h>
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
+
+#include "tiforth/pipeline/op/op.h"
+#include "tiforth/pipeline/task_groups.h"
+#include "tiforth/task/resumer.h"
+#include "tiforth/task/task_context.h"
 
 namespace tiforth
 {
 class Engine;
-class Pipeline;
-class Task;
 } // namespace tiforth
 
 namespace DB::TiForth
@@ -65,6 +69,7 @@ protected:
 
 private:
     void initOnce();
+    void DriveUntilOutputOrFinished();
 
     BlockInputStreamPtr probe_stream;
     BlockInputStreamPtr build_stream;
@@ -72,8 +77,14 @@ private:
     std::vector<String> build_key_names;
 
     std::unique_ptr<tiforth::Engine> engine;
-    std::unique_ptr<tiforth::Pipeline> pipeline;
-    std::unique_ptr<tiforth::Task> task;
+    std::unique_ptr<tiforth::pipeline::SourceOp> source_op;
+    std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+    std::unique_ptr<tiforth::pipeline::SinkOp> sink_op;
+    tiforth::task::TaskGroups task_groups;
+    tiforth::task::TaskContext task_ctx;
+    std::size_t next_group = 0;
+    std::optional<Block> next_output;
+    tiforth::task::ResumerPtr output_resumer;
     NamesAndTypesList output_columns;
     std::unordered_map<String, ColumnOptions> input_options_by_name;
     std::shared_ptr<arrow::MemoryPool> pool_holder;
@@ -83,8 +94,6 @@ private:
     bool initialized = false;
     bool prefix_called = false;
     bool suffix_called = false;
-    bool probe_input_closed = false;
-    bool pushed_any_probe_input = false;
     bool finished = false;
 };
 

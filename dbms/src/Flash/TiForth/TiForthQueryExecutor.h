@@ -17,16 +17,18 @@
 #if defined(TIFLASH_ENABLE_TIFORTH)
 
 #include <Flash/Executor/QueryExecutor.h>
-#include <Flash/TiForth/BlockPipelineRunner.h>
+#include <Flash/TiForth/ArrowTypeMapping.h>
 
 #include <arrow/memory_pool.h>
 
 #include <memory>
+#include <vector>
+
+#include "tiforth/pipeline/op/op.h"
 
 namespace tiforth
 {
 class Engine;
-class Pipeline;
 } // namespace tiforth
 
 namespace DB
@@ -48,7 +50,7 @@ public:
         const String & req_id,
         const BlockInputStreamPtr & input_stream_,
         std::unique_ptr<tiforth::Engine> engine_,
-        std::unique_ptr<tiforth::Pipeline> pipeline_,
+        std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops_,
         std::unordered_map<String, ColumnOptions> input_options_by_name_,
         std::shared_ptr<arrow::MemoryPool> pool_holder_);
 
@@ -80,7 +82,7 @@ protected:
 private:
     BlockInputStreamPtr input_stream;
     std::unique_ptr<tiforth::Engine> engine;
-    std::unique_ptr<tiforth::Pipeline> pipeline;
+    std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
     std::unordered_map<String, ColumnOptions> input_options_by_name;
     std::shared_ptr<arrow::MemoryPool> pool_holder;
     Block sample_block;

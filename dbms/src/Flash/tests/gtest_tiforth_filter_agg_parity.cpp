@@ -8,8 +8,6 @@
 #include "tiforth/operators/filter.h"
 #include "tiforth/operators/hash_agg.h"
 #include "tiforth/pipeline/op/op.h"
-#include "tiforth/plan.h"
-#include "tiforth/pipeline.h"
 
 #include <Core/Block.h>
 #include <DataTypes/DataTypeDecimal.h>
@@ -40,9 +38,11 @@ using DecimalField128 = DecimalField<Decimal128>;
 
 arrow::Result<ColumnsWithTypeAndName> RunTiForthPipelineOnBlock(
     const Block& input, const std::unordered_map<String, TiForth::ColumnOptions>& options_by_name,
-    std::function<arrow::Status(const tiforth::Engine*, tiforth::PipelineBuilder*)> build_pipeline) {
-  if (build_pipeline == nullptr) {
-    return arrow::Status::Invalid("pipeline builder must not be null");
+    std::function<arrow::Status(const tiforth::Engine*,
+                                std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>>*)>
+        build_pipe_ops) {
+  if (build_pipe_ops == nullptr) {
+    return arrow::Status::Invalid("pipe op builder must not be null");
   }
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
@@ -50,22 +50,12 @@ arrow::Result<ColumnsWithTypeAndName> RunTiForthPipelineOnBlock(
     return arrow::Status::Invalid("tiforth engine must not be null");
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
-  if (builder == nullptr) {
-    return arrow::Status::Invalid("tiforth pipeline builder must not be null");
-  }
-
-  ARROW_RETURN_NOT_OK(build_pipeline(engine.get(), builder.get()));
-
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
-  if (pipeline == nullptr) {
-    return arrow::Status::Invalid("tiforth pipeline must not be null");
-  }
-
+  std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+  ARROW_RETURN_NOT_OK(build_pipe_ops(engine.get(), &pipe_ops));
   ARROW_ASSIGN_OR_RAISE(
       auto outputs,
-      TiForth::RunTiForthPipelineOnBlocks(*pipeline, {input}, options_by_name,
-                                          arrow::default_memory_pool()));
+      TiForth::RunTiForthPipeOpsOnBlocks(std::move(pipe_ops), {input}, options_by_name,
+                                         arrow::default_memory_pool()));
 
   Blocks out_blocks;
   out_blocks.reserve(outputs.size());
@@ -76,11 +66,11 @@ arrow::Result<ColumnsWithTypeAndName> RunTiForthPipelineOnBlock(
   return vstackBlocks(std::move(out_blocks)).getColumnsWithTypeAndName();
 }
 
-arrow::Result<ColumnsWithTypeAndName> RunTiForthPlanOnBlock(
+arrow::Result<ColumnsWithTypeAndName> RunTiForthHashAggOnBlock(
     const Block& input, const std::unordered_map<String, TiForth::ColumnOptions>& options_by_name,
-    std::function<arrow::Status(const tiforth::Engine*, tiforth::PlanBuilder*)> build_plan) {
-  if (build_plan == nullptr) {
-    return arrow::Status::Invalid("plan builder must not be null");
+    std::vector<tiforth::AggKey> keys, std::vector<tiforth::AggFunc> aggs) {
+  if (keys.empty()) {
+    return arrow::Status::Invalid("hash agg requires non-empty group-by keys");
   }
 
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
@@ -88,20 +78,15 @@ arrow::Result<ColumnsWithTypeAndName> RunTiForthPlanOnBlock(
     return arrow::Status::Invalid("tiforth engine must not be null");
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
-  if (builder == nullptr) {
-    return arrow::Status::Invalid("tiforth plan builder must not be null");
-  }
-
-  ARROW_RETURN_NOT_OK(build_plan(engine.get(), builder.get()));
-
-  ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
-  if (plan == nullptr) {
-    return arrow::Status::Invalid("tiforth plan must not be null");
-  }
-
-  ARROW_ASSIGN_OR_RAISE(auto outputs, TiForth::RunTiForthPlanOnBlocks(*plan, {input}, options_by_name,
-                                                                      arrow::default_memory_pool()));
+  ARROW_ASSIGN_OR_RAISE(auto outputs,
+                        TiForth::RunTiForthHashAggOnBlocks(
+                            engine.get(),
+                            /*build_pipe_ops=*/{},
+                            std::move(keys),
+                            std::move(aggs),
+                            {input},
+                            options_by_name,
+                            arrow::default_memory_pool()));
 
   Blocks out_blocks;
   out_blocks.reserve(outputs.size());
@@ -110,40 +95,6 @@ arrow::Result<ColumnsWithTypeAndName> RunTiForthPlanOnBlock(
   }
 
   return vstackBlocks(std::move(out_blocks)).getColumnsWithTypeAndName();
-}
-
-arrow::Status AppendHashAggPlan(const tiforth::Engine* engine, tiforth::PlanBuilder* builder,
-                               std::vector<tiforth::AggKey> keys, std::vector<tiforth::AggFunc> aggs) {
-  if (engine == nullptr) {
-    return arrow::Status::Invalid("engine must not be null");
-  }
-  if (builder == nullptr) {
-    return arrow::Status::Invalid("plan builder must not be null");
-  }
-
-  const tiforth::Engine* engine_ptr = engine;
-  ARROW_ASSIGN_OR_RAISE(
-      const auto ctx_id,
-      builder->AddBreakerState<tiforth::HashAggState>(
-          [engine_ptr, keys, aggs]() -> arrow::Result<std::shared_ptr<tiforth::HashAggState>> {
-            return std::make_shared<tiforth::HashAggState>(engine_ptr, keys, aggs);
-          }));
-
-  ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
-  ARROW_RETURN_NOT_OK(builder->SetStageSink(
-      build_stage, [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-        return std::make_unique<tiforth::HashAggSinkOp>(std::move(agg_state));
-      }));
-
-  ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
-  ARROW_RETURN_NOT_OK(builder->SetStageSource(
-      result_stage, [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
-        ARROW_ASSIGN_OR_RAISE(auto agg_state, ctx->GetBreakerState<tiforth::HashAggState>(ctx_id));
-        return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_state), /*max_output_rows=*/1 << 30);
-      }));
-  ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, result_stage));
-  return arrow::Status::OK();
 }
 
 class TiForthFilterAggParityTestRunner : public ExecutorTest {
@@ -261,14 +212,16 @@ try
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
   auto actual = RunTiForthPipelineOnBlock(
       scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PipelineBuilder* builder) -> arrow::Status {
+      [](const tiforth::Engine* engine,
+         std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>>* pipe_ops) -> arrow::Status {
+        if (pipe_ops == nullptr) {
+          return arrow::Status::Invalid("pipe ops must not be null");
+        }
         auto predicate = tiforth::MakeCall(
             "equal", {tiforth::MakeFieldRef(1),
                       tiforth::MakeLiteral(std::make_shared<arrow::Int32Scalar>(1))});
-        return builder->AppendPipe(
-            [engine, predicate]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-              return std::make_unique<tiforth::FilterPipeOp>(engine, predicate);
-            });
+        pipe_ops->push_back(std::make_unique<tiforth::FilterPipeOp>(engine, predicate));
+        return arrow::Status::OK();
       });
   if (!actual.ok()) {
     ASSERT_TRUE(actual.status().IsNotImplemented()) << actual.status().ToString();
@@ -290,7 +243,11 @@ try
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
   auto actual = RunTiForthPipelineOnBlock(
       scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PipelineBuilder* builder) -> arrow::Status {
+      [](const tiforth::Engine* engine,
+         std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>>* pipe_ops) -> arrow::Status {
+        if (pipe_ops == nullptr) {
+          return arrow::Status::Invalid("pipe ops must not be null");
+        }
         auto is1 = tiforth::MakeCall(
             "equal", {tiforth::MakeFieldRef(1),
                       tiforth::MakeLiteral(std::make_shared<arrow::Int32Scalar>(1))});
@@ -298,10 +255,8 @@ try
             "equal", {tiforth::MakeFieldRef(1),
                       tiforth::MakeLiteral(std::make_shared<arrow::Int32Scalar>(2))});
         auto predicate = tiforth::MakeCall("or", {is1, is2});
-        return builder->AppendPipe(
-            [engine, predicate]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-              return std::make_unique<tiforth::FilterPipeOp>(engine, predicate);
-            });
+        pipe_ops->push_back(std::make_unique<tiforth::FilterPipeOp>(engine, predicate));
+        return arrow::Status::OK();
       });
   if (!actual.ok()) {
     ASSERT_TRUE(actual.status().IsNotImplemented()) << actual.status().ToString();
@@ -323,12 +278,14 @@ try
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
   auto actual = RunTiForthPipelineOnBlock(
       scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PipelineBuilder* builder) -> arrow::Status {
+      [](const tiforth::Engine* engine,
+         std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>>* pipe_ops) -> arrow::Status {
+        if (pipe_ops == nullptr) {
+          return arrow::Status::Invalid("pipe ops must not be null");
+        }
         auto predicate = tiforth::MakeFieldRef(0);
-        return builder->AppendPipe(
-            [engine, predicate]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-              return std::make_unique<tiforth::FilterPipeOp>(engine, predicate);
-            });
+        pipe_ops->push_back(std::make_unique<tiforth::FilterPipeOp>(engine, predicate));
+        return arrow::Status::OK();
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
@@ -351,12 +308,14 @@ try
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
   auto actual = RunTiForthPipelineOnBlock(
       scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PipelineBuilder* builder) -> arrow::Status {
+      [](const tiforth::Engine* engine,
+         std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>>* pipe_ops) -> arrow::Status {
+        if (pipe_ops == nullptr) {
+          return arrow::Status::Invalid("pipe ops must not be null");
+        }
         auto predicate = tiforth::MakeFieldRef(1);
-        return builder->AppendPipe(
-            [engine, predicate]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-              return std::make_unique<tiforth::FilterPipeOp>(engine, predicate);
-            });
+        pipe_ops->push_back(std::make_unique<tiforth::FilterPipeOp>(engine, predicate));
+        return arrow::Status::OK();
       });
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
@@ -377,20 +336,16 @@ try
   const Block scan_block(scan_cols);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
-      scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
-        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"cnt_all", "count_all", nullptr});
-        aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
-
-        return AppendHashAggPlan(engine, builder, std::move(keys), std::move(aggs));
-      });
+  std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"cnt_all", "count_all", nullptr});
+  aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
+  auto actual =
+      RunTiForthHashAggOnBlock(scan_block, options_by_name, std::move(keys), std::move(aggs));
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
   const auto expected = executeStreams(
@@ -426,20 +381,20 @@ try
   ASSERT_TRUE(use_arrow_compute);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
+  auto actual = RunTiForthPipelineOnBlock(
       scan_block, options_by_name,
-      [use_arrow_compute](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
+      [use_arrow_compute](const tiforth::Engine* engine,
+                          std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>>* pipe_ops) -> arrow::Status {
+        (void)use_arrow_compute;
+        if (pipe_ops == nullptr) {
+          return arrow::Status::Invalid("pipe ops must not be null");
+        }
         std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
         std::vector<tiforth::AggFunc> aggs;
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
-
-        ARROW_ASSIGN_OR_RAISE(const auto stage, builder->AddStage());
-        return builder->AppendPipe(
-            stage,
-            [engine, keys, aggs, use_arrow_compute](tiforth::PlanTaskContext*) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-              (void)use_arrow_compute;
-              return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, keys, aggs);
-            });
+        pipe_ops->push_back(
+            std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, std::move(keys), std::move(aggs)));
+        return arrow::Status::OK();
       });
   if (!actual.ok()) {
     ASSERT_TRUE(actual.status().IsNotImplemented()) << actual.status().ToString();
@@ -463,19 +418,16 @@ try
   const Block scan_block(scan_cols);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
-      scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
-        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"cnt_all", "count_all", nullptr});
-        aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
-        return AppendHashAggPlan(engine, builder, std::move(keys), std::move(aggs));
-      });
+  std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"cnt_all", "count_all", nullptr});
+  aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
+  auto actual =
+      RunTiForthHashAggOnBlock(scan_block, options_by_name, std::move(keys), std::move(aggs));
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
   const auto expected = executeStreams(
@@ -503,19 +455,16 @@ try
   const Block scan_block(scan_cols);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
-      scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
-        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"sum_f32", "sum", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"min_f32", "min", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"max_f32", "max", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"sum_f64", "sum", tiforth::MakeFieldRef(2)});
-        aggs.push_back({"min_f64", "min", tiforth::MakeFieldRef(2)});
-        aggs.push_back({"max_f64", "max", tiforth::MakeFieldRef(2)});
-        return AppendHashAggPlan(engine, builder, std::move(keys), std::move(aggs));
-      });
+  std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"sum_f32", "sum", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"min_f32", "min", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"max_f32", "max", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"sum_f64", "sum", tiforth::MakeFieldRef(2)});
+  aggs.push_back({"min_f64", "min", tiforth::MakeFieldRef(2)});
+  aggs.push_back({"max_f64", "max", tiforth::MakeFieldRef(2)});
+  auto actual =
+      RunTiForthHashAggOnBlock(scan_block, options_by_name, std::move(keys), std::move(aggs));
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
   const auto expected = executeStreams(
@@ -544,19 +493,16 @@ try
   const Block scan_block(scan_cols);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
-      scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
-        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"sum_f32", "sum", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"min_f32", "min", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"max_f32", "max", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"sum_f64", "sum", tiforth::MakeFieldRef(2)});
-        aggs.push_back({"min_f64", "min", tiforth::MakeFieldRef(2)});
-        aggs.push_back({"max_f64", "max", tiforth::MakeFieldRef(2)});
-        return AppendHashAggPlan(engine, builder, std::move(keys), std::move(aggs));
-      });
+  std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"sum_f32", "sum", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"min_f32", "min", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"max_f32", "max", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"sum_f64", "sum", tiforth::MakeFieldRef(2)});
+  aggs.push_back({"min_f64", "min", tiforth::MakeFieldRef(2)});
+  aggs.push_back({"max_f64", "max", tiforth::MakeFieldRef(2)});
+  auto actual =
+      RunTiForthHashAggOnBlock(scan_block, options_by_name, std::move(keys), std::move(aggs));
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
   const auto expected = executeStreams(
@@ -584,17 +530,14 @@ try
   const Block scan_block(scan_cols);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
-      scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
-        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"sum_d", "sum", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"avg_d", "avg", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"min_d", "min", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"max_d", "max", tiforth::MakeFieldRef(1)});
-        return AppendHashAggPlan(engine, builder, std::move(keys), std::move(aggs));
-      });
+  std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"sum_d", "sum", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"avg_d", "avg", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"min_d", "min", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"max_d", "max", tiforth::MakeFieldRef(1)});
+  auto actual =
+      RunTiForthHashAggOnBlock(scan_block, options_by_name, std::move(keys), std::move(aggs));
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
   const auto expected = executeStreams(
@@ -614,17 +557,14 @@ try
   const Block scan_block(scan_cols);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
-      scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
-        std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"sum_d", "sum", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"avg_d", "avg", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"min_d", "min", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"max_d", "max", tiforth::MakeFieldRef(1)});
-        return AppendHashAggPlan(engine, builder, std::move(keys), std::move(aggs));
-      });
+  std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef(0)}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"sum_d", "sum", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"avg_d", "avg", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"min_d", "min", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"max_d", "max", tiforth::MakeFieldRef(1)});
+  auto actual =
+      RunTiForthHashAggOnBlock(scan_block, options_by_name, std::move(keys), std::move(aggs));
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
   const auto expected = executeStreams(
@@ -644,16 +584,13 @@ try
   const Block scan_block(scan_cols);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
-      scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
-        std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef(0)}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"cnt_all", "count_all", nullptr});
-        aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
-        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
-        return AppendHashAggPlan(engine, builder, std::move(keys), std::move(aggs));
-      });
+  std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef(0)}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"cnt_all", "count_all", nullptr});
+  aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef(1)});
+  aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+  auto actual =
+      RunTiForthHashAggOnBlock(scan_block, options_by_name, std::move(keys), std::move(aggs));
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
   const auto expected = executeStreams(
@@ -679,15 +616,12 @@ try
   options_by_name.emplace(scan_block.getByPosition(0).name,
                           TiForth::ColumnOptions{.collation_id = 46});  // UTF8MB4_BIN (PAD SPACE)
 
-  auto actual = RunTiForthPlanOnBlock(
-      scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
-        std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef(0)}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"cnt_all", "count_all", nullptr});
-        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
-        return AppendHashAggPlan(engine, builder, std::move(keys), std::move(aggs));
-      });
+  std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef(0)}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"cnt_all", "count_all", nullptr});
+  aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+  auto actual =
+      RunTiForthHashAggOnBlock(scan_block, options_by_name, std::move(keys), std::move(aggs));
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
   const auto expected = executeStreams(
@@ -713,15 +647,12 @@ try
   options_by_name.emplace(scan_block.getByPosition(0).name,
                           TiForth::ColumnOptions{.collation_id = 46});  // UTF8MB4_BIN (PAD SPACE)
 
-  auto actual = RunTiForthPlanOnBlock(
-      scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
-        std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef(0)}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"cnt_all", "count_all", nullptr});
-        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
-        return AppendHashAggPlan(engine, builder, std::move(keys), std::move(aggs));
-      });
+  std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef(0)}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"cnt_all", "count_all", nullptr});
+  aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+  auto actual =
+      RunTiForthHashAggOnBlock(scan_block, options_by_name, std::move(keys), std::move(aggs));
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
   const auto expected = executeStreams(
@@ -756,15 +687,12 @@ try
   options_by_name.emplace(scan_block.getByPosition(0).name,
                           TiForth::ColumnOptions{.collation_id = 45});  // UTF8MB4_GENERAL_CI (PAD SPACE)
 
-  auto actual = RunTiForthPlanOnBlock(
-      scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
-        std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef(0)}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"cnt_all", "count_all", nullptr});
-        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
-        return AppendHashAggPlan(engine, builder, std::move(keys), std::move(aggs));
-      });
+  std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef(0)}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"cnt_all", "count_all", nullptr});
+  aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+  auto actual =
+      RunTiForthHashAggOnBlock(scan_block, options_by_name, std::move(keys), std::move(aggs));
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
   context.setCollation(TiDB::ITiDBCollator::UTF8MB4_GENERAL_CI);
@@ -791,15 +719,12 @@ try
   options_by_name.emplace(scan_block.getByPosition(0).name,
                           TiForth::ColumnOptions{.collation_id = 255});  // UTF8MB4_0900_AI_CI (NO PAD)
 
-  auto actual = RunTiForthPlanOnBlock(
-      scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
-        std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef(0)}};
-        std::vector<tiforth::AggFunc> aggs;
-        aggs.push_back({"cnt_all", "count_all", nullptr});
-        aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
-        return AppendHashAggPlan(engine, builder, std::move(keys), std::move(aggs));
-      });
+  std::vector<tiforth::AggKey> keys = {{"s", tiforth::MakeFieldRef(0)}};
+  std::vector<tiforth::AggFunc> aggs;
+  aggs.push_back({"cnt_all", "count_all", nullptr});
+  aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef(1)});
+  auto actual =
+      RunTiForthHashAggOnBlock(scan_block, options_by_name, std::move(keys), std::move(aggs));
   ASSERT_TRUE(actual.ok()) << actual.status().ToString();
 
   context.setCollation(TiDB::ITiDBCollator::UTF8MB4_0900_AI_CI);
@@ -823,19 +748,18 @@ try
   const Block scan_block(scan_cols);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
+  auto actual = RunTiForthPipelineOnBlock(
       scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
+      [](const tiforth::Engine* engine,
+         std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>>* pipe_ops) -> arrow::Status {
+        if (pipe_ops == nullptr) {
+          return arrow::Status::Invalid("pipe ops must not be null");
+        }
+
         auto predicate = tiforth::MakeCall(
             "equal", {tiforth::MakeFieldRef(0),
                       tiforth::MakeLiteral(std::make_shared<arrow::Int32Scalar>(999))});
-        ARROW_ASSIGN_OR_RAISE(const auto stage, builder->AddStage());
-        ARROW_RETURN_NOT_OK(builder->AppendPipe(
-            stage,
-            [engine, predicate](tiforth::PlanTaskContext*)
-                -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-              return std::make_unique<tiforth::FilterPipeOp>(engine, predicate);
-            }));
+        pipe_ops->push_back(std::make_unique<tiforth::FilterPipeOp>(engine, predicate));
 
         std::vector<tiforth::AggKey> keys;
         std::vector<tiforth::AggFunc> aggs;
@@ -845,11 +769,10 @@ try
         aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
         aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
         aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
+        pipe_ops->push_back(
+            std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, std::move(keys), std::move(aggs)));
 
-        return builder->AppendPipe(
-            stage, [engine, keys, aggs](tiforth::PlanTaskContext*) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-              return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, keys, aggs);
-            });
+        return arrow::Status::OK();
       });
   if (!actual.ok()) {
     ASSERT_TRUE(actual.status().IsNotImplemented()) << actual.status().ToString();
@@ -881,12 +804,18 @@ try
   const Block scan_block(scan_cols);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
+  auto actual = RunTiForthPipelineOnBlock(
       scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
+      [](const tiforth::Engine* engine,
+         std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>>* pipe_ops) -> arrow::Status {
+        if (pipe_ops == nullptr) {
+          return arrow::Status::Invalid("pipe ops must not be null");
+        }
+
         auto predicate = tiforth::MakeCall(
             "equal", {tiforth::MakeFieldRef(0),
                       tiforth::MakeLiteral(std::make_shared<arrow::Int32Scalar>(999))});
+        pipe_ops->push_back(std::make_unique<tiforth::FilterPipeOp>(engine, predicate));
 
         std::vector<tiforth::AggKey> keys;
         std::vector<tiforth::AggFunc> aggs;
@@ -896,19 +825,9 @@ try
         aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
         aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
         aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
+        pipe_ops->push_back(
+            std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, std::move(keys), std::move(aggs)));
 
-        ARROW_ASSIGN_OR_RAISE(const auto stage, builder->AddStage());
-        ARROW_RETURN_NOT_OK(builder->AppendPipe(
-            stage,
-            [engine, predicate](tiforth::PlanTaskContext*)
-                -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-              return std::make_unique<tiforth::FilterPipeOp>(engine, predicate);
-            }));
-        ARROW_RETURN_NOT_OK(builder->AppendPipe(
-            stage,
-            [engine, keys, aggs](tiforth::PlanTaskContext*) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-              return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, keys, aggs);
-            }));
         return arrow::Status::OK();
       });
   if (!actual.ok()) {
@@ -941,9 +860,13 @@ try
   const Block scan_block(scan_cols);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
+  auto actual = RunTiForthPipelineOnBlock(
       scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
+      [](const tiforth::Engine* engine,
+         std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>>* pipe_ops) -> arrow::Status {
+        if (pipe_ops == nullptr) {
+          return arrow::Status::Invalid("pipe ops must not be null");
+        }
         std::vector<tiforth::AggKey> keys;
         std::vector<tiforth::AggFunc> aggs;
         aggs.push_back({"cnt_all", "count_all", nullptr});
@@ -952,13 +875,9 @@ try
         aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
         aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
         aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
-
-        ARROW_ASSIGN_OR_RAISE(const auto stage, builder->AddStage());
-        return builder->AppendPipe(
-            stage,
-            [engine, keys, aggs](tiforth::PlanTaskContext*) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-              return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, keys, aggs);
-            });
+        pipe_ops->push_back(
+            std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, std::move(keys), std::move(aggs)));
+        return arrow::Status::OK();
       });
   if (!actual.ok()) {
     ASSERT_TRUE(actual.status().IsNotImplemented()) << actual.status().ToString();
@@ -988,9 +907,13 @@ try
   const Block scan_block(scan_cols);
 
   const std::unordered_map<String, TiForth::ColumnOptions> options_by_name;
-  auto actual = RunTiForthPlanOnBlock(
+  auto actual = RunTiForthPipelineOnBlock(
       scan_block, options_by_name,
-      [](const tiforth::Engine* engine, tiforth::PlanBuilder* builder) -> arrow::Status {
+      [](const tiforth::Engine* engine,
+         std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>>* pipe_ops) -> arrow::Status {
+        if (pipe_ops == nullptr) {
+          return arrow::Status::Invalid("pipe ops must not be null");
+        }
         std::vector<tiforth::AggKey> keys;
         std::vector<tiforth::AggFunc> aggs;
         aggs.push_back({"cnt_all", "count_all", nullptr});
@@ -999,13 +922,8 @@ try
         aggs.push_back({"avg_v", "avg", tiforth::MakeFieldRef(1)});
         aggs.push_back({"min_v", "min", tiforth::MakeFieldRef(1)});
         aggs.push_back({"max_v", "max", tiforth::MakeFieldRef(1)});
-
-        ARROW_ASSIGN_OR_RAISE(const auto stage, builder->AddStage());
-        ARROW_RETURN_NOT_OK(builder->AppendPipe(
-            stage,
-            [engine, keys, aggs](tiforth::PlanTaskContext*) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-              return std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, keys, aggs);
-            }));
+        pipe_ops->push_back(
+            std::make_unique<tiforth::ArrowComputeAggPipeOp>(engine, std::move(keys), std::move(aggs)));
         return arrow::Status::OK();
       });
   if (!actual.ok()) {

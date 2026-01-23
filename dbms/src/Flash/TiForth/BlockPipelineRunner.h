@@ -22,31 +22,34 @@
 #include <arrow/memory_pool.h>
 #include <arrow/result.h>
 
+#include <cstddef>
 #include <unordered_map>
 #include <vector>
 
-namespace tiforth
-{
-class Pipeline;
-class Plan;
-} // namespace tiforth
+#include "tiforth/operators/hash_agg.h"
+#include "tiforth/pipeline/op/op.h"
 
 namespace DB::TiForth
 {
 
-arrow::Result<std::vector<BlockConversionResult>> RunTiForthPipelineOnBlocks(
-    const tiforth::Pipeline & pipeline,
+arrow::Result<std::vector<BlockConversionResult>> RunTiForthPipeOpsOnBlocks(
+    std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops,
     const std::vector<Block> & input_blocks,
     const std::unordered_map<String, ColumnOptions> & input_options_by_name,
     arrow::MemoryPool * pool,
-    const Block * sample_block = nullptr);
+    const Block * sample_block = nullptr,
+    std::size_t dop = 1);
 
-arrow::Result<std::vector<BlockConversionResult>> RunTiForthPlanOnBlocks(
-    const tiforth::Plan & plan,
+arrow::Result<std::vector<BlockConversionResult>> RunTiForthHashAggOnBlocks(
+    const tiforth::Engine * engine,
+    std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> build_pipe_ops,
+    std::vector<tiforth::AggKey> keys,
+    std::vector<tiforth::AggFunc> aggs,
     const std::vector<Block> & input_blocks,
     const std::unordered_map<String, ColumnOptions> & input_options_by_name,
     arrow::MemoryPool * pool,
-    const Block * sample_block = nullptr);
+    const Block * sample_block = nullptr,
+    std::size_t dop = 1);
 
 } // namespace DB::TiForth
 

@@ -33,7 +33,6 @@
 
 #include "tiforth/engine.h"
 #include "tiforth/operators/filter.h"
-#include "tiforth/pipeline.h"
 #endif // defined(TIFLASH_ENABLE_TIFORTH)
 
 namespace DB
@@ -116,38 +115,14 @@ void PhysicalFilter::buildBlockInputStreamImpl(DAGPipeline & pipeline, Context &
                         break;
                     }
                     auto engine = std::move(engine_res).ValueOrDie();
-
-                    auto builder_res = tiforth::PipelineBuilder::Create(engine.get());
-                    if (!builder_res.ok() || builder_res.ValueOrDie() == nullptr)
-                    {
-                        ok = false;
-                        break;
-                    }
-                    auto builder = std::move(builder_res).ValueOrDie();
-
-                    const auto st = builder->AppendPipe(
-                        [engine = engine.get(), predicate]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-                            return std::make_unique<tiforth::FilterPipeOp>(engine, predicate);
-                        });
-                    if (!st.ok())
-                    {
-                        ok = false;
-                        break;
-                    }
-
-                    auto pipeline_res = builder->Finalize();
-                    if (!pipeline_res.ok() || pipeline_res.ValueOrDie() == nullptr)
-                    {
-                        ok = false;
-                        break;
-                    }
-                    auto tiforth_pipeline = std::move(pipeline_res).ValueOrDie();
+                    std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+                    pipe_ops.push_back(std::make_unique<tiforth::FilterPipeOp>(engine.get(), predicate));
 
                     new_streams.push_back(std::make_shared<DB::TiForth::TiForthPipelineBlockInputStream>(
                         "TiForthFilter",
                         stream,
                         std::move(engine),
-                        std::move(tiforth_pipeline),
+                        std::move(pipe_ops),
                         output_columns,
                         /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
                         pool_holder,

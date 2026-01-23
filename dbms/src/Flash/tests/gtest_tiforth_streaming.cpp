@@ -10,7 +10,7 @@
 #include <DataStreams/IProfilingBlockInputStream.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Flash/TiForth/TiFlashMemoryPool.h>
-#include <Flash/TiForth/TiForthAggBlockInputStream.h>
+#include <Flash/TiForth/TiForthPipelineBlockInputStream.h>
 #include <Flash/TiForth/TiForthQueryExecutor.h>
 #include <TestUtils/TiFlashTestBasic.h>
 
@@ -20,8 +20,6 @@
 
 #include "tiforth/engine.h"
 #include "tiforth/operators/pass_through.h"
-#include "tiforth/plan.h"
-#include "tiforth/pipeline.h"
 
 namespace DB::tests
 {
@@ -134,35 +132,19 @@ TEST(TiForthStreamingExecutorTest, AggBlockInputStreamPassThroughLargeInputUnder
     auto engine = std::move(engine_res).ValueOrDie();
     ASSERT_NE(engine, nullptr);
 
-    auto builder_res = tiforth::PlanBuilder::Create(engine.get());
-    ASSERT_TRUE(builder_res.ok()) << builder_res.status().ToString();
-    auto builder = std::move(builder_res).ValueOrDie();
-    ASSERT_NE(builder, nullptr);
-
-    auto stage_res = builder->AddStage();
-    ASSERT_TRUE(stage_res.ok()) << stage_res.status().ToString();
-    const auto stage = stage_res.ValueOrDie();
-
-    ASSERT_TRUE(builder->AppendPipe(
-        stage,
-        [](tiforth::PlanTaskContext *) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-            return std::make_unique<tiforth::PassThroughPipeOp>();
-        }).ok());
-
-    auto plan_res = builder->Finalize();
-    ASSERT_TRUE(plan_res.ok()) << plan_res.status().ToString();
-    auto plan = std::move(plan_res).ValueOrDie();
-    ASSERT_NE(plan, nullptr);
+    std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+    pipe_ops.push_back(std::make_unique<tiforth::PassThroughPipeOp>());
 
     const auto output_type = std::make_shared<DataTypeInt64>();
     NamesAndTypesList output_columns;
     output_columns.emplace_back("col0", output_type);
 
     const Block sample_block = input_stream->getHeader();
-    auto agg_stream = std::make_shared<DB::TiForth::TiForthAggBlockInputStream>(
+    auto agg_stream = std::make_shared<DB::TiForth::TiForthPipelineBlockInputStream>(
+        "TiForthStreamingPassThrough",
         input_stream,
         std::move(engine),
-        std::move(plan),
+        std::move(pipe_ops),
         output_columns,
         /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
         pool,

@@ -8,7 +8,7 @@
 #include <DataStreams/BlocksListBlockInputStream.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Flash/TiForth/BlockPipelineRunner.h>
-#include <Flash/TiForth/TiForthAggBlockInputStream.h>
+#include <Flash/TiForth/TiForthPipelineBlockInputStream.h>
 
 #include <arrow/memory_pool.h>
 
@@ -17,8 +17,6 @@
 
 #include "tiforth/engine.h"
 #include "tiforth/operators/pilot.h"
-#include "tiforth/plan.h"
-#include "tiforth/pipeline.h"
 
 namespace DB::tests
 {
@@ -52,23 +50,17 @@ std::vector<Int64> flattenInt64Column(const std::vector<Block> & blocks)
     return out;
 }
 
-arrow::Result<std::unique_ptr<tiforth::Pipeline>> makePilotPipeline(
-    const tiforth::Engine * engine,
+std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> makePilotPipeOps(
     tiforth::PilotBlockKind block_kind,
     int32_t block_cycles)
 {
-    if (engine == nullptr)
-        return arrow::Status::Invalid("engine must not be null");
-
-    ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine));
     tiforth::PilotAsyncOptions options;
     options.block_kind = block_kind;
     options.block_cycles = block_cycles;
 
-    ARROW_RETURN_NOT_OK(builder->AppendPipe([options]() -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-        return std::make_unique<tiforth::PilotAsyncPipeOp>(options);
-    }));
-    return builder->Finalize();
+    std::vector<std::unique_ptr<tiforth::pipeline::PipeOp>> pipe_ops;
+    pipe_ops.push_back(std::make_unique<tiforth::PilotAsyncPipeOp>(options));
+    return pipe_ops;
 }
 
 void runPilotOnBlocks(tiforth::PilotBlockKind kind)
@@ -82,17 +74,12 @@ void runPilotOnBlocks(tiforth::PilotBlockKind kind)
     auto engine = std::move(engine_res).ValueOrDie();
     ASSERT_NE(engine, nullptr);
 
-    auto pipeline_res = makePilotPipeline(engine.get(), kind, /*block_cycles=*/3);
-    ASSERT_TRUE(pipeline_res.ok()) << pipeline_res.status().ToString();
-    auto pipeline = std::move(pipeline_res).ValueOrDie();
-    ASSERT_NE(pipeline, nullptr);
-
     std::vector<Block> input_blocks;
     input_blocks.push_back(makeInt64Block({0, 1, 2}));
     input_blocks.push_back(makeInt64Block({3, 4}));
 
-    auto outputs_res = DB::TiForth::RunTiForthPipelineOnBlocks(
-        *pipeline,
+    auto outputs_res = DB::TiForth::RunTiForthPipeOpsOnBlocks(
+        makePilotPipeOps(kind, /*block_cycles=*/3),
         input_blocks,
         /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
         pool_holder.get());
@@ -118,28 +105,7 @@ void runPilotOnAggBlockInputStream(tiforth::PilotBlockKind kind)
     auto engine = std::move(engine_res).ValueOrDie();
     ASSERT_NE(engine, nullptr);
 
-    auto builder_res = tiforth::PlanBuilder::Create(engine.get());
-    ASSERT_TRUE(builder_res.ok()) << builder_res.status().ToString();
-    auto builder = std::move(builder_res).ValueOrDie();
-    ASSERT_NE(builder, nullptr);
-
-    auto stage_res = builder->AddStage();
-    ASSERT_TRUE(stage_res.ok()) << stage_res.status().ToString();
-    const auto stage = stage_res.ValueOrDie();
-
-    tiforth::PilotAsyncOptions options;
-    options.block_kind = kind;
-    options.block_cycles = 3;
-    ASSERT_TRUE(builder->AppendPipe(
-        stage,
-        [options](tiforth::PlanTaskContext *) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
-            return std::make_unique<tiforth::PilotAsyncPipeOp>(options);
-        }).ok());
-
-    auto plan_res = builder->Finalize();
-    ASSERT_TRUE(plan_res.ok()) << plan_res.status().ToString();
-    auto plan = std::move(plan_res).ValueOrDie();
-    ASSERT_NE(plan, nullptr);
+    auto pipe_ops = makePilotPipeOps(kind, /*block_cycles=*/3);
 
     BlocksList blocks;
     blocks.push_back(makeInt64Block({0, 1, 2}));
@@ -151,10 +117,11 @@ void runPilotOnAggBlockInputStream(tiforth::PilotBlockKind kind)
     output_columns.emplace_back("col0", std::make_shared<DataTypeInt64>());
 
     const Block sample_input_block = input_stream->getHeader();
-    auto stream = std::make_shared<DB::TiForth::TiForthAggBlockInputStream>(
+    auto stream = std::make_shared<DB::TiForth::TiForthPipelineBlockInputStream>(
+        "TiForthPilotBlockedStates",
         input_stream,
         std::move(engine),
-        std::move(plan),
+        std::move(pipe_ops),
         output_columns,
         /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
         pool_holder,
