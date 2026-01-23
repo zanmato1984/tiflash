@@ -24,6 +24,7 @@
 #include "tiforth/operators/hash_agg.h"
 #include "tiforth/operators/hash_join.h"
 #include "tiforth/operators/pass_through.h"
+#include "tiforth/pipeline/op/op.h"
 #include "tiforth/plan.h"
 #include "tiforth/pipeline.h"
 #include "tiforth/task.h"
@@ -284,19 +285,8 @@ arrow::Status TranslateDagToTiForthPipeline(const PipelineExecBuilder& dag, cons
       continue;
     }
     if (dynamic_cast<const DummyHashAggTransformOp*>(transform.get()) != nullptr) {
-      std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
-      std::vector<tiforth::AggFunc> aggs;
-      aggs.push_back({"cnt", "count_all", nullptr});
-      aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
-      ARROW_RETURN_NOT_OK(builder->AppendTransform(
-          [engine, keys, aggs, use_arrow_compute_agg]() -> arrow::Result<tiforth::TransformOpPtr> {
-            if (!use_arrow_compute_agg) {
-              return arrow::Status::NotImplemented(
-                  "HashAgg is breaker-style; use a PlanBuilder translation");
-            }
-            return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs);
-          }));
-      continue;
+      (void)use_arrow_compute_agg;
+      return arrow::Status::NotImplemented("aggregation translation requires PlanBuilder");
     }
     if (dynamic_cast<const DummyHashJoinTransformOp*>(transform.get()) != nullptr) {
       auto build_schema =
@@ -371,16 +361,18 @@ arrow::Status TranslateDagToTiForthAggBreakerPlan(const PipelineExecBuilder& dag
                             }));
 
   ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
-  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+  ARROW_RETURN_NOT_OK(builder->AppendPipe(
       build_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::TransformOpPtr> {
+      [ctx_id](tiforth::PlanTaskContext* ctx)
+          -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
         ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
                               ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
         return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
       }));
   ARROW_RETURN_NOT_OK(builder->SetStageSink(
       build_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+      [ctx_id](tiforth::PlanTaskContext* ctx)
+          -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
         ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
                               ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
         return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
@@ -389,13 +381,59 @@ arrow::Status TranslateDagToTiForthAggBreakerPlan(const PipelineExecBuilder& dag
   ARROW_ASSIGN_OR_RAISE(const auto convergent_stage, builder->AddStage());
   ARROW_RETURN_NOT_OK(builder->SetStageSource(
       convergent_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+      [ctx_id](tiforth::PlanTaskContext* ctx)
+          -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
         ARROW_ASSIGN_OR_RAISE(auto agg_ctx,
                               ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
         return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx),
                                                                 /*max_output_rows=*/1 << 30);
       }));
   ARROW_RETURN_NOT_OK(builder->AddDependency(build_stage, convergent_stage));
+
+  return arrow::Status::OK();
+}
+
+arrow::Status TranslateDagToTiForthArrowComputeAggPlan(const PipelineExecBuilder& dag,
+                                                       const tiforth::Engine* engine,
+                                                       tiforth::PlanBuilder* builder) {
+  if (engine == nullptr) {
+    return arrow::Status::Invalid("engine must not be null");
+  }
+  if (builder == nullptr) {
+    return arrow::Status::Invalid("builder must not be null");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(const auto stage, builder->AddStage());
+
+  for (const auto& transform : dag.transform_ops) {
+    if (dynamic_cast<const DummyFilterTransformOp*>(transform.get()) != nullptr) {
+      auto predicate = tiforth::MakeCall(
+          "greater", {tiforth::MakeFieldRef("x"),
+                      tiforth::MakeLiteral(std::make_shared<arrow::Int32Scalar>(1))});
+      ARROW_RETURN_NOT_OK(builder->AppendTransform(
+          stage,
+          [engine, predicate](tiforth::PlanTaskContext*) -> arrow::Result<tiforth::TransformOpPtr> {
+            return std::make_unique<tiforth::FilterTransformOp>(engine, predicate);
+          }));
+      continue;
+    }
+
+    if (dynamic_cast<const DummyHashAggTransformOp*>(transform.get()) != nullptr) {
+      std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
+      std::vector<tiforth::AggFunc> aggs;
+      aggs.push_back({"cnt", "count_all", nullptr});
+      aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
+      ARROW_RETURN_NOT_OK(builder->AppendPipe(
+          stage,
+          [engine, keys, aggs](tiforth::PlanTaskContext*)
+              -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
+            return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine, keys, aggs);
+          }));
+      continue;
+    }
+
+    return arrow::Status::NotImplemented("unsupported TiFlash DAG transform in tiforth plan mode");
+  }
 
   return arrow::Status::OK();
 }
@@ -409,11 +447,15 @@ arrow::Status RunHashAggTransformTranslationSmoke(bool use_arrow_compute_agg) {
   dag.appendTransformOp(std::make_unique<DummyHashAggTransformOp>(exec_context, req_id));
   dag.setSinkOp(std::make_unique<DummySinkOp>(exec_context, req_id));
 
+  if (!use_arrow_compute_agg) {
+    return arrow::Status::NotImplemented("arrow compute agg translation is disabled");
+  }
+
   ARROW_ASSIGN_OR_RAISE(auto engine, tiforth::Engine::Create(tiforth::EngineOptions{}));
-  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PipelineBuilder::Create(engine.get()));
-  ARROW_RETURN_NOT_OK(TranslateDagToTiForthPipeline(dag, engine.get(), builder.get(), use_arrow_compute_agg));
-  ARROW_ASSIGN_OR_RAISE(auto pipeline, builder->Finalize());
-  ARROW_ASSIGN_OR_RAISE(auto task, pipeline->CreateTask());
+  ARROW_ASSIGN_OR_RAISE(auto builder, tiforth::PlanBuilder::Create(engine.get()));
+  ARROW_RETURN_NOT_OK(TranslateDagToTiForthArrowComputeAggPlan(dag, engine.get(), builder.get()));
+  ARROW_ASSIGN_OR_RAISE(auto plan, builder->Finalize());
+  ARROW_ASSIGN_OR_RAISE(auto task, plan->CreateTask());
 
   ARROW_ASSIGN_OR_RAISE(auto initial_state, task->Step());
   if (initial_state != tiforth::TaskState::kNeedInput) {

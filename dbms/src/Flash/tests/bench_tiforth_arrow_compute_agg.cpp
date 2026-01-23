@@ -40,6 +40,8 @@
 #include <tiforth/engine.h>
 #include <tiforth/expr.h>
 #include <tiforth/operators/arrow_compute_agg.h>
+#include <tiforth/pipeline/op/op.h>
+#include <tiforth/plan.h>
 #include <tiforth/pipeline.h>
 #include <tiforth/task.h>
 
@@ -447,9 +449,9 @@ void RunTiForthArrowComputeAgg(const BenchConfig & cfg, benchmark::State & state
     ARROW_CHECK_OK(maybe_engine.status());
     auto engine = std::move(maybe_engine).ValueUnsafe();
 
-    std::unique_ptr<tiforth::Pipeline> pipeline;
+    std::unique_ptr<tiforth::Plan> plan;
     {
-        auto maybe_builder = tiforth::PipelineBuilder::Create(engine.get());
+        auto maybe_builder = tiforth::PlanBuilder::Create(engine.get());
         ARROW_CHECK_OK(maybe_builder.status());
         auto builder = std::move(maybe_builder).ValueUnsafe();
         std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
@@ -457,20 +459,25 @@ void RunTiForthArrowComputeAgg(const BenchConfig & cfg, benchmark::State & state
         aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
-        auto status = builder->AppendTransform(
-            [engine_ptr = engine.get(), keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
+        auto maybe_stage = builder->AddStage();
+        ARROW_CHECK_OK(maybe_stage.status());
+        const auto stage = maybe_stage.ValueUnsafe();
+        auto status = builder->AppendPipe(
+            stage,
+            [engine_ptr = engine.get(), keys, aggs](tiforth::PlanTaskContext *)
+                -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
                 return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine_ptr, keys, aggs);
             });
         ARROW_CHECK_OK(status);
 
-        auto maybe_pipeline = builder->Finalize();
-        ARROW_CHECK_OK(maybe_pipeline.status());
-        pipeline = std::move(maybe_pipeline).ValueUnsafe();
+        auto maybe_plan = builder->Finalize();
+        ARROW_CHECK_OK(maybe_plan.status());
+        plan = std::move(maybe_plan).ValueUnsafe();
     }
 
     for (const auto & _ : state) {
         (void)_;
-        auto maybe_task = pipeline->CreateTask();
+        auto maybe_task = plan->CreateTask();
         ARROW_CHECK_OK(maybe_task.status());
         auto task = std::move(maybe_task).ValueUnsafe();
         auto maybe_task_state = task->Step();
@@ -514,9 +521,9 @@ void RunTiForthArrowComputeAggDictKey(const BenchConfig & cfg, benchmark::State 
     ARROW_CHECK_OK(maybe_engine.status());
     auto engine = std::move(maybe_engine).ValueUnsafe();
 
-    std::unique_ptr<tiforth::Pipeline> pipeline;
+    std::unique_ptr<tiforth::Plan> plan;
     {
-        auto maybe_builder = tiforth::PipelineBuilder::Create(engine.get());
+        auto maybe_builder = tiforth::PlanBuilder::Create(engine.get());
         ARROW_CHECK_OK(maybe_builder.status());
         auto builder = std::move(maybe_builder).ValueUnsafe();
         std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
@@ -524,20 +531,25 @@ void RunTiForthArrowComputeAggDictKey(const BenchConfig & cfg, benchmark::State 
         aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
-        auto status = builder->AppendTransform(
-            [engine_ptr = engine.get(), keys, aggs]() -> arrow::Result<tiforth::TransformOpPtr> {
+        auto maybe_stage = builder->AddStage();
+        ARROW_CHECK_OK(maybe_stage.status());
+        const auto stage = maybe_stage.ValueUnsafe();
+        auto status = builder->AppendPipe(
+            stage,
+            [engine_ptr = engine.get(), keys, aggs](tiforth::PlanTaskContext *)
+                -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
                 return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine_ptr, keys, aggs);
             });
         ARROW_CHECK_OK(status);
 
-        auto maybe_pipeline = builder->Finalize();
-        ARROW_CHECK_OK(maybe_pipeline.status());
-        pipeline = std::move(maybe_pipeline).ValueUnsafe();
+        auto maybe_plan = builder->Finalize();
+        ARROW_CHECK_OK(maybe_plan.status());
+        plan = std::move(maybe_plan).ValueUnsafe();
     }
 
     for (const auto & _ : state) {
         (void)_;
-        auto maybe_task = pipeline->CreateTask();
+        auto maybe_task = plan->CreateTask();
         ARROW_CHECK_OK(maybe_task.status());
         auto task = std::move(maybe_task).ValueUnsafe();
         auto maybe_task_state = task->Step();
@@ -583,9 +595,9 @@ void RunTiForthArrowComputeAggStableDictKey(const BenchConfig & cfg, benchmark::
     tiforth::ArrowComputeAggOptions options;
     options.stable_dictionary_encode_binary_keys = true;
 
-    std::unique_ptr<tiforth::Pipeline> pipeline;
+    std::unique_ptr<tiforth::Plan> plan;
     {
-        auto maybe_builder = tiforth::PipelineBuilder::Create(engine.get());
+        auto maybe_builder = tiforth::PlanBuilder::Create(engine.get());
         ARROW_CHECK_OK(maybe_builder.status());
         auto builder = std::move(maybe_builder).ValueUnsafe();
         std::vector<tiforth::AggKey> keys = {{"k", tiforth::MakeFieldRef("k")}};
@@ -593,20 +605,25 @@ void RunTiForthArrowComputeAggStableDictKey(const BenchConfig & cfg, benchmark::
         aggs.push_back({"cnt_v", "count", tiforth::MakeFieldRef("v")});
         aggs.push_back({"sum_v", "sum", tiforth::MakeFieldRef("v")});
 
-        auto status = builder->AppendTransform(
-            [engine_ptr = engine.get(), keys, aggs, options]() -> arrow::Result<tiforth::TransformOpPtr> {
+        auto maybe_stage = builder->AddStage();
+        ARROW_CHECK_OK(maybe_stage.status());
+        const auto stage = maybe_stage.ValueUnsafe();
+        auto status = builder->AppendPipe(
+            stage,
+            [engine_ptr = engine.get(), keys, aggs, options](tiforth::PlanTaskContext *)
+                -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
                 return std::make_unique<tiforth::ArrowComputeAggTransformOp>(engine_ptr, keys, aggs, options);
             });
         ARROW_CHECK_OK(status);
 
-        auto maybe_pipeline = builder->Finalize();
-        ARROW_CHECK_OK(maybe_pipeline.status());
-        pipeline = std::move(maybe_pipeline).ValueUnsafe();
+        auto maybe_plan = builder->Finalize();
+        ARROW_CHECK_OK(maybe_plan.status());
+        plan = std::move(maybe_plan).ValueUnsafe();
     }
 
     for (const auto & _ : state) {
         (void)_;
-        auto maybe_task = pipeline->CreateTask();
+        auto maybe_task = plan->CreateTask();
         ARROW_CHECK_OK(maybe_task.status());
         auto task = std::move(maybe_task).ValueUnsafe();
         auto maybe_task_state = task->Step();

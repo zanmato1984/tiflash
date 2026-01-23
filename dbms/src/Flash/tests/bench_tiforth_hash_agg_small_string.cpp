@@ -40,6 +40,7 @@
 #include <tiforth/engine.h>
 #include <tiforth/expr.h>
 #include <tiforth/operators/hash_agg.h>
+#include <tiforth/pipeline/op/op.h>
 #include <tiforth/plan.h>
 #include <tiforth/task.h>
 
@@ -405,16 +406,16 @@ std::unique_ptr<tiforth::Plan> MakeTiForthAggPlan(const tiforth::Engine * engine
     ARROW_CHECK_OK(maybe_build_stage.status());
     const auto build_stage = maybe_build_stage.ValueUnsafe();
 
-    ARROW_CHECK_OK(builder->AppendTransform(
+    ARROW_CHECK_OK(builder->AppendPipe(
         build_stage,
-        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::TransformOpPtr> {
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
             ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
             return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
         }));
 
     ARROW_CHECK_OK(builder->SetStageSink(
         build_stage,
-        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
             ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
             return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
         }));
@@ -425,7 +426,7 @@ std::unique_ptr<tiforth::Plan> MakeTiForthAggPlan(const tiforth::Engine * engine
 
     ARROW_CHECK_OK(builder->SetStageSource(
         result_stage,
-        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+        [ctx_id](tiforth::PlanTaskContext * ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
             ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
             return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx));
         }));

@@ -36,6 +36,7 @@
 #include "tiforth/expr.h"
 #include "tiforth/operators/hash_agg.h"
 #include "tiforth/operators/hash_join.h"
+#include "tiforth/pipeline/op/op.h"
 #include "tiforth/plan.h"
 #include "tiforth/pipeline.h"
 #include "tiforth/task.h"
@@ -160,15 +161,15 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> RunHashAggPlan(
           }));
 
   ARROW_ASSIGN_OR_RAISE(const auto build_stage, builder->AddStage());
-  ARROW_RETURN_NOT_OK(builder->AppendTransform(
+  ARROW_RETURN_NOT_OK(builder->AppendPipe(
       build_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::TransformOpPtr> {
+      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::PipeOp>> {
         ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
         return std::make_unique<tiforth::HashAggTransformOp>(std::move(agg_ctx));
       }));
   ARROW_RETURN_NOT_OK(builder->SetStageSink(
       build_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SinkOpPtr> {
+      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SinkOp>> {
         ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
         return std::make_unique<tiforth::HashAggMergeSinkOp>(std::move(agg_ctx));
       }));
@@ -176,7 +177,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> RunHashAggPlan(
   ARROW_ASSIGN_OR_RAISE(const auto result_stage, builder->AddStage());
   ARROW_RETURN_NOT_OK(builder->SetStageSource(
       result_stage,
-      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<tiforth::SourceOpPtr> {
+      [ctx_id](tiforth::PlanTaskContext* ctx) -> arrow::Result<std::unique_ptr<tiforth::pipeline::SourceOp>> {
         ARROW_ASSIGN_OR_RAISE(auto agg_ctx, ctx->GetBreakerState<tiforth::HashAggContext>(ctx_id));
         return std::make_unique<tiforth::HashAggResultSourceOp>(std::move(agg_ctx), /*max_output_rows=*/1 << 30);
       }));
