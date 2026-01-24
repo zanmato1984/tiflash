@@ -322,6 +322,11 @@ if (ENABLE_CLARA)
 endif ()
 include (cmake/find_xxhash.cmake)
 
+option (ENABLE_TIFORTH "Enable TiForth (tiforth) compute library integration" OFF)
+option (TIFLASH_USE_SYSTEM_TIFORTH "Use system-installed TiForth instead of in-tree source" OFF)
+set (TIFLASH_TIFORTH_LINKAGE "auto" CACHE STRING "TiForth linkage (auto|shared|static)")
+set_property (CACHE TIFLASH_TIFORTH_LINKAGE PROPERTY STRINGS auto shared static)
+
 if (OS_LINUX AND ARCH_AMD64 AND TIFLASH_ENABLE_AVX512_SUPPORT)
     option (ENABLE_QPL "Enable Intel Query Processing Library" OFF)
 endif()

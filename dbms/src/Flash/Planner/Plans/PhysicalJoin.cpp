@@ -33,6 +33,14 @@
 #include <common/logger_useful.h>
 #include <fmt/format.h>
 
+#if defined(TIFLASH_ENABLE_TIFORTH)
+#include <DataTypes/DataTypeNullable.h>
+#include <Flash/TiForth/TiFlashMemoryPool.h>
+#include <Flash/TiForth/TiForthHashJoinBlockInputStream.h>
+
+#include <arrow/memory_pool.h>
+#endif // defined(TIFLASH_ENABLE_TIFORTH)
+
 namespace DB
 {
 namespace FailPoints
@@ -193,6 +201,9 @@ PhysicalPlanNodePtr PhysicalJoin::build(
 
     recordJoinExecuteInfo(dag_context, executor_id, build_plan->execId(), join_ptr);
 
+    const bool has_other_conditions = join.left_conditions_size() != 0 || join.right_conditions_size() != 0
+        || join.other_conditions_size() != 0 || join.other_eq_conditions_from_in_size() != 0;
+
     auto physical_join = std::make_shared<PhysicalJoin>(
         executor_id,
         join_output_schema,
@@ -202,7 +213,11 @@ PhysicalPlanNodePtr PhysicalJoin::build(
         build_plan,
         join_ptr,
         probe_side_prepare_actions,
-        build_side_prepare_actions);
+        build_side_prepare_actions,
+        std::move(probe_key_names),
+        std::move(build_key_names),
+        join.join_type(),
+        has_other_conditions);
     return physical_join;
 }
 
@@ -280,6 +295,85 @@ void PhysicalJoin::buildSideTransform(DAGPipeline & build_pipeline, Context & co
 
 void PhysicalJoin::buildBlockInputStreamImpl(DAGPipeline & pipeline, Context & context, size_t max_streams)
 {
+#if defined(TIFLASH_ENABLE_TIFORTH)
+    if (context.getSettingsRef().enable_tiforth_executor && context.getSettingsRef().enable_tiforth_translate_dag)
+    {
+        const bool is_inner = join_type == tipb::JoinType::TypeInnerJoin;
+        const bool arity_supported = probe_key_names.size() == build_key_names.size() && !probe_key_names.empty()
+            && probe_key_names.size() <= 2;
+        if (is_inner && !has_other_conditions && !fine_grained_shuffle.enabled() && arity_supported)
+        {
+            DAGPipeline build_pipeline;
+            build()->buildBlockInputStream(build_pipeline, context, max_streams);
+            executeExpression(
+                build_pipeline,
+                build_side_prepare_actions,
+                log,
+                "append join key and join filters for build side (TiForth join)");
+
+            DAGPipeline probe_pipeline;
+            probe()->buildBlockInputStream(probe_pipeline, context, max_streams);
+            executeExpression(
+                probe_pipeline,
+                probe_side_prepare_actions,
+                log,
+                "append join key and join filters for probe side (TiForth join)");
+
+            if (build_pipeline.streams.size() == 1 && probe_pipeline.streams.size() == 1)
+            {
+                const auto probe_header = probe_pipeline.firstStream()->getHeader();
+                const auto build_header = build_pipeline.firstStream()->getHeader();
+                bool has_string = false;
+                for (const auto & col : probe_header)
+                {
+                    if (col.type == nullptr)
+                        continue;
+                    if (removeNullable(col.type)->isStringOrFixedString())
+                    {
+                        has_string = true;
+                        break;
+                    }
+                }
+                if (!has_string)
+                {
+                    for (const auto & col : build_header)
+                    {
+                        if (col.type == nullptr)
+                            continue;
+                        if (removeNullable(col.type)->isStringOrFixedString())
+                        {
+                            has_string = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!has_string && getSchema().size() == probe_header.columns() + build_header.columns())
+                {
+                    auto pool_holder = DB::TiForth::MakeCurrentMemoryTrackerPoolOrDefault(arrow::default_memory_pool());
+
+                    NamesAndTypesList output_columns;
+                    for (const auto & out : getSchema())
+                        output_columns.emplace_back(out.name, out.type);
+
+                    pipeline.streams.resize(1);
+                    pipeline.firstStream() = std::make_shared<DB::TiForth::TiForthHashJoinBlockInputStream>(
+                        probe_pipeline.firstStream(),
+                        build_pipeline.firstStream(),
+                        probe_key_names,
+                        build_key_names,
+                        output_columns,
+                        /*input_options_by_name=*/std::unordered_map<String, DB::TiForth::ColumnOptions>{},
+                        std::move(pool_holder),
+                        probe_header,
+                        build_header);
+                    return;
+                }
+            }
+        }
+    }
+#endif // defined(TIFLASH_ENABLE_TIFORTH)
+
     /// The build side needs to be transformed first.
     {
         DAGPipeline build_pipeline;

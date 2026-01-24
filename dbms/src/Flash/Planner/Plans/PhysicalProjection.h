@@ -18,6 +18,8 @@
 #include <Interpreters/ExpressionActions.h>
 #include <tipb/executor.pb.h>
 
+#include <vector>
+
 namespace DB
 {
 class PhysicalProjection : public PhysicalUnary
@@ -58,10 +60,12 @@ public:
         const String & req_id,
         const PhysicalPlanNodePtr & child_,
         const String & extra_info_,
-        const ExpressionActionsPtr & project_actions_)
+        const ExpressionActionsPtr & project_actions_,
+        std::vector<tipb::Expr> tipb_exprs_ = {})
         : PhysicalUnary(executor_id_, PlanType::Projection, schema_, fine_grained_shuffle_, req_id, child_)
         , extra_info(extra_info_)
         , project_actions(project_actions_)
+        , tipb_exprs(std::move(tipb_exprs_))
     {}
 
     void finalizeImpl(const Names & parent_require) override;
@@ -81,5 +85,6 @@ private:
     const String extra_info;
 
     ExpressionActionsPtr project_actions;
+    std::vector<tipb::Expr> tipb_exprs;
 };
 } // namespace DB

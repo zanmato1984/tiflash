@@ -165,6 +165,11 @@ target_link_libraries (tiflash tiflash_common_io)
 target_include_directories (tiflash BEFORE PRIVATE ${COMMON_INCLUDE_DIR})
 target_include_directories (tiflash PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
+if (ENABLE_TIFORTH)
+    target_compile_definitions(tiflash PRIVATE TIFLASH_ENABLE_TIFORTH=1)
+    target_link_libraries(tiflash tiforth::tiforth)
+endif ()
+
 if (ENABLE_TIFLASH_SERVER)
     target_link_libraries (tiflash tiflash-server-lib)
 endif ()

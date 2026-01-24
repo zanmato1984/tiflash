@@ -9,7 +9,10 @@
     {
       "name": "base",
       "hidden": true,
-      "generator": "Ninja"
+      "generator": "Ninja",
+      "cacheVariables": {
+        "ENABLE_TIFORTH": "ON"
+      }
     },
     {
       "name": "base-debug",
@@ -72,8 +75,7 @@
         "tests-on"
       ],
       "displayName": "Development: DEBUG build with tests enabled",
-      "cacheVariables": {},
-      "binaryDir": "${sourceDir}/cmake-build-debug"
+      "cacheVariables": {}
     },
     {
         "name": "dev-coverage",

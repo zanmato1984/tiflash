@@ -18,6 +18,8 @@
 #include <Interpreters/ExpressionActions.h>
 #include <tipb/executor.pb.h>
 
+#include <vector>
+
 namespace DB
 {
 class PhysicalFilter : public PhysicalUnary
@@ -36,9 +38,11 @@ public:
         const FineGrainedShuffle & fine_grained_shuffle_,
         const String & req_id,
         const PhysicalPlanNodePtr & child_,
+        std::vector<tipb::Expr> conditions_,
         const String & filter_column_,
         const ExpressionActionsPtr & before_filter_actions_)
         : PhysicalUnary(executor_id_, PlanType::Filter, schema_, fine_grained_shuffle_, req_id, child_)
+        , conditions(std::move(conditions_))
         , filter_column(filter_column_)
         , before_filter_actions(before_filter_actions_)
     {}
@@ -57,6 +61,7 @@ private:
         size_t /*concurrency*/) override;
 
 private:
+    std::vector<tipb::Expr> conditions;
     String filter_column;
     ExpressionActionsPtr before_filter_actions;
 };

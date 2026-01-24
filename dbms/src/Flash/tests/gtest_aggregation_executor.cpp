@@ -754,7 +754,7 @@ try
 {
     std::vector<ASTPtr> functions = {Max(col("s1")), Min(col("s1")), Sum(col("s2"))};
     ColumnsWithTypeAndName functions_result
-        = {toNullableVec<Int64>({3}), toNullableVec<Int64>({1}), toVec<UInt64>({6})};
+        = {toNullableVec<Int64>({3}), toNullableVec<Int64>({1}), toNullableVec<Int64>({6})};
     auto test_single_function = [&](size_t index) {
         auto request = context.scan("test_db", "test_table").aggregation({functions[index]}, {}).build(context);
         WRAP_FOR_AGG_FAILPOINTS_START

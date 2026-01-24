@@ -34,9 +34,10 @@ ColumnsWithTypeAndName readBlock(BlockInputStreamPtr stream);
 ColumnsWithTypeAndName readBlocks(std::vector<BlockInputStreamPtr> streams);
 
 #define WRAP_FOR_TEST_BEGIN                    \
-    for (auto enable_pipeline : {false, true}) \
+    for (auto executor_mode : {ExecutorTest::ExecutorMode::Dag, ExecutorTest::ExecutorMode::Pipeline, ExecutorTest::ExecutorMode::TiForth}) \
     {                                          \
-        enablePipeline(enable_pipeline);
+        enablePipeline(executor_mode);          \
+        [[maybe_unused]] const bool enable_pipeline = (executor_mode == ExecutorTest::ExecutorMode::Pipeline);
 
 #define WRAP_FOR_TEST_END }
 
@@ -78,6 +79,29 @@ public:
     void initializeClientInfo() const;
 
     DAGContext & getDAGContext();
+
+    enum class ExecutorMode
+    {
+        Dag,
+        Pipeline,
+        TiForth,
+    };
+
+    static constexpr const char * toString(ExecutorMode mode)
+    {
+        switch (mode)
+        {
+        case ExecutorMode::Dag:
+            return "dag";
+        case ExecutorMode::Pipeline:
+            return "pipeline";
+        case ExecutorMode::TiForth:
+            return "tiforth";
+        }
+        return "unknown";
+    }
+
+    void enablePipeline(ExecutorMode mode) const;
 
     void enablePipeline(bool is_enable) const;
 

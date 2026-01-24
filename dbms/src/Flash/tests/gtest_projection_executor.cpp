@@ -421,7 +421,7 @@ try
               .build(context);
     executeAndAssertColumnsEqual(
         req,
-        {toVec<UInt64>({5}), toVec<UInt64>({5}), toNullableVec<Int64>({1}), toNullableVec<Int64>({1})});
+        {toVec<UInt64>({5}), toNullableVec<Int64>({5}), toNullableVec<Int64>({1}), toNullableVec<Int64>({1})});
 }
 CATCH
 
