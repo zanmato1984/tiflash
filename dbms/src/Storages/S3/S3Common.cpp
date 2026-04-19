@@ -19,6 +19,7 @@
 #include <Common/RemoteHostFilter.h>
 #include <Common/Stopwatch.h>
 #include <Common/StringUtils/StringUtils.h>
+#include <Common/SyncPoint/SyncPoint.h>
 #include <Common/TiFlashMetrics.h>
 #include <IO/BaseFile/PosixRandomAccessFile.h>
 #include <IO/Buffer/ReadBufferFromRandomAccessFile.h>
@@ -34,6 +35,7 @@
 #include <Storages/S3/S3Common.h>
 #include <Storages/S3/S3Filename.h>
 #include <Storages/S3/S3RandomAccessFile.h>
+#include <Storages/S3/S3ReadLimiter.h>
 #include <aws/core/Region.h>
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/signer/AWSAuthV4Signer.h>
@@ -156,6 +158,7 @@ private:
 namespace DB::FailPoints
 {
 extern const char force_set_mocked_s3_object_mtime[];
+extern const char force_syncpoint_on_s3_upload[];
 } // namespace DB::FailPoints
 namespace DB::S3
 {
@@ -180,20 +183,28 @@ TiFlashS3Client::TiFlashS3Client(
     const Aws::Auth::AWSCredentials & credentials,
     const Aws::Client::ClientConfiguration & clientConfiguration,
     Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy signPayloads,
-    bool useVirtualAddressing)
+    bool useVirtualAddressing,
+    std::shared_ptr<S3ReadLimiter> s3_read_limiter_,
+    std::shared_ptr<S3ReadMetricsRecorder> s3_read_metrics_recorder_)
     : Aws::S3::S3Client(credentials, clientConfiguration, signPayloads, useVirtualAddressing)
     , bucket_name(bucket_name_)
     , key_root(normalizedRoot(root_))
+    , s3_read_limiter(std::move(s3_read_limiter_))
+    , s3_read_metrics_recorder(std::move(s3_read_metrics_recorder_))
     , log(Logger::get(fmt::format("bucket={} root={}", bucket_name, key_root)))
 {}
 
 TiFlashS3Client::TiFlashS3Client(
     const String & bucket_name_,
     const String & root_,
-    std::unique_ptr<Aws::S3::S3Client> && raw_client)
+    std::unique_ptr<Aws::S3::S3Client> && raw_client,
+    std::shared_ptr<S3ReadLimiter> s3_read_limiter_,
+    std::shared_ptr<S3ReadMetricsRecorder> s3_read_metrics_recorder_)
     : Aws::S3::S3Client(std::move(*raw_client))
     , bucket_name(bucket_name_)
     , key_root(normalizedRoot(root_))
+    , s3_read_limiter(std::move(s3_read_limiter_))
+    , s3_read_metrics_recorder(std::move(s3_read_metrics_recorder_))
     , log(Logger::get(fmt::format("bucket={} root={}", bucket_name, key_root)))
 {}
 
@@ -330,6 +341,8 @@ void ClientFactory::init(const StorageS3Config & config_, bool mock_s3_)
         return;
 
     config = config_;
+    if (shared_s3_read_metrics_recorder == nullptr)
+        shared_s3_read_metrics_recorder = std::make_shared<S3ReadMetricsRecorder>();
     RUNTIME_CHECK(!config.root.starts_with("//"), config.root);
     config.root = normalizedRoot(config.root);
 
@@ -343,7 +356,12 @@ void ClientFactory::init(const StorageS3Config & config_, bool mock_s3_)
     {
         auto [s3_client, vendor] = create(config, log);
         cloud_vendor = vendor;
-        shared_tiflash_client = std::make_shared<TiFlashS3Client>(config.bucket, config.root, std::move(s3_client));
+        shared_tiflash_client = std::make_shared<TiFlashS3Client>(
+            config.bucket,
+            config.root,
+            std::move(s3_client),
+            shared_s3_read_limiter,
+            shared_s3_read_metrics_recorder);
     }
     else
     {
@@ -351,7 +369,13 @@ void ClientFactory::init(const StorageS3Config & config_, bool mock_s3_)
         Aws::Client::ClientConfiguration cfg(true, /*defaultMode=*/"standard", /*shouldDisableIMDS=*/true);
         cfg.region = Aws::Region::US_EAST_1; // default region
         Aws::Auth::AWSCredentials cred("mock_access_key", "mock_secret_key");
-        shared_tiflash_client = std::make_unique<tests::MockS3Client>(config.bucket, config.root, cred, cfg);
+        shared_tiflash_client = std::make_unique<tests::MockS3Client>(
+            config.bucket,
+            config.root,
+            cred,
+            cfg,
+            shared_s3_read_limiter,
+            shared_s3_read_metrics_recorder);
     }
     client_is_inited = true; // init finish
 }
@@ -373,6 +397,8 @@ std::shared_ptr<TiFlashS3Client> ClientFactory::initClientFromWriteNode()
     assert(kv_cluster != nullptr);
 
     const auto disagg_config = getDisaggConfigFromDisaggWriteNodes(kv_cluster, log);
+    if (shared_s3_read_metrics_recorder == nullptr)
+        shared_s3_read_metrics_recorder = std::make_shared<S3ReadMetricsRecorder>();
     // update connection fields and leave other fields unchanged
     config.endpoint = disagg_config.s3_config().endpoint();
     config.root = normalizedRoot(disagg_config.s3_config().root());
@@ -381,7 +407,12 @@ std::shared_ptr<TiFlashS3Client> ClientFactory::initClientFromWriteNode()
 
     auto [s3_client, vendor] = create(config, log);
     cloud_vendor = vendor;
-    shared_tiflash_client = std::make_shared<TiFlashS3Client>(config.bucket, config.root, std::move(s3_client));
+    shared_tiflash_client = std::make_shared<TiFlashS3Client>(
+        config.bucket,
+        config.root,
+        std::move(s3_client),
+        shared_s3_read_limiter,
+        shared_s3_read_metrics_recorder);
     client_is_inited = true; // init finish
     return shared_tiflash_client;
 }
@@ -662,6 +693,14 @@ static bool doUploadFile(
     {
         ProfileEvents::increment(is_dmfile ? ProfileEvents::S3PutDMFileRetry : ProfileEvents::S3PutObjectRetry);
     }
+#ifdef FIU_ENABLE
+    if (auto v = FailPointHelper::getFailPointVal(FailPoints::force_syncpoint_on_s3_upload); v)
+    {
+        const auto & prefix = std::any_cast<String>(v.value());
+        if (!prefix.empty() && startsWith(remote_fname, prefix))
+            SYNC_FOR("before_S3Common::uploadFile");
+    }
+#endif
     auto result = client.PutObject(req);
     if (!result.IsSuccess())
     {
@@ -849,7 +888,7 @@ void listPrefix(
         }
         GET_METRIC(tiflash_storage_s3_request_seconds, type_list_objects).Observe(sw_list.elapsedSeconds());
 
-        PageResult page_res{};
+        bool should_continue = true;
         const auto & result = outcome.GetResult();
         auto page_keys = result.GetContents().size();
         num_keys += page_keys;
@@ -858,22 +897,27 @@ void listPrefix(
         {
             if (!need_cut)
             {
-                page_res = pager(object);
+                should_continue = pager(object).more;
             }
             else
             {
                 // Copy the `Object` to cut off the `root` from key, the cost should be acceptable :(
                 auto object_without_root = object;
                 object_without_root.SetKey(object.GetKey().substr(cut_size, object.GetKey().size()));
-                page_res = pager(object_without_root);
+                should_continue = pager(object_without_root).more;
             }
-            if (!page_res.more)
+            if (!should_continue)
                 break;
+        }
+
+        if (!should_continue)
+        {
+            break;
         }
 
         // handle the result size over max size
         done = !result.GetIsTruncated();
-        if (!done && page_res.more)
+        if (!done)
         {
             const auto & next_token = result.GetNextContinuationToken();
             req.SetContinuationToken(next_token);
@@ -936,7 +980,7 @@ void listPrefixWithDelimiter(
         }
         GET_METRIC(tiflash_storage_s3_request_seconds, type_list_objects).Observe(sw_list.elapsedSeconds());
 
-        PageResult page_res{};
+        bool should_continue = true;
         const auto & result = outcome.GetResult();
         auto page_keys = result.GetCommonPrefixes().size();
         num_keys += page_keys;
@@ -944,22 +988,27 @@ void listPrefixWithDelimiter(
         {
             if (!need_cut)
             {
-                page_res = pager(prefix);
+                should_continue = pager(prefix).more;
             }
             else
             {
                 // Copy the `CommonPrefix` to cut off the `root`, the cost should be acceptable :(
                 auto prefix_without_root = prefix;
                 prefix_without_root.SetPrefix(prefix.GetPrefix().substr(cut_size, prefix.GetPrefix().size()));
-                page_res = pager(prefix_without_root);
+                should_continue = pager(prefix_without_root).more;
             }
-            if (!page_res.more)
+            if (!should_continue)
                 break;
+        }
+
+        if (!should_continue)
+        {
+            break;
         }
 
         // handle the result size over max size
         done = !result.GetIsTruncated();
-        if (!done && page_res.more)
+        if (!done)
         {
             const auto & next_token = result.GetNextContinuationToken();
             req.SetContinuationToken(next_token);

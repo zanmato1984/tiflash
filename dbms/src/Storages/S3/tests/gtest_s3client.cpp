@@ -15,8 +15,10 @@
 #include <Common/FailPoint.h>
 #include <Common/Logger.h>
 #include <Debug/TiFlashTestEnv.h>
+#include <IO/BaseFile/RateLimiter.h>
 #include <Storages/S3/Lifecycle.h>
 #include <Storages/S3/S3Common.h>
+#include <Storages/S3/S3ReadLimiter.h>
 #include <TestUtils/TiFlashTestBasic.h>
 #include <aws/core/AmazonWebServiceRequest.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
@@ -249,6 +251,107 @@ try
         EXPECT_EQ(prefixes[0], client->root() + "s999/data/");
         EXPECT_EQ(prefixes[1], client->root() + "s999/manifest/");
     }
+}
+CATCH
+
+TEST_F(S3ClientTest, PublishS3ReadLimiter)
+{
+    auto prev_limiter = ClientFactory::instance().sharedTiFlashClient()->getS3ReadLimiter();
+    SCOPE_EXIT({ ClientFactory::instance().setS3ReadLimiter(prev_limiter); });
+
+    auto limiter = std::make_shared<S3ReadLimiter>(4096, 7);
+    ClientFactory::instance().setS3ReadLimiter(limiter);
+    ASSERT_EQ(client->getS3ReadLimiter(), limiter);
+
+    IORateLimiter io_rate_limiter;
+    IORateLimitConfig cfg;
+    cfg.s3_max_read_bytes_per_sec = 8192;
+    io_rate_limiter.updateLimiterByConfig(cfg);
+
+    auto published = io_rate_limiter.getS3ReadLimiter();
+    ASSERT_NE(published, nullptr);
+    ClientFactory::instance().setS3ReadLimiter(published);
+    ASSERT_EQ(ClientFactory::instance().sharedTiFlashClient()->getS3ReadLimiter(), published);
+    ASSERT_EQ(published->maxReadBytesPerSec(), 8192);
+
+    cfg.s3_max_read_bytes_per_sec = 0;
+    io_rate_limiter.updateLimiterByConfig(cfg);
+    auto disabled = io_rate_limiter.getS3ReadLimiter();
+    ASSERT_EQ(disabled, published);
+    ASSERT_EQ(disabled->maxReadBytesPerSec(), 0);
+}
+
+TEST_F(S3ClientTest, ListPrefixEarlyStopOnTruncatedResult)
+try
+{
+    // Keep key count above S3's default one-page listing size so listing is truncated.
+    constexpr size_t key_count = 1001;
+    SCOPE_EXIT({
+        for (size_t i = 0; i < key_count; ++i)
+            deleteObject(*client, fmt::format("s999/list_prefix_early_stop/key_{}", i));
+    });
+    for (size_t i = 0; i < key_count; ++i)
+    {
+        uploadEmptyFile(*client, fmt::format("s999/list_prefix_early_stop/key_{}", i));
+    }
+
+    Aws::S3::Model::ListObjectsV2Request req;
+    req.WithBucket(client->bucket()).WithPrefix(client->root() + "s999/list_prefix_early_stop/");
+    auto outcome = client->ListObjectsV2(req);
+    ASSERT_TRUE(outcome.IsSuccess());
+    const auto & result = outcome.GetResult();
+    ASSERT_TRUE(result.GetIsTruncated());
+    ASSERT_EQ(result.GetContents().size(), 1000);
+    ASSERT_FALSE(result.GetNextContinuationToken().empty());
+
+    size_t visited = 0;
+    listPrefix(*client, "s999/list_prefix_early_stop/", [&](const Aws::S3::Model::Object & object) {
+        UNUSED(object);
+        ++visited;
+        return PageResult{.num_keys = 1, .more = false};
+    });
+
+    ASSERT_EQ(visited, 1);
+}
+CATCH
+
+TEST_F(S3ClientTest, ListPrefixWithDelimiterEarlyStopOnTruncatedResult)
+try
+{
+    // Keep common prefix count above S3's default one-page listing size so listing is truncated.
+    constexpr size_t prefix_count = 1001;
+    SCOPE_EXIT({
+        for (size_t i = 0; i < prefix_count; ++i)
+            deleteObject(*client, fmt::format("s999/list_prefix_with_delimiter_early_stop/dir_{}/key", i));
+    });
+    for (size_t i = 0; i < prefix_count; ++i)
+    {
+        uploadEmptyFile(*client, fmt::format("s999/list_prefix_with_delimiter_early_stop/dir_{}/key", i));
+    }
+
+    Aws::S3::Model::ListObjectsV2Request req;
+    req.WithBucket(client->bucket())
+        .WithPrefix(client->root() + "s999/list_prefix_with_delimiter_early_stop/")
+        .WithDelimiter("/");
+    auto outcome = client->ListObjectsV2(req);
+    ASSERT_TRUE(outcome.IsSuccess());
+    const auto & result = outcome.GetResult();
+    ASSERT_TRUE(result.GetIsTruncated());
+    ASSERT_EQ(result.GetCommonPrefixes().size(), 1000);
+    ASSERT_FALSE(result.GetNextContinuationToken().empty());
+
+    size_t visited = 0;
+    listPrefixWithDelimiter(
+        *client,
+        "s999/list_prefix_with_delimiter_early_stop/",
+        "/",
+        [&](const Aws::S3::Model::CommonPrefix & prefix) {
+            UNUSED(prefix);
+            ++visited;
+            return PageResult{.num_keys = 1, .more = false};
+        });
+
+    ASSERT_EQ(visited, 1);
 }
 CATCH
 
